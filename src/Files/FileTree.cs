@@ -17,6 +17,9 @@ public sealed class TreeNode
     /// (approximate when the scan budget runs out on huge trees).
     /// </summary>
     public long Size { get; set; }
+
+    /// <summary>True when Size is final; false while it is still a lower-bound estimate.</summary>
+    public bool SizeExact { get; set; }
     public bool Expanded { get; set; }
     public bool ChildrenLoaded { get; set; }
     public List<TreeNode> Children { get; } = new();
@@ -96,6 +99,7 @@ public sealed class FileTree
                     Depth = node.Depth + 1,
                     Parent = node,
                     Size = e is FileInfo fi ? SafeLength(fi) : 0,
+                    SizeExact = e is FileInfo,
                 };
                 node.Children.Add(child);
                 if (e is DirectoryInfo di) dirMtimes[child] = di.LastWriteTimeUtc;
@@ -134,7 +138,10 @@ public sealed class FileTree
         foreach (var (child, mtime) in dirMtimes)
         {
             if (_sizeCache.TryGetValue(child.FullPath, out var hit) && hit.WriteUtc == mtime)
+            {
                 child.Size = hit.Size;
+                child.SizeExact = true;
+            }
             else
                 (need ??= new()).Add((child, mtime));
         }
@@ -151,6 +158,7 @@ public sealed class FileTree
         foreach (var (node, size, mtime, complete) in sizer.Snapshot())
         {
             node.Size = size;
+            node.SizeExact = complete;
             if (!complete) continue;
             if (_sizeCache.Count > 8192) _sizeCache.Clear();
             _sizeCache[node.FullPath] = (size, mtime);

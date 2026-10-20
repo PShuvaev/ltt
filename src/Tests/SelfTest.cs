@@ -659,6 +659,15 @@ internal static class SelfTest
                 "size sort: a folder's size is its recursive total");
             Check(kids.First(c => c.Name == "big.txt").Size == 1000,
                 "size sort: a file's size is its length");
+            Check(kids.First(c => c.Name == "big.txt").SizeExact && kids.First(c => c.Name == "hugeDir").SizeExact,
+                "size display: small trees settle as exact right away");
+            Check(App.FormatSize(0, true) == "0" && App.FormatSize(0, false) == "…"
+                  && App.FormatSize(999, true) == "999" && App.FormatSize(1024, true) == "1K"
+                  && App.FormatSize(1536, true) == "1.5K" && App.FormatSize(10 * 1024, true) == "10K"
+                  && App.FormatSize(999_000, true) == "976K" && App.FormatSize(1_048_576, true) == "1M"
+                  && App.FormatSize(1_610_612_736, true) == "1.5G" && App.FormatSize(2_199_023_255_552, true) == "2T"
+                  && App.FormatSize(1536, false) == "≥1.5K",
+                "size display: compact K/M/G formatting with a lower-bound marker");
 
             // Disk-delete protection: roots and system-critical paths are undeletable.
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);

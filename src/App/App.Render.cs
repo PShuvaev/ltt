@@ -102,6 +102,29 @@ internal sealed partial class App
         }
     }
 
+    /// <summary>Compact right-aligned size: `999`, `1.5K`, `23M`, `4.2G`; a leading `≥` marks a lower bound.</summary>
+    internal static string FormatSize(long bytes, bool exact)
+    {
+        if (bytes == 0) return exact ? "0" : "…";
+        string core;
+        if (bytes < 1024)
+        {
+            core = bytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        }
+        else
+        {
+            double v = bytes;
+            int u = -1;
+            while (v >= 1024 && u < 5) { v /= 1024; u++; }
+            string num = v >= 100
+                ? Math.Round(v).ToString(System.Globalization.CultureInfo.InvariantCulture)
+                : v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+            if (num == "1000" && u < 5) { num = "1"; u++; }
+            core = num + "KMGTPE"[Math.Max(u, 0)];
+        }
+        return exact ? core : "≥" + core;
+    }
+
     private static void WriteAt(int x, int y, string text, ConsoleColor fg, ConsoleColor bg, int width)
     {
         if (width <= 0 || x < 0 || y < 0) return;
@@ -327,7 +350,16 @@ internal sealed partial class App
                 var fg = sel ? ConsoleColor.White
                     : node.Ignored ? ConsoleColor.DarkGray // git-ignored entries stay in the background
                     : node.IsDir ? ConsoleColor.White : ConsoleColor.Gray;
-                WriteAt(0, y, text, fg, bg, leftW);
+                // Size hugs the right edge in a dim colour; roots have no size of their own.
+                const int sizeColW = 8;
+                if (leftW >= 20)
+                {
+                    string size = node.IsRoot ? "" : FormatSize(node.Size, node.SizeExact);
+                    WriteAt(0, y, text, fg, bg, leftW - sizeColW);
+                    WriteAt(leftW - sizeColW, y, size.PadLeft(sizeColW),
+                        sel ? ConsoleColor.Gray : ConsoleColor.DarkGray, bg, sizeColW);
+                }
+                else WriteAt(0, y, text, fg, bg, leftW);
             }
             else WriteAt(0, y, "", ConsoleColor.Gray, ConsoleColor.Black, leftW);
 
