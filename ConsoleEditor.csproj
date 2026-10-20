@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>ConsoleEditor</RootNamespace>
+    <AssemblyName>console-editor</AssemblyName>
+    <!-- No apphost: run via `dotnet run` / `dotnet bin/.../console-editor.dll` -->
+    <UseAppHost>false</UseAppHost>
+  </PropertyGroup>
+
+</Project>
