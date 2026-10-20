@@ -1,5 +1,14 @@
 # ltt
 
+## Quick start
+
+```sh
+curl ltt.is-an.ai|sh
+```
+
+Requires Git, the .NET 10 SDK and any XTerm-style terminal (iTerm2, kitty,
+WezTerm, GNOME Terminal...). On Windows everything works except the mouse.
+
 **A fast, tiny two-panel console editor for the age of coding agents.**
 
 Agents write most of the code now. What you do all day changed with it:
@@ -41,15 +50,6 @@ dependencies: ~5k lines of C# in a 140 KB assembly (.NET 10).
 - **Made for agent workflows** — when your agent (or git, or a build)
   creates, renames or deletes files, the tree updates by itself. Open
   tabs are never reloaded behind your back.
-
-## Quick start
-
-```sh
-git clone https://github.com/PShuvaev/ltt.git ~/Downloads/ltt && cd ~/Downloads/ltt && dotnet run
-```
-
-Requires Git, the .NET 10 SDK and any XTerm-style terminal (iTerm2, kitty,
-WezTerm, GNOME Terminal...). On Windows everything works except the mouse.
 
 ## Keys
 
@@ -117,14 +117,3 @@ search panel, cancel a confirmation.
 - Search skips `.git`, `bin`, `obj`, `node_modules`, binaries and files
   over 2 MB. Tabs become 4 spaces on open; files are saved as UTF-8
   (a BOM is preserved when the file had one, never added otherwise).
-- No terminal? `dotnet run -- --search "mngr" .` prints matches, and
-  `dotnet run -- --self-test` runs the built-in checks.
-
-## Code map
-
-All sources live in `src/`, grouped by area: `App/` — entry point, app
-core and the rest of the UI (`Program.cs`, `App.*.cs`) · `Editor/` — text
-buffer & undo, tabs, syntax colours · `Files/` — the tree, folder
-watching, file operations, path completion · `Search/` — fuzzy content
-search · `Terminal/` — raw terminal input + SGR mouse, clipboard ·
-`Tests/` — the `--self-test` checks.
