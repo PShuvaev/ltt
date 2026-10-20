@@ -121,6 +121,7 @@ internal sealed partial class App
     private string _pathBaseDir = "";          // directory a file/folder is created in
     private string? _pendingRenamePath;        // what is being renamed (F2)
     private bool _pendingRenameIsDir;
+    private bool _renameFromEditor;            // F2 came from the editor — return focus there
     private string? _pendingDeletePath;        // what is being deleted from disk (Shift+Delete)
     private bool _pendingDeleteIsDir;
 
@@ -177,6 +178,15 @@ internal sealed partial class App
         _liveSource = new List<SearchHit>();
     }
 
+    private void DispatchEvent(InputEvent? ev)
+    {
+        switch (ev)
+        {
+            case KeyInput k: HandleKey(k.Key); break;
+            case MouseInput m: HandleMouse(m); break;
+        }
+    }
+
     public void Run(ITerminalInput input)
     {
         _watcher = new FolderWatcher();
@@ -189,12 +199,14 @@ internal sealed partial class App
                 bool dirty = false;
                 if (input.TryRead(WatchTickMs, out var ev))
                 {
-                    switch (ev)
-                    {
-                        case KeyInput k: HandleKey(k.Key); break;
-                        case MouseInput m: HandleMouse(m); break;
-                    }
+                    DispatchEvent(ev);
                     dirty = true;
+                    // Pump whatever else is already queued (trackpads deliver
+                    // dozens of wheel events per frame) so a single redraw
+                    // serves the whole burst instead of lagging behind input.
+                    for (int pumped = 0; pumped < 64 && _running
+                         && input.TryRead(0, out var extra); pumped++)
+                        DispatchEvent(extra);
                 }
                 if (Console.WindowWidth != _lastW || Console.WindowHeight != _lastH)
                     dirty = true; // the terminal was resized while we waited for input

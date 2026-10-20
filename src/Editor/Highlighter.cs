@@ -2,12 +2,15 @@ namespace ConsoleEditor;
 
 public enum TokenKind { Normal, Keyword, Str, Comment, Number, Preproc }
 
-public readonly record struct Token(string Text, TokenKind Kind);
+/// <summary>A highlighted range of the source line (no text is copied).</summary>
+public readonly record struct Token(int Start, int Length, TokenKind Kind);
 
 /// <summary>
 /// Simple line-based syntax highlighting with no external dependencies:
 /// keywords, strings, comments (//, /* */, #), numbers, preprocessor.
 /// Multi-line /* */ is supported via inBlockComment carried between lines.
+/// Works on spans and returns ranges, so tokenizing allocates nothing
+/// per token — important because it runs on every rendered frame.
 /// </summary>
 public static class Highlighter
 {
@@ -71,112 +74,130 @@ public static class Highlighter
             _ => (CLike, false, true),
         };
 
-    public static List<Token> Tokenize(string line, string ext, ref bool inBlockComment)
+    public static List<Token> Tokenize(ReadOnlySpan<char> line, string ext, ref bool inBlockComment)
+    {
+        var tokens = new List<Token>();
+        TokenizeInto(tokens, line, ext, ref inBlockComment);
+        return tokens;
+    }
+
+    /// <summary>Tokenize into a caller-owned list (cleared first) to avoid per-line allocation.</summary>
+    public static void TokenizeInto(List<Token> tokens, ReadOnlySpan<char> line, string ext, ref bool inBlockComment)
     {
         var (keywords, hashComment, slashComment) = LangFor(ext);
-        var tokens = new List<Token>();
-        var buf = new System.Text.StringBuilder();
+        var kwLookup = keywords.GetAlternateLookup<ReadOnlySpan<char>>();
+        tokens.Clear();
 
-        void Flush(TokenKind kind)
+        void Emit(TokenKind kind, int start, int length)
         {
-            if (buf.Length == 0) return;
-            tokens.Add(new Token(buf.ToString(), kind));
-            buf.Clear();
-        }
-
-        // The rest of the line is a comment.
-        void RestAsComment(int from)
-        {
-            Flush(TokenKind.Normal);
-            buf.Append(line, from, line.Length - from);
-            Flush(TokenKind.Comment);
+            if (length > 0) tokens.Add(new Token(start, length, kind));
         }
 
         // Preprocessor in C-like languages: #include, #if, #region ...
-        string trimmed = line.TrimStart();
-        if (!hashComment && !inBlockComment && trimmed.StartsWith('#'))
+        if (!hashComment && !inBlockComment && line.TrimStart().StartsWith("#"))
         {
-            tokens.Add(new Token(line, TokenKind.Preproc));
-            return tokens;
+            tokens.Add(new Token(0, line.Length, TokenKind.Preproc));
+            return;
         }
 
         int i = 0;
+        int pend = 0; // start of the pending Normal run [pend, i)
+        void FlushNormal(int upto)
+        {
+            Emit(TokenKind.Normal, pend, upto - pend);
+            pend = upto;
+        }
+
         while (i < line.Length)
         {
             char c = line[i];
 
             if (inBlockComment)
             {
-                int end = line.IndexOf("*/", i, StringComparison.Ordinal);
-                if (end < 0) { buf.Append(line, i, line.Length - i); i = line.Length; }
-                else { buf.Append(line, i, end + 2 - i); i = end + 2; inBlockComment = false; }
-                Flush(TokenKind.Comment);
+                int end = line[i..].IndexOf("*/");
+                if (end < 0)
+                {
+                    Emit(TokenKind.Comment, i, line.Length - i);
+                    i = line.Length;
+                }
+                else
+                {
+                    Emit(TokenKind.Comment, i, end + 2);
+                    i += end + 2;
+                    inBlockComment = false;
+                }
+                pend = i;
                 continue;
             }
 
             if (slashComment && c == '/' && i + 1 < line.Length && line[i + 1] == '/')
             {
-                RestAsComment(i);
+                FlushNormal(i);
+                Emit(TokenKind.Comment, i, line.Length - i);
+                i = line.Length;
+                pend = i;
                 break;
             }
             if (slashComment && c == '/' && i + 1 < line.Length && line[i + 1] == '*')
             {
-                Flush(TokenKind.Normal);
+                FlushNormal(i);
                 inBlockComment = true;
-                buf.Append("/*");
-                i += 2;
-                continue;
+                continue; // the inBlockComment branch above emits the comment token
             }
             if (hashComment && c == '#')
             {
-                RestAsComment(i);
+                FlushNormal(i);
+                Emit(TokenKind.Comment, i, line.Length - i);
+                i = line.Length;
+                pend = i;
                 break;
             }
 
             // Strings: "...", '...', `...` with '\' escaping
             if (c is '"' or '\'' or '`')
             {
-                Flush(TokenKind.Normal);
+                FlushNormal(i);
+                int start = i;
                 char quote = c;
-                buf.Append(c);
                 i++;
                 while (i < line.Length)
                 {
-                    buf.Append(line[i]);
-                    if (line[i] == '\\' && i + 1 < line.Length) { buf.Append(line[i + 1]); i += 2; continue; }
+                    if (line[i] == '\\' && i + 1 < line.Length) { i += 2; continue; }
                     if (line[i] == quote) { i++; break; }
                     i++;
                 }
-                Flush(TokenKind.Str);
+                Emit(TokenKind.Str, start, i - start);
+                pend = i;
                 continue;
             }
 
             // Numbers: 123, 1.5, 0xFF, 10_000, 1e-3
-            if (char.IsDigit(c) && (buf.Length == 0 || !char.IsLetter(buf[^1])))
+            if (char.IsDigit(c) && (i == 0 || !char.IsLetter(line[i - 1])))
             {
-                Flush(TokenKind.Normal);
-                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] is '_' or '.'))
-                    buf.Append(line[i++]);
-                Flush(TokenKind.Number);
+                FlushNormal(i);
+                int start = i;
+                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] is '_' or '.')) i++;
+                Emit(TokenKind.Number, start, i - start);
+                pend = i;
                 continue;
             }
 
             // Identifiers and keywords
             if (char.IsLetter(c) || c == '_' || c == '@')
             {
-                Flush(TokenKind.Normal);
-                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_'))
-                    buf.Append(line[i++]);
-                string word = buf.ToString().TrimStart('@');
-                Flush(keywords.Contains(word) ? TokenKind.Keyword : TokenKind.Normal);
+                FlushNormal(i);
+                int start = i;
+                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_')) i++;
+                var word = line[start..i];
+                if (word.StartsWith("@")) word = word[1..];
+                Emit(kwLookup.Contains(word) ? TokenKind.Keyword : TokenKind.Normal, start, i - start);
+                pend = i;
                 continue;
             }
 
-            buf.Append(c);
             i++;
         }
-        Flush(inBlockComment ? TokenKind.Comment : TokenKind.Normal);
-        if (tokens.Count == 0) tokens.Add(new Token("", TokenKind.Normal));
-        return tokens;
+        FlushNormal(i);
+        if (tokens.Count == 0) tokens.Add(new Token(0, 0, TokenKind.Normal));
     }
 }

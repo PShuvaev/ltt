@@ -95,7 +95,7 @@ internal sealed partial class App
                 if (steps != 0) _tree.MoveBy(steps);
             }
             else if (m.X > _leftW && m.Y >= _contentTop && m.Y < _contentTop + _mainContentH && _editor.HasFile)
-                _editor.ScrollView(delta);
+                _editor.WheelScroll(m.WheelDown); // 6/5 of a line per notch, instantly
             return;
         }
 

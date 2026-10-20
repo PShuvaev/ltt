@@ -58,7 +58,8 @@ internal sealed class ConsoleInput : ITerminalInput
 /// <summary>
 /// Custom parsing of a Unix terminal input stream: raw mode via termios
 /// (which also stops the XOFF/XON driver from swallowing Ctrl+S/Ctrl+Q),
-/// key escape sequences and SGR mouse (modes 1000+1006).
+/// key escape sequences, the kitty keyboard protocol (physical base-layout
+/// keys, so shortcuts work on any keyboard layout) and SGR mouse.
 /// </summary>
 internal sealed class RawTerminalInput : ITerminalInput
 {
@@ -91,13 +92,18 @@ internal sealed class RawTerminalInput : ITerminalInput
 
         // Mouse reports: 1000 — clicks and wheel, 1002 — motion with a button held, 1006 — SGR.
         Console.Write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+        // Kitty keyboard protocol, flags 1|4|8|16: disambiguate, report alternate
+        // (shifted/base-layout) keys, report all keys as CSI u, report associated
+        // text. The base-layout codepoint identifies the physical PC key on any
+        // keyboard layout. Terminals without the protocol simply ignore this.
+        Console.Write("\x1b[>29u");
     }
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
-        Console.Write("\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        Console.Write("\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1000l");
         Marshal.Copy(_savedTermios, 0, _termios, TermiosSize);
         tcsetattr(StdinFd, TcsaNow, _termios);
         Marshal.FreeHGlobal(_termios);
@@ -202,7 +208,17 @@ internal sealed class RawTerminalInput : ITerminalInput
                 int c = ReadByte(40);
                 if (c < 0) return Read(); // truncated sequence
                 if (c is >= 0x40 and <= 0x7E)
-                    return ParseCsi(p.ToString(), (char)c) ?? Read();
+                {
+                    string ps = p.ToString();
+                    if (c == 'u' && !ps.StartsWith('<'))
+                    {
+                        var events = ParseCsiU(ps);
+                        if (events.Count == 0) return Read();
+                        for (int i = 1; i < events.Count; i++) _pending.Enqueue(events[i]);
+                        return events[0];
+                    }
+                    return ParseCsi(ps, (char)c) ?? Read();
+                }
                 p.Append((char)c);
                 if (p.Length > 32) return Read();
             }
@@ -221,7 +237,7 @@ internal sealed class RawTerminalInput : ITerminalInput
             };
             return key == (ConsoleKey)0 ? Read() : new KeyInput(MakeKey('\0', key));
         }
-        // Alt+Backspace (Esc then DEL) — Undo in the editor, as on Windows.
+        // Alt+Backspace (Esc then DEL) — delete-word in the editor.
         if (b2 is 0x7F or 0x08)
             return new KeyInput(MakeKey('\b', ConsoleKey.Backspace, alt: true));
 
@@ -234,47 +250,46 @@ internal sealed class RawTerminalInput : ITerminalInput
         return Read();
     }
 
+    /// <summary>The index-th `sep`-separated field of a CSI parameter string (empty when absent).</summary>
+    private static ReadOnlySpan<char> Field(ReadOnlySpan<char> s, int index, char sep = ';')
+    {
+        for (int i = 0; i < index; i++)
+        {
+            int at = s.IndexOf(sep);
+            if (at < 0) return default;
+            s = s[(at + 1)..];
+        }
+        int end = s.IndexOf(sep);
+        return end < 0 ? s : s[..end];
+    }
+
+    private static int SubInt(ReadOnlySpan<char> field, int index) =>
+        int.TryParse(Field(field, index, ':'), out int v) ? v : 0;
+
     /// <summary>Parse a CSI: parameters and the final byte. null — an unknown sequence.</summary>
     internal static InputEvent? ParseCsi(string p, char final)
     {
         // SGR mouse: ESC [< b;x;y M (press/wheel) or m (release)
         if (p.StartsWith('<'))
         {
-            var parts = p[1..].Split(';');
-            if (parts.Length == 3
-                && int.TryParse(parts[0], out int btn)
-                && int.TryParse(parts[1], out int mx)
-                && int.TryParse(parts[2], out int my)
+            var body = p.AsSpan(1);
+            if (int.TryParse(Field(body, 0), out int btn)
+                && int.TryParse(Field(body, 1), out int mx)
+                && int.TryParse(Field(body, 2), out int my)
                 && final is 'M' or 'm')
                 return new MouseInput(btn, Math.Max(0, mx - 1), Math.Max(0, my - 1), final == 'M');
             return null;
         }
 
-        var ps = p.Split(';', StringSplitOptions.RemoveEmptyEntries);
-        int Arg(int i, int def) => ps.Length > i && int.TryParse(ps[i], out int v) ? v : def;
-        int modCode = ps.Length > 1 && int.TryParse(ps[1].Split(':')[0], out int mc) ? mc : 1;
+        int Arg(int i, int def) => int.TryParse(Field(p, i), out int v) ? v : def;
+        int modCode = SubInt(Field(p, 1), 0);
         var (shift, alt, ctrl) = DecodeModifiers(modCode);
 
-        // CSI u (kitty keyboard): ESC [ code ; modifier u — how terminals
-        // with the progressive keyboard protocol send Ctrl+letters.
+        // CSI u (kitty keyboard protocol) has its own field grammar.
         if (final == 'u')
         {
-            bool sh = shift, al = alt, ct = ctrl;
-            int cp = Arg(0, 0);
-            if (cp is >= 'a' and <= 'z')
-            {
-                char ch = ct || al ? (char)cp : sh ? char.ToUpperInvariant((char)cp) : (char)cp;
-                return new KeyInput(MakeKey(ch, ConsoleKey.A + (cp - 'a'), sh, al, ct));
-            }
-            return cp switch
-            {
-                27 => new KeyInput(MakeKey('\u001b', ConsoleKey.Escape, sh, al, ct)),
-                13 => new KeyInput(MakeKey('\r', ConsoleKey.Enter, sh, al, ct)),
-                9 => new KeyInput(MakeKey('\t', ConsoleKey.Tab, sh, al, ct)),
-                127 => new KeyInput(MakeKey('\b', ConsoleKey.Backspace, sh, al, ct)),
-                32 => new KeyInput(MakeKey(' ', ConsoleKey.Spacebar, sh, al, ct)),
-                _ => null,
-            };
+            var evs = ParseCsiU(p);
+            return evs.Count > 0 ? evs[0] : null;
         }
         ConsoleKey key;
         if (final == '~')
@@ -313,7 +328,96 @@ internal sealed class RawTerminalInput : ITerminalInput
             : new KeyInput(MakeKey(key == ConsoleKey.Tab ? '\t' : '\0', key, shift, alt, ctrl));
     }
 
-    /// <summary>CSI modifier code (1 + bitmask: 1=Shift, 2=Alt, 4=Ctrl) as three flags.</summary>
-    private static (bool Shift, bool Alt, bool Ctrl) DecodeModifiers(int modCode) =>
-        (modCode is 2 or 4 or 6 or 8, modCode is 3 or 4 or 7 or 8, modCode is 5 or 6 or 7 or 8);
+    /// <summary>
+    /// CSI u (kitty): `cp[:shifted[:base]] ; mods[:event] ; text... u`.
+    /// The physical key identity comes from the base-layout codepoint when the
+    /// terminal reports it, so shortcuts like Shift+F work on any keyboard
+    /// layout; the typed character comes from the associated text, or from the
+    /// (shifted) key codepoint itself.
+    /// </summary>
+    private static List<InputEvent> ParseCsiU(string p)
+    {
+        var none = new List<InputEvent>();
+        // Empty sub-fields are meaningful here: "1040::102" is base-without-shifted.
+        var keyField = Field(p, 0);
+        var modField = Field(p, 1);
+        int cp = SubInt(keyField, 0);
+        int shiftedCp = SubInt(keyField, 1);
+        int baseCp = SubInt(keyField, 2);
+        int modCode = SubInt(modField, 0);
+        int eventType = SubInt(modField, 1);
+        if (eventType == 3) return none; // key release (not requested, tolerated)
+        var (sh, al, ct) = DecodeModifiers(modCode == 0 ? 1 : modCode);
+        int id = baseCp > 0 ? baseCp : cp;
+
+        string text = "";
+        var textField = Field(p, 2);
+        if (!textField.IsEmpty)
+        {
+            var sb = new StringBuilder();
+            var rest = textField;
+            while (true)
+            {
+                int at = rest.IndexOf(':');
+                var part = at < 0 ? rest : rest[..at];
+                if (int.TryParse(part, out int tcp) && tcp >= 0x20 && tcp <= 0x10FFFF && tcp is not (>= 0xD800 and <= 0xDFFF))
+                    sb.Append(char.ConvertFromUtf32(tcp));
+                if (at < 0) break;
+                rest = rest[(at + 1)..];
+            }
+            text = sb.ToString();
+        }
+
+        ConsoleKey key = id switch
+        {
+            27 => ConsoleKey.Escape,
+            13 => ConsoleKey.Enter,
+            9 => ConsoleKey.Tab,
+            127 => ConsoleKey.Backspace,
+            32 => ConsoleKey.Spacebar,
+            57414 => ConsoleKey.Enter, // keypad Enter
+            >= 'a' and <= 'z' => ConsoleKey.A + (id - 'a'),
+            >= 'A' and <= 'Z' => ConsoleKey.A + (id - 'A'),
+            >= '0' and <= '9' => ConsoleKey.D0 + (id - '0'),
+            >= 57399 and <= 57408 => ConsoleKey.D0 + (id - 57399), // keypad digits
+            >= 57376 and <= 57387 => ConsoleKey.F13 + (id - 57376),
+            _ => (ConsoleKey)0,
+        };
+
+        if (text.Length > 0)
+        {
+            var evs = new List<InputEvent> { new KeyInput(MakeKey(text[0], key, sh, al, ct)) };
+            for (int i = 1; i < text.Length; i++)
+                evs.Add(new KeyInput(MakeKey(text[i], (ConsoleKey)0, sh, al, ct)));
+            return evs;
+        }
+
+        char TypedChar() => (sh && shiftedCp > 0 ? shiftedCp : cp) is int tcp and > 0 and <= 0xFFFF ? (char)tcp : '\0';
+
+        if (key != (ConsoleKey)0)
+        {
+            char ch = key switch
+            {
+                ConsoleKey.Escape => '\u001b',
+                ConsoleKey.Enter => '\r',
+                ConsoleKey.Tab => '\t',
+                ConsoleKey.Backspace => '\b',
+                ConsoleKey.Spacebar => ' ',
+                _ => TypedChar(),
+            };
+            return new List<InputEvent> { new KeyInput(MakeKey(ch, key, sh, al, ct)) };
+        }
+
+        // Unmapped key in all-keys mode: a printable character can still be typed.
+        if (!ct && !al && cp >= 0x20 && cp <= 0xFFFF && cp is not (>= 57344 and <= 63743))
+            return new List<InputEvent> { new KeyInput(MakeKey(TypedChar(), (ConsoleKey)0, sh, al, ct)) };
+        return none;
+    }
+
+    /// <summary>CSI modifier code (1 + bitmask: 1=Shift, 2=Alt, 4=Ctrl, 8=Super...) as three flags.</summary>
+    private static (bool Shift, bool Alt, bool Ctrl) DecodeModifiers(int modCode)
+    {
+        int m = Math.Max(0, modCode - 1);
+        return ((m & 1) != 0, (m & 2) != 0, (m & 4) != 0);
+    }
 }

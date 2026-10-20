@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace ConsoleEditor;
 
 /// <summary>Tree node: a folder or a file. Root folders have Parent == null.</summary>
@@ -9,6 +11,14 @@ public sealed class TreeNode
     public required int Depth { get; init; }
     public TreeNode? Parent { get; init; }
 
+    /// <summary>Hidden from git by .gitignore (also .git and .gitignore themselves) — drawn dimmed.</summary>
+    public bool Ignored { get; set; }
+
+    /// <summary>
+    /// Size in bytes for sorting: a file's length; a folder's recursive total
+    /// (approximate when the scan budget runs out on huge trees).
+    /// </summary>
+    public long Size { get; set; }
     public bool Expanded { get; set; }
     public bool ChildrenLoaded { get; set; }
     public List<TreeNode> Children { get; } = new();
@@ -72,11 +82,7 @@ public sealed class FileTree
         node.ChildrenLoaded = true;
         try
         {
-            var entries = new DirectoryInfo(node.FullPath).EnumerateFileSystemInfos()
-                .OrderByDescending(e => e is DirectoryInfo)
-                .ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase);
-
-            foreach (var e in entries)
+            foreach (var e in new DirectoryInfo(node.FullPath).EnumerateFileSystemInfos())
             {
                 node.Children.Add(new TreeNode
                 {
@@ -85,11 +91,133 @@ public sealed class FileTree
                     IsDir = e is DirectoryInfo,
                     Depth = node.Depth + 1,
                     Parent = node,
+                    Size = e is FileInfo fi ? SafeLength(fi) : 0,
                 });
             }
+            MarkIgnored(node);
+            ComputeFolderSizes(node.Children.Where(c => c.IsDir).ToList());
+            // Order: normal entries first, git-ignored (dimmed) last;
+            // within each group folders before files, largest first, name breaks ties.
+            var sorted = node.Children
+                .OrderBy(c => c.Ignored)
+                .ThenByDescending(c => c.IsDir)
+                .ThenByDescending(c => c.Size)
+                .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            node.Children.Clear();
+            node.Children.AddRange(sorted);
         }
         catch (UnauthorizedAccessException) { /* folder not accessible — just empty */ }
         catch (IOException) { /* folder may have disappeared */ }
+    }
+
+    private static long SafeLength(FileInfo fi)
+    {
+        try { return fi.Length; }
+        catch (IOException) { return 0; }
+        catch (UnauthorizedAccessException) { return 0; }
+    }
+
+    /// <summary>Entries one directory load may scan while sizing child folders.</summary>
+    private const int SizeScanBudget = 20_000;
+
+    /// <summary>
+    /// Recursive sizes of child folders, for size sorting. All folders share
+    /// one entry budget, consumed round-robin: on huge trees the load stays
+    /// fast and every folder gets a fair partial estimate instead of the
+    /// first folder eating the whole budget. Symlinked folders are never
+    /// descended into (cycles), unreadable subtrees are skipped.
+    /// </summary>
+    private static void ComputeFolderSizes(List<TreeNode> dirs)
+    {
+        var pending = new List<(TreeNode Node, Stack<string> Todo)>();
+        foreach (var d in dirs)
+        {
+            var todo = new Stack<string>();
+            try
+            {
+                if ((File.GetAttributes(d.FullPath) & FileAttributes.ReparsePoint) != 0) continue;
+            }
+            catch (IOException) { continue; }
+            catch (UnauthorizedAccessException) { continue; }
+            todo.Push(d.FullPath);
+            pending.Add((d, todo));
+        }
+
+        int budget = SizeScanBudget;
+        bool progress = true;
+        while (budget > 0 && progress)
+        {
+            progress = false;
+            foreach (var (node, todo) in pending)
+            {
+                if (budget <= 0 || todo.Count == 0) continue;
+                progress = true;
+                string dir = todo.Pop();
+                try
+                {
+                    foreach (var e in new DirectoryInfo(dir).EnumerateFileSystemInfos())
+                    {
+                        if (budget-- <= 0) break;
+                        if (e is FileInfo fi) node.Size += SafeLength(fi);
+                        else if ((e.Attributes & FileAttributes.ReparsePoint) == 0) todo.Push(e.FullName);
+                    }
+                }
+                catch (IOException) { /* vanished mid-walk — the partial size stands */ }
+                catch (UnauthorizedAccessException) { /* skip the unreadable subtree */ }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Mark children that git ignores, asking git itself (`git check-ignore`)
+    /// so nested .gitignore files, negations and global excludes all match
+    /// real git behaviour. Outside a repository, or without git, nothing is
+    /// marked. The .git directory and .gitignore files are marked too:
+    /// check-ignore does not report them, but they are service entries.
+    /// </summary>
+    private static void MarkIgnored(TreeNode dir)
+    {
+        if (dir.Children.Count == 0) return;
+        foreach (var c in dir.Children)
+            if (c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" })
+                c.Ignored = true;
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "check-ignore --stdin -z",
+                WorkingDirectory = dir.FullPath,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            });
+            if (proc == null) return;
+            var reading = proc.StandardOutput.ReadToEndAsync();
+            foreach (var c in dir.Children)
+            {
+                proc.StandardInput.Write(c.Name + (c.IsDir ? "/" : ""));
+                proc.StandardInput.Write('\0');
+            }
+            proc.StandardInput.Close();
+            if (!proc.WaitForExit(2000))
+            {
+                try { proc.Kill(); } catch (InvalidOperationException) { }
+                return;
+            }
+            if (proc.ExitCode is not (0 or 1) || !reading.IsCompletedSuccessfully) return;
+            var ignored = new HashSet<string>(
+                reading.Result.Split('\0', StringSplitOptions.RemoveEmptyEntries),
+                StringComparer.OrdinalIgnoreCase);
+            foreach (var c in dir.Children)
+                if (ignored.Contains(c.Name + (c.IsDir ? "/" : ""))) c.Ignored = true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
+        {
+            // git is unavailable — everything simply stays unmarked.
+        }
     }
 
     private void RebuildVisible()

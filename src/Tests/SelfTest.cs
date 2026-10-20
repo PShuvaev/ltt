@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace ConsoleEditor;
 
 /// <summary>Quick checks without a terminal: dotnet run -- --self-test</summary>
@@ -18,6 +20,8 @@ internal static class SelfTest
         TestInputParsing();
         TestTreeEditorTabs();
         TestWatcher();
+        TestGitIgnoreDimming();
+        TestSizeSorting();
         Console.WriteLine(_failures == 0 ? "ALL PASS" : $"FAILED: {_failures}");
         return _failures == 0 ? 0 : 1;
     }
@@ -41,13 +45,15 @@ internal static class SelfTest
 
         // --- Syntax highlighting ---
         bool inBlock = false;
-        var toks = Highlighter.Tokenize("class Foo { string s = \"hi\"; int n = 42; } // note", ".cs", ref inBlock);
-        Check(toks.Any(t => t.Kind == TokenKind.Keyword && t.Text == "class"), "highlight: class — keyword");
-        Check(toks.Any(t => t.Kind == TokenKind.Str && t.Text.Contains("hi")), "highlight: string is highlighted");
-        Check(toks.Any(t => t.Kind == TokenKind.Number && t.Text == "42"), "highlight: number is highlighted");
-        Check(toks.Any(t => t.Kind == TokenKind.Comment && t.Text.Contains("note")), "highlight: // comment");
-        Check(string.Concat(toks.Select(t => t.Text)) == "class Foo { string s = \"hi\"; int n = 42; } // note",
-            "highlight: tokens add up to the original line");
+        const string srcLine = "class Foo { string s = \"hi\"; int n = 42; } // note";
+        var toks = Highlighter.Tokenize(srcLine, ".cs", ref inBlock);
+        string Txt(Token t) => srcLine.Substring(t.Start, t.Length);
+        Check(toks.Any(t => t.Kind == TokenKind.Keyword && Txt(t) == "class"), "highlight: class — keyword");
+        Check(toks.Any(t => t.Kind == TokenKind.Str && Txt(t).Contains("hi")), "highlight: string is highlighted");
+        Check(toks.Any(t => t.Kind == TokenKind.Number && Txt(t) == "42"), "highlight: number is highlighted");
+        Check(toks.Any(t => t.Kind == TokenKind.Comment && Txt(t).Contains("note")), "highlight: // comment");
+        Check(string.Concat(toks.Select(Txt)) == srcLine,
+            "highlight: token ranges add up to the original line");
         inBlock = false;
         Highlighter.Tokenize("int a; /* start", ".cs", ref inBlock);
         var mid = Highlighter.Tokenize("middle of the comment", ".cs", ref inBlock);
@@ -89,6 +95,14 @@ internal static class SelfTest
             "search: plain F without Shift stays typing");
         Check(!App.IsShiftF(new ConsoleKeyInfo('F', ConsoleKey.F, shift: true, alt: false, control: true)),
             "search: Ctrl+Shift+F is not confused with Shift+F");
+        Check(RawTerminalInput.ParseCsi("1040:1040:102;2", 'u') is KeyInput kf
+              && kf.Key.KeyChar == (char)1040 && App.IsShiftF(kf.Key),
+            "input: kitty base-layout key identifies physical Shift+F on any layout");
+        Check(RawTerminalInput.ParseCsi("97;2;65", 'u') is KeyInput ka
+              && ka.Key.Key == ConsoleKey.A && ka.Key.KeyChar == 'A',
+            "input: kitty associated text carries the typed character");
+        Check(RawTerminalInput.ParseCsi("27", 'u') is KeyInput ke && ke.Key.Key == ConsoleKey.Escape,
+            "input: kitty all-keys mode Escape as CSI u");
         Check(App.NormalizeSearchSeed("  hello\n brave\tworld  ") == "hello brave world",
             "search: selected text becomes a tidy query");
         Check(App.NormalizeSearchSeed(" \n\t ") == "",
@@ -150,7 +164,7 @@ internal static class SelfTest
             ed.SetCursor(9, 3);
             Check(ed.Cy == 9 && ed.Cx == 3, "editor: a click places the cursor by line and column");
             tree.Refresh(); // pick up new files from disk
-            tree.MoveBy(2);
+            tree.MoveBy(1); // files sort by size now: big.txt (50 lines) leads the file block
             Check(tree.Selected?.Name == "big.txt", "tree: the wheel moves the selection in steps");
 
             // The tree wheel is slowed 5×: 3 rows per 5 notches instead of 15.
@@ -163,6 +177,75 @@ internal static class SelfTest
             for (int i = 0; i < 5; i++) upTotal += App.TreeWheelSteps(ref wheelUp, false);
             Check(upTotal == -3 && wheelUp == 0,
                 "tree wheel: symmetric upward, the remainder is kept");
+
+            // --- Editor wheel: plain 6/5-line steps, no animation ---
+            File.WriteAllText(Path.Combine(tmp, "wheel.txt"),
+                string.Join("\n", Enumerable.Range(1, 5000).Select(i => $"line {i}")));
+            var wheelEd = new TextEditor { ViewHeight = 10 };
+            wheelEd.Open(Path.Combine(tmp, "wheel.txt"));
+            var perNotchY = new List<int>();
+            for (int i = 0; i < 5; i++) { wheelEd.WheelScroll(true); perNotchY.Add(wheelEd.ScrollY); }
+            Check(perNotchY.SequenceEqual(new[] { 1, 2, 3, 4, 6 }),
+                "wheel: five notches down move exactly six lines (6/5 per notch, remainder kept)");
+            for (int i = 0; i < 5; i++) wheelEd.WheelScroll(false);
+            Check(wheelEd.ScrollY == 0,
+                "wheel: symmetric upward — five notches back to the top");
+            for (int i = 0; i < 10; i++) wheelEd.WheelScroll(true);
+            Check(wheelEd.ScrollY == 12,
+                "wheel: ten notches are always twelve lines — pace and file size do not matter");
+            wheelEd.ScrollView(99999);
+            int bottom = wheelEd.ScrollY;
+            for (int i = 0; i < 3; i++) wheelEd.WheelScroll(true);
+            wheelEd.WheelScroll(false);
+            Check(bottom == wheelEd.MaxScrollY && wheelEd.ScrollY == bottom - 1,
+                "wheel: at the bottom edge no counter-notches are stored up — reversing responds at once");
+            wheelEd.ScrollView(-99999);
+            for (int i = 0; i < 4; i++) wheelEd.WheelScroll(true); // 4 lines down, 4/5 left over
+            wheelEd.MoveDown();         // cursor movement drops the leftover fraction (view snaps to cursor)
+            int beforeNotch = wheelEd.ScrollY;
+            wheelEd.WheelScroll(true); // without the reset this would jump 2 lines (4/5 + 6/5)
+            Check(wheelEd.ScrollY == beforeNotch + 1,
+                "wheel: cursor movement resets the leftover fraction");
+
+            // --- Word deletion (Option/Ctrl+Backspace) ---
+            File.WriteAllText(Path.Combine(tmp, "words.txt"), "foo bar  \nsecond line\n");
+            var wd = new TextEditor();
+            wd.Open(Path.Combine(tmp, "words.txt"));
+            wd.End();
+            wd.DeleteWordBackward();
+            Check(wd.LineText(0) == "foo " && wd.Cx == 4,
+                "word delete: trailing spaces + the word before the cursor are removed");
+            wd.DeleteWordBackward();
+            Check(wd.LineText(0) == "" && wd.Cx == 0,
+                "word delete: pressed again, the previous word goes too");
+            wd.Undo();
+            Check(wd.LineText(0) == "foo bar  ",
+                "word delete: a run of deletions is a single undo step");
+            wd.SetCursor(1, 0);
+            wd.DeleteWordBackward();
+            Check(wd.LineCount == 2 && wd.LineText(0) == "foo bar  second line",
+                "word delete: at a line start it joins the lines, like Backspace");
+
+            // --- Paste (Ctrl+V): multi-line InsertText ---
+            File.WriteAllText(Path.Combine(tmp, "paste.txt"), "hello world\n");
+            var paste = new TextEditor();
+            paste.Open(Path.Combine(tmp, "paste.txt"));
+            paste.SetCursor(0, 5);
+            int pasted = paste.InsertText("AB\r\nCD\tE");
+            Check(pasted == 10 && paste.LineText(0) == "helloAB" && paste.LineText(1) == "CD    E world"
+                  && paste.Cy == 1 && paste.Cx == 7,
+                "paste: CRLF/tab are normalized and the text is spliced in at the cursor");
+            paste.Undo();
+            Check(paste.LineCount == 2 && paste.LineText(0) == "hello world",
+                "paste: one undo removes the whole paste");
+            paste.SetCursor(0, 0);
+            paste.SetAnchorHere();
+            paste.SetCursor(0, 5);
+            paste.InsertText("bye");
+            Check(paste.LineText(0) == "bye world" && !paste.HasSelection,
+                "paste: replaces the selection");
+            Check(Clipboard.PasteCandidates().Count > 0,
+                "clipboard: a paste reader (pbpaste & co) is configured for this OS");
 
             // --- Several roots in the left panel ---
             var tree2 = new FileTree(new[] { tmp, Path.Combine(tmp, "sub") });
@@ -334,6 +417,24 @@ internal static class SelfTest
             ed.Undo();
             Check(!ed.CanUndo && ed.LineText(0) == "one",
                 "undo: empty history — Undo breaks nothing");
+
+            // --- Block-comment checkpoints: state deep in the file, invalidated by edits ---
+            var deep = new List<string> { "/* start" };
+            for (int i = 0; i < 600; i++) deep.Add("filler");
+            deep.Add("end */");
+            deep.Add("int a;");
+            File.WriteAllLines(Path.Combine(tmp, "deep.cs"), deep);
+            var ded = new TextEditor();
+            ded.Open(Path.Combine(tmp, "deep.cs"));
+            Check(ded.BlockCommentStateBefore(300) && ded.BlockCommentStateBefore(601)
+                  && !ded.BlockCommentStateBefore(602),
+                "checkpoints: block-comment state is correct deep in the file");
+            ded.GoToLine(1);
+            ded.SetCursor(1, 0);
+            ded.InsertChar('*');
+            ded.InsertChar('/');
+            Check(!ded.BlockCommentStateBefore(300),
+                "checkpoints: an edit closing the comment invalidates later checkpoints");
         }
         finally
         {
@@ -424,6 +525,91 @@ internal static class SelfTest
         finally
         {
             try { Directory.Delete(tmpW, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static void TestGitIgnoreDimming()
+    {
+        // --- Entries hidden by .gitignore are marked for dimming in the tree ---
+        string tmpG = Path.Combine(Path.GetTempPath(), "ceditor-gitignore-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tmpG, "bin"));
+            Directory.CreateDirectory(Path.Combine(tmpG, "src"));
+            File.WriteAllText(Path.Combine(tmpG, ".gitignore"), "bin/\n*.log\n");
+            File.WriteAllText(Path.Combine(tmpG, "keep.txt"), "keep\n");
+            File.WriteAllText(Path.Combine(tmpG, "debug.log"), "log\n");
+
+            bool gitReady = false;
+            try
+            {
+                using var init = Process.Start(new ProcessStartInfo
+                {
+                    FileName = "git",
+                    Arguments = "init -q",
+                    WorkingDirectory = tmpG,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                });
+                gitReady = init != null && init.WaitForExit(10000) && init.ExitCode == 0;
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException) { }
+
+            if (!gitReady)
+            {
+                Check(true, "gitignore: skipped (git unavailable)");
+                return;
+            }
+
+            var gtree = new FileTree(tmpG);
+            bool Ignored(string name) => gtree.Visible.First(v => v.Name == name).Ignored;
+            Check(Ignored("bin") && Ignored("debug.log"),
+                "gitignore: entries from .gitignore are marked ignored");
+            Check(!Ignored("keep.txt"), "gitignore: regular files are not marked");
+            Check(Ignored(".git") && Ignored(".gitignore"),
+                "gitignore: the .git directory and .gitignore itself are marked too");
+            var order = gtree.Visible.Where(v => !v.IsRoot).Select(v => v.Name).ToList();
+            Check(order.SequenceEqual(new[] { "src", "keep.txt", ".git", "bin", ".gitignore", "debug.log" }),
+                "gitignore: dimmed entries come last (folders first inside each group)");
+        }
+        finally
+        {
+            try { Directory.Delete(tmpG, recursive: true); } catch (IOException) { }
+        }
+    }
+
+    private static void TestSizeSorting()
+    {
+        string tmp = Path.Combine(Path.GetTempPath(), "ceditor-size-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(Path.Combine(tmp, "tinyDir"));
+            Directory.CreateDirectory(Path.Combine(tmp, "hugeDir", "nested"));
+            File.WriteAllBytes(Path.Combine(tmp, "small.txt"), new byte[1]);
+            File.WriteAllBytes(Path.Combine(tmp, "mid.txt"), new byte[100]);
+            File.WriteAllBytes(Path.Combine(tmp, "big.txt"), new byte[1000]);
+            File.WriteAllBytes(Path.Combine(tmp, "tinyDir", "f"), new byte[10]);
+            File.WriteAllBytes(Path.Combine(tmp, "hugeDir", "f"), new byte[5000]);
+            File.WriteAllBytes(Path.Combine(tmp, "hugeDir", "nested", "g"), new byte[500]);
+            // .gitignore is always a dimmed (ignored) entry — biggest of all,
+            // it must still come last.
+            File.WriteAllBytes(Path.Combine(tmp, ".gitignore"), new byte[10_000]);
+
+            var tree = new FileTree(tmp);
+            var kids = tree.Roots[0].Children;
+            var names = kids.Select(c => c.Name).ToList();
+            Check(names.SequenceEqual(new[]
+                { "hugeDir", "tinyDir", "big.txt", "mid.txt", "small.txt", ".gitignore" }),
+                "size sort: folders block first, largest first in each block, dimmed last");
+            Check(kids.First(c => c.Name == "hugeDir").Size == 5500,
+                "size sort: a folder's size is its recursive total");
+            Check(kids.First(c => c.Name == "big.txt").Size == 1000,
+                "size sort: a file's size is its length");
+        }
+        finally
+        {
+            try { Directory.Delete(tmp, recursive: true); } catch (IOException) { }
         }
     }
 }

@@ -69,14 +69,21 @@ internal sealed partial class App
     {
         var node = _tree.Selected;
         if (node == null) return;
-        if (Path.GetDirectoryName(node.FullPath) == null)
+        StartRenamePath(node.FullPath, node.IsDir);
+    }
+
+    /// <summary>F2 in either panel: rename a tree node, or the file open in the editor.</summary>
+    private void StartRenamePath(string fullPath, bool isDir)
+    {
+        if (Path.GetDirectoryName(fullPath) == null)
         {
             _status = "The filesystem root cannot be renamed.";
             return;
         }
-        _pendingRenamePath = node.FullPath;
-        _pendingRenameIsDir = node.IsDir;
-        OpenPathInput(PathPurpose.Rename, node.Name);
+        _pendingRenamePath = fullPath;
+        _pendingRenameIsDir = isDir;
+        _renameFromEditor = _focus == Focus.Editor;
+        OpenPathInput(PathPurpose.Rename, Path.GetFileName(fullPath));
     }
 
     private void RenameFromInput()
@@ -86,7 +93,8 @@ internal sealed partial class App
         bool isDir = _pendingRenameIsDir;
         _pendingRenamePath = null;
         _mode = UiMode.Normal;
-        _focus = Focus.Tree;
+        _focus = _renameFromEditor && _editor.HasFile ? Focus.Editor : Focus.Tree;
+        _renameFromEditor = false;
         if (oldPath == null) return;
         if (newName.Length == 0 || newName is "." or ".."
             || newName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0

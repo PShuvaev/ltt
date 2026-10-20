@@ -35,43 +35,46 @@ public static class FuzzySearch
     private const long MaxFileSize = 2_000_000;
 
     /// <summary>Score of one query token against a line; -1 means no match.</summary>
-    public static int ScoreToken(string token, string text, out int matchStart, out int matchLength)
+    public static int ScoreToken(string token, string text, out int matchStart, out int matchLength) =>
+        ScoreToken(token.AsSpan(), text.AsSpan(), out matchStart, out matchLength);
+
+    /// <summary>Span core: case-insensitive on the fly, so scoring a line allocates nothing.</summary>
+    private static int ScoreToken(ReadOnlySpan<char> token, ReadOnlySpan<char> text,
+        out int matchStart, out int matchLength)
     {
         matchStart = 0;
         matchLength = 0;
         if (token.Length == 0 || text.Length == 0) return -1;
 
-        string t = token.ToLowerInvariant();
-        string s = text.ToLowerInvariant();
-
         // Exact substring — the best case.
-        int exact = s.IndexOf(t, StringComparison.Ordinal);
+        int exact = text.IndexOf(token, StringComparison.OrdinalIgnoreCase);
         if (exact >= 0)
         {
             matchStart = exact;
-            matchLength = t.Length;
-            bool wordStart = exact == 0 || !char.IsLetterOrDigit(s[exact - 1]);
+            matchLength = token.Length;
+            bool wordStart = exact == 0 || !char.IsLetterOrDigit(text[exact - 1]);
             return 1000 - Math.Min(exact, 100) + (wordStart ? 50 : 0);
         }
 
         // Subsequence: all query characters in order.
         int ti = 0, first = -1, last = -1, prev = -2;
         int consecutiveBonus = 0, boundaryBonus = 0;
-        for (int si = 0; si < s.Length && ti < t.Length; si++)
+        char need = char.ToLowerInvariant(token[0]);
+        for (int si = 0; si < text.Length && ti < token.Length; si++)
         {
-            if (s[si] != t[ti]) continue;
+            if (char.ToLowerInvariant(text[si]) != need) continue;
             if (first < 0) first = si;
             if (si == prev + 1) consecutiveBonus += 10;
-            if (si == 0 || !char.IsLetterOrDigit(s[si - 1])) boundaryBonus += 15;
+            if (si == 0 || !char.IsLetterOrDigit(text[si - 1])) boundaryBonus += 15;
             prev = si;
             last = si;
-            ti++;
+            if (++ti < token.Length) need = char.ToLowerInvariant(token[ti]);
         }
-        if (ti < t.Length) return -1; // not all characters were found
+        if (ti < token.Length) return -1; // not all characters were found
 
         matchStart = first;
         matchLength = last - first + 1;
-        int gaps = matchLength - t.Length;
+        int gaps = matchLength - token.Length;
         int score = 500 - gaps * 6 - Math.Min(first, 80) + consecutiveBonus + boundaryBonus;
         return Math.Max(score, 1);
     }
@@ -80,18 +83,26 @@ public static class FuzzySearch
     public static int ScoreQuery(string query, string text, out int matchStart, out int matchLength)
     {
         matchStart = int.MaxValue;
-        int matchEnd = 0, total = 0;
-        var tokens = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        if (tokens.Length == 0) { matchStart = 0; matchLength = 0; return -1; }
-
-        foreach (var token in tokens)
+        int matchEnd = 0, total = 0, tokens = 0;
+        var textSpan = text.AsSpan();
+        var rest = query.AsSpan();
+        while (true)
         {
-            int sc = ScoreToken(token, text, out int st, out int len);
-            if (sc < 0) { matchStart = 0; matchLength = 0; return -1; }
-            total += sc;
-            matchStart = Math.Min(matchStart, st);
-            matchEnd = Math.Max(matchEnd, st + len);
+            int sp = rest.IndexOf(' ');
+            var token = (sp < 0 ? rest : rest[..sp]).Trim();
+            if (!token.IsEmpty)
+            {
+                tokens++;
+                int sc = ScoreToken(token, textSpan, out int st, out int len);
+                if (sc < 0) { matchStart = 0; matchLength = 0; return -1; }
+                total += sc;
+                matchStart = Math.Min(matchStart, st);
+                matchEnd = Math.Max(matchEnd, st + len);
+            }
+            if (sp < 0) break;
+            rest = rest[(sp + 1)..];
         }
+        if (tokens == 0) { matchStart = 0; matchLength = 0; return -1; }
         matchLength = matchEnd - matchStart;
         return total;
     }
@@ -177,33 +188,38 @@ public static class FuzzySearch
 
         foreach (var file in EnumerateFiles(root))
         {
-            if (TryReadLines(file) is not { } lines) continue;
-            onProgress?.Invoke(file);
-
-            string rel = Path.GetRelativePath(root, file);
-            for (int i = 0; i < lines.Length && hits.Count < hardCap; i++)
-            {
-                if (lines[i].Contains('\0')) break; // binary file — stop looking further
-                int score = ScoreQuery(query, lines[i], out int st, out int len);
-                if (score >= 0)
-                    hits.Add(new SearchHit(file, rel, i + 1, lines[i], score, st, len));
-            }
+            ScanFile(file, Path.GetRelativePath(root, file), query, hits, hardCap, onProgress);
             if (hits.Count >= hardCap) break;
         }
 
         return Rank(hits).Take(maxResults).ToList();
     }
 
-    /// <summary>Lines of a searchable text file, or null to skip it (binary, too big, unreadable).</summary>
-    private static string[]? TryReadLines(string file)
+    /// <summary>
+    /// Stream one searchable file line by line (never loading it whole), stopping
+    /// at the first binary-looking line or when the hard cap is reached.
+    /// Binary extensions and files over the size limit are skipped.
+    /// </summary>
+    private static void ScanFile(string file, string rel, string query,
+        List<SearchHit> hits, int hardCap, Action<string>? onProgress)
     {
-        if (BinaryExt.Contains(Path.GetExtension(file))) return null;
+        if (BinaryExt.Contains(Path.GetExtension(file))) return;
         try
         {
-            if (new FileInfo(file).Length > MaxFileSize) return null;
-            return File.ReadAllLines(file, System.Text.Encoding.UTF8);
+            if (new FileInfo(file).Length > MaxFileSize) return;
+            onProgress?.Invoke(file);
+            int lineNo = 0;
+            foreach (var line in File.ReadLines(file, System.Text.Encoding.UTF8))
+            {
+                lineNo++;
+                if (line.Contains('\0')) break; // binary file — stop looking further
+                int score = ScoreQuery(query, line, out int st, out int len);
+                if (score >= 0)
+                    hits.Add(new SearchHit(file, rel, lineNo, line, score, st, len));
+                if (hits.Count >= hardCap) break;
+            }
         }
-        catch (IOException) { return null; }
-        catch (UnauthorizedAccessException) { return null; }
+        catch (IOException) { /* unreadable file — skip it */ }
+        catch (UnauthorizedAccessException) { /* same */ }
     }
 }

@@ -280,7 +280,7 @@ internal sealed class FolderWatcher : IDisposable
     {
         sig = null;
         if (!Directory.Exists(root)) return true;
-        var hc = new HashCode();
+        int hash = 17;
         var stack = new Stack<string>();
         stack.Push(root);
         int count = 0;
@@ -290,14 +290,19 @@ internal sealed class FolderWatcher : IDisposable
             if (++count > MaxPollDirs) return false;
             try
             {
-                hc.Add(Path.GetRelativePath(root, dir), StringComparer.OrdinalIgnoreCase);
-                hc.Add(Directory.GetLastWriteTimeUtc(dir).Ticks);
+                // Hash the path relative to the root without allocating it:
+                // enumerated paths are built from the root string itself.
+                unchecked
+                {
+                    hash = hash * 31 + string.GetHashCode(dir.AsSpan(root.Length));
+                    hash = hash * 31 + Directory.GetLastWriteTimeUtc(dir).Ticks.GetHashCode();
+                }
                 foreach (string sub in Directory.EnumerateDirectories(dir)) stack.Push(sub);
             }
             catch (IOException) { /* folder vanished mid-walk — the signature will change anyway */ }
             catch (UnauthorizedAccessException) { /* just skip unreachable directories */ }
         }
-        sig = hc.ToHashCode();
+        sig = hash;
         return true;
     }
 

@@ -8,11 +8,14 @@ internal sealed partial class App
     private bool IsSearchShortcut(ConsoleKeyInfo key) =>
         key.Key == ConsoleKey.F7
         || (key.Key == ConsoleKey.F && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        || (_focus == Focus.Tree && key.Key == ConsoleKey.F
-            && key.Modifiers.HasFlag(ConsoleModifiers.Shift)
-            && !key.Modifiers.HasFlag(ConsoleModifiers.Control));
+        || (_focus == Focus.Tree && IsShiftF(key));
 
-    /// <summary>Exactly Shift+F (no Ctrl/Alt).</summary>
+    /// <summary>
+    /// Exactly Shift+F (no Ctrl/Alt). Layout independence is the input layer's
+    /// job: it maps the physical F key to ConsoleKey.F on any keyboard layout
+    /// (kitty base-layout keys / virtual key codes), so no characters of
+    /// specific layouts are matched here.
+    /// </summary>
     internal static bool IsShiftF(ConsoleKeyInfo key) =>
         !key.Modifiers.HasFlag(ConsoleModifiers.Control)
         && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)
@@ -49,6 +52,19 @@ internal sealed partial class App
         _status = $"Copied to the clipboard: {text.Length} chars";
     }
 
+    /// <summary>Ctrl+V: paste the system clipboard into the editor at the cursor.</summary>
+    private void PasteFromClipboard()
+    {
+        string? text = Clipboard.TryPaste();
+        if (string.IsNullOrEmpty(text))
+        {
+            _status = "Clipboard is empty or cannot be read here — the terminal's own paste still works.";
+            return;
+        }
+        int inserted = _editor.InsertText(text);
+        _status = inserted > 0 ? $"Pasted: {inserted} chars" : "Nothing pasteable on the clipboard.";
+    }
+
     private void HandleKey(ConsoleKeyInfo key)
     {
         // Ctrl+C with a title path selected — copy the path.
@@ -70,10 +86,16 @@ internal sealed partial class App
         _titleSelTo = -1;
 
         // In raw mode Ctrl+C arrives as a byte, not a signal — handle it ourselves.
+        // It copies (handled above) or cancels a prompt; it never quits the app
+        // (quitting is Ctrl+Q / F10, so a stray Ctrl+C can't throw work away).
         if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         {
-            if (_mode == UiMode.Normal) TryQuit();
-            else { _mode = UiMode.Normal; _pending = PendingKind.None; _pendingTab = null; _pendingDeletePath = null; _status = "Cancelled (Ctrl+C)."; }
+            if (_mode != UiMode.Normal)
+            {
+                _mode = UiMode.Normal; _pending = PendingKind.None; _pendingTab = null; _pendingDeletePath = null;
+                _status = "Cancelled (Ctrl+C).";
+            }
+            else _status = "Ctrl+C copies a selection. Ctrl+Q quits.";
             return;
         }
 
@@ -89,9 +111,11 @@ internal sealed partial class App
         if ((key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
             || key.Key == ConsoleKey.F10)
         { TryQuit(); return; }
-        if ((key.Key == ConsoleKey.S && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            || (key.Key == ConsoleKey.F2 && _focus == Focus.Editor))
+        if (key.Key == ConsoleKey.S && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         { Save(); return; }
+        // F2 renames in both panels (in the tree it is handled per-mode below).
+        if (key.Key == ConsoleKey.F2 && _focus == Focus.Editor && _editor.HasFile)
+        { StartRenamePath(_editor.FilePath!, isDir: false); return; }
         // Shift+F with an editor selection searches for it instead of overwriting it with F.
         if (_focus == Focus.Editor && IsShiftF(key))
         {
@@ -125,10 +149,8 @@ internal sealed partial class App
 
         // Undo / Redo of the active tab
         bool ctrl = key.Modifiers.HasFlag(ConsoleModifiers.Control);
-        bool altMod = key.Modifiers.HasFlag(ConsoleModifiers.Alt);
         bool shiftMod = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
-        if ((ctrl && key.Key == ConsoleKey.Z && !shiftMod)
-            || (altMod && key.Key == ConsoleKey.Backspace))
+        if (ctrl && key.Key == ConsoleKey.Z && !shiftMod)
         {
             if (_editor.CanUndo) { _editor.Undo(); _focus = Focus.Editor; _status = "Undone. Ctrl+Y redoes it."; }
             else _status = "Nothing to undo.";
@@ -223,7 +245,13 @@ internal sealed partial class App
                 break;
             case ConsoleKey.UpArrow: _tree.MoveUp(); break;
             case ConsoleKey.DownArrow: _tree.MoveDown(); break;
-            case ConsoleKey.RightArrow: _tree.ExpandOrDescend(); break;
+            case ConsoleKey.RightArrow:
+                // Right on a file opens it (like Enter); on a folder it expands/descends.
+                if (_tree.Selected is { IsDir: false } fileToOpen)
+                    TryOpen(fileToOpen.FullPath, 0, activateOnly: true);
+                else
+                    _tree.ExpandOrDescend();
+                break;
             case ConsoleKey.LeftArrow: _tree.CollapseOrAscend(); break;
             case ConsoleKey.PageUp: _tree.PageUp(); break;
             case ConsoleKey.PageDown: _tree.PageDown(); break;
@@ -234,8 +262,7 @@ internal sealed partial class App
                     TryOpen(file.FullPath, 0, activateOnly: true);
                 break;
             case ConsoleKey.Tab:
-            case ConsoleKey.F6:
-                if (_editor.HasFile) { _focus = Focus.Editor; _status = "Editing. F6/Esc returns to the tree."; }
+                if (_editor.HasFile) { _focus = Focus.Editor; _status = "Editing. Esc returns to the tree."; }
                 else _status = "Open a file with Enter first.";
                 break;
             case ConsoleKey.F5:
@@ -287,11 +314,15 @@ internal sealed partial class App
             _status = "Cut to the clipboard.";
             return;
         }
+        // Ctrl+V — paste the system clipboard (multi-line, one undo step).
+        if (ctrl && key.Key == ConsoleKey.V) { PasteFromClipboard(); return; }
+        // Option/Ctrl+Backspace — delete the word before the cursor.
+        // (Legacy terminals send plain Backspace for Ctrl+Backspace; Alt arrives as Esc+DEL or CSI u.)
+        if ((alt || ctrl) && key.Key == ConsoleKey.Backspace) { _editor.DeleteWordBackward(); return; }
 
         switch (key.Key)
         {
             case ConsoleKey.Escape:
-            case ConsoleKey.F6:
                 _focus = Focus.Tree;
                 _status = "File panel. Enter opens, Shift+F searches.";
                 return;
@@ -416,15 +447,15 @@ internal sealed partial class App
         // Accept both the physical key (ConsoleKey) and the typed character.
         char ch = char.ToLowerInvariant(key.KeyChar);
 
-        // Disk deletion: D/S/Y/Enter — delete, Esc — cancel. There is nothing to save here.
+        // Disk deletion is irreversible, so only an explicit D/Y deletes —
+        // Enter and Esc cancel (no destructive default on the easiest key).
         if (_pending == PendingKind.DeleteNode)
         {
-            if (key.Key is ConsoleKey.D or ConsoleKey.S or ConsoleKey.Y or ConsoleKey.Enter
-                || ch is 'd' or 's' or 'y')
+            if (key.Key is ConsoleKey.D or ConsoleKey.Y || ch is 'd' or 'y')
             {
                 DoPending();
             }
-            else if (key.Key == ConsoleKey.Escape)
+            else if (key.Key is ConsoleKey.Escape or ConsoleKey.Enter)
             {
                 _pending = PendingKind.None;
                 _pendingDeletePath = null;
