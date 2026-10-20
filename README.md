@@ -23,7 +23,7 @@ dependencies: ~5k lines of C# in a 140 KB assembly (.NET 10).
   ▸ docs/             │
   README.md           │
 ──────────────────────┴──────────────────────────────────
- Search results for "mngr": 1/3 · Enter opens · F8/F9 next/prev
+ Search results for "mngr": 1/3 · Enter opens · Ctrl+G next
  [EDITOR] Saved: Program.cs              Ln 3/120, Col 1
  Esc to tree · Option+←→ by words · Ctrl+S save · Ctrl+W/P tabs
 ```
@@ -44,40 +44,12 @@ dependencies: ~5k lines of C# in a 140 KB assembly (.NET 10).
 
 ## Quick start
 
-```bash
-dotnet run                      # current folder
-dotnet run -- ~/project         # a folder (or several: ~/a ~/b)
-dotnet run -- Program.cs        # open straight on a file
+```sh
+git clone https://github.com/PShuvaev/ltt.git ~/Downloads/ltt && cd ~/Downloads/ltt && dotnet run
 ```
 
-Requires the .NET 10 SDK and any XTerm-style terminal (iTerm2, kitty,
+Requires Git, the .NET 10 SDK and any XTerm-style terminal (iTerm2, kitty,
 WezTerm, GNOME Terminal...). On Windows everything works except the mouse.
-
-## The 30-second tour
-
-- **Navigate** — arrows move in the tree, `→`/`←` expand/collapse folders,
-  `Enter` opens a file in a tab. `Tab` goes tree → editor, `Esc` comes
-  back. Folders come first, each group sorted largest-first (folder
-  sizes count recursively); entries hidden by `.gitignore` are dimmed
-  and sorted last.
-- **Read & tweak** — syntax highlighting, line numbers, mouse selection
-  (double-click = word), a plain predictable wheel (6 lines per
-  5 notches, applied instantly), `Option`/`Ctrl+←→` by words, `Option+↑↓`
-  by paragraphs, `Ctrl+Z`/`Ctrl+Y` undo/redo, `Ctrl+S` saves. Exactly
-  enough editing for reviewing and patching agent output — nothing more.
-- **Search** — `Shift+F` (or `Ctrl+F`) and just start typing: results
-  appear live in the bottom panel from 2 characters. It's fuzzy: `mngr`
-  finds "manager". Select text first and `Shift+F` searches for exactly
-  that. `F8`/`F9` hop between hits without reopening search.
-- **Files** — `Ctrl+N` new file (opens instantly), `Ctrl+Shift+N` new
-  folder, `F2` rename, `Shift+Delete` delete from disk, `Ctrl+O` add
-  another root folder to the panel — all path prompts autocomplete as
-  you type (`Tab` cycles suggestions, `→` accepts the ghost text).
-- **Tabs** — `Ctrl+W` close, `Ctrl+P` pin ⚑ (pinned tabs sit left and
-  refuse to close), `Alt+1..9` jump, `Ctrl+PgUp`/`PgDn` cycle.
-- **It keeps up** — files changed by agents, git or builds show up in
-  the tree automatically. Clicking or dragging over the path in the top
-  line copies it to the clipboard — handy for pasting into an agent prompt.
 
 ## Keys
 
@@ -88,12 +60,13 @@ search panel, cancel a confirmation.
 
 | Key | Does |
 |---|---|
-| `Shift+F` · `Ctrl+F` · `F7` | fuzzy content search (searches the selection, if any) |
-| `F8` / `F9` | next / previous search hit |
+| `Ctrl+F` · `Ctrl+F+F` | search selected/open file or folder · search all folders (press `Ctrl+F` twice) |
+| `Ctrl+R+R` | rename file/folder (press `Ctrl+R` twice) |
+| `Ctrl+G` / `Ctrl+Shift+G` | next / previous search hit |
 | `Ctrl+S` · `Ctrl+Z` · `Ctrl+Y` / `Ctrl+Shift+Z` | save · undo · redo |
 | `Ctrl+O` · `Ctrl+N` · `Ctrl+Shift+N` | add root · new file · new folder |
 | `Ctrl+W` · `Ctrl+P` · `Alt+1..9` · `Ctrl+PgUp`/`PgDn` | close tab · pin tab · jump to tab · cycle tabs |
-| `Ctrl+Q` · `F10` | quit |
+| `Ctrl+Q` | quit |
 
 **Tree** (left panel)
 
@@ -101,8 +74,7 @@ search panel, cancel a confirmation.
 |---|---|
 | `Enter` / `→` · `←` | open file (on a folder: expand) · collapse |
 | `Tab` | to the editor (`Esc` returns) |
-| `F2` · `Shift+Delete` · `Delete` | rename · delete from disk · remove root from panel |
-| `F5` · `R` | refresh the tree manually |
+| `Ctrl+R+R` · `Ctrl+Delete` · `Delete` | rename · delete from disk · remove root from panel |
 
 **Editor** (right panel)
 
@@ -113,7 +85,7 @@ search panel, cancel a confirmation.
 | `Option`/`Ctrl+Backspace` | delete the word before the cursor |
 | `Ctrl+Home` / `Ctrl+End` · `PgUp`/`PgDn` | document start/end · page |
 | `Ctrl+C` / `Ctrl+X` / `Ctrl+V` | copy / cut / paste via the system clipboard |
-| `F2` | rename the open file (same as in the tree) |
+| `Ctrl+R+R` | rename the open file (same as in the tree) |
 
 **Prompts and search**
 
@@ -126,15 +98,16 @@ search panel, cancel a confirmation.
 
 ## Good to know
 
-- `Shift+F` inside the editor types a plain `F` when nothing is selected —
-  with a selection it searches for the selected text instead. The physical
-  Shift+F key is recognised on any keyboard layout in terminals with the
-  kitty keyboard protocol (kitty, WezTerm, Ghostty, foot); `Ctrl+F` and
-  `F7` work everywhere.
-- `Ctrl+Shift+N` and `Ctrl+Shift+Z` also need a kitty-protocol terminal
-  (legacy terminals can't tell them apart from `Ctrl+N`/`Ctrl+Z`).
-  Fallbacks: type a trailing `/` in the new-file prompt to make a
-  folder; `Ctrl+Y` redoes.
+- `Ctrl+F` searches from the focused target: in the tree, inside the
+  selected file or recursively under the selected folder/root; in the
+  editor, the open file including unsaved edits. Pressing `Ctrl+F`
+  again widens the same query to all folders — that's `Ctrl+F+F`.
+- No shortcut uses a function key. Bare `Shift` only extends the
+  selection with the arrow keys; every other `Shift` combination comes
+  with `Ctrl` (`Ctrl+Shift+G`, `Ctrl+Shift+N`, `Ctrl+Shift+Z`) and
+  needs a kitty-protocol terminal (kitty, WezTerm, Ghostty, foot) to
+  be told apart from its unshifted form. Fallbacks: type a trailing
+  `/` in the new-file prompt to make a folder; `Ctrl+Y` redoes.
 - `Ctrl+V` pastes the system clipboard (multi-line, one undo step); your
   terminal's own paste works too — and is the only route over SSH, where
   the clipboard can't be read back. `Ctrl+C` copies a selection or

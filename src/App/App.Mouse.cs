@@ -73,21 +73,38 @@ internal sealed partial class App
         return steps;
     }
 
+    /// <summary>Wheel over the results panel: same 3/5 pace as the tree wheel.</summary>
+    private void ScrollResultsByWheel(bool down)
+    {
+        int steps = TreeWheelSteps(ref _resultsWheelNumerator, down);
+        if (steps != 0)
+            _hitIndex = Math.Clamp(_hitIndex + steps, 0, Math.Max(0, _hits.Count - 1));
+    }
+
     private void HandleMouse(MouseInput m)
     {
-        if (_mode is UiMode.SearchInput or UiMode.Confirm or UiMode.PathInput) return;
+        _renameChordArmed = false; // mouse activity breaks a pending Ctrl+R+R chord
+
+        // While typing a query, the live results are already on screen —
+        // the wheel over them must scroll without leaving the input first.
+        if (_mode == UiMode.SearchInput)
+        {
+            if (m.IsWheel && _resultsVisible && m.Y >= _resultsTop)
+                ScrollResultsByWheel(m.WheelDown);
+            return;
+        }
+        if (_mode is UiMode.Confirm or UiMode.PathInput) return;
         if (m.IsLeftClick && m.Y != 0) { _titleSelFrom = -1; _titleSelTo = -1; }
 
         // The wheel scrolls the panel under the cursor: tree, code or results.
         if (m.IsWheel)
         {
-            int delta = m.WheelDown ? 3 : -3;
             if (m.Y == 1 && m.X >= _editorX && _tabs.Tabs.Count > 1)
             {
                 SwitchTab(m.WheelDown ? 1 : -1); // the wheel over the tab bar switches tabs
             }
             else if (_resultsVisible && m.Y >= _resultsTop)
-                _hitIndex = Math.Clamp(_hitIndex + delta, 0, Math.Max(0, _hits.Count - 1));
+                ScrollResultsByWheel(m.WheelDown);
             else if (m.X < _leftW && m.Y >= _treeTop && m.Y < _treeTop + _treeContentH)
             {
                 // The tree scrolls 5× slower: 3/5 of a row per notch, remainder accumulated.

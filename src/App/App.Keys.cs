@@ -5,21 +5,19 @@ internal sealed partial class App
 {
     // ============================ Keys ============================
 
-    private bool IsSearchShortcut(ConsoleKeyInfo key) =>
-        key.Key == ConsoleKey.F7
-        || (key.Key == ConsoleKey.F && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        || (_focus == Focus.Tree && IsShiftF(key));
+    internal static bool IsCtrlKey(ConsoleKeyInfo key, ConsoleKey expected) =>
+        key.Key == expected
+        && key.Modifiers.HasFlag(ConsoleModifiers.Control)
+        && !key.Modifiers.HasFlag(ConsoleModifiers.Alt);
 
-    /// <summary>
-    /// Exactly Shift+F (no Ctrl/Alt). Layout independence is the input layer's
-    /// job: it maps the physical F key to ConsoleKey.F on any keyboard layout
-    /// (kitty base-layout keys / virtual key codes), so no characters of
-    /// specific layouts are matched here.
-    /// </summary>
-    internal static bool IsShiftF(ConsoleKeyInfo key) =>
-        !key.Modifiers.HasFlag(ConsoleModifiers.Control)
-        && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)
-        && key.Key == ConsoleKey.F && key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+    internal static bool IsCtrlF(ConsoleKeyInfo key) => IsCtrlKey(key, ConsoleKey.F);
+    internal static bool IsCtrlR(ConsoleKeyInfo key) => IsCtrlKey(key, ConsoleKey.R);
+
+    /// <summary>Ctrl+G jumps to the next hit; Ctrl+Shift+G to the previous one.</summary>
+    internal static int SearchJumpDelta(ConsoleKeyInfo key) =>
+        IsCtrlKey(key, ConsoleKey.G)
+            ? key.Modifiers.HasFlag(ConsoleModifiers.Shift) ? -1 : +1
+            : 0;
 
     /// <summary>Turn selected text into a search query: spaces instead of line breaks, trimmed.</summary>
     internal static string NormalizeSearchSeed(string text)
@@ -34,13 +32,83 @@ internal sealed partial class App
             ? NormalizeSearchSeed(_editor.SelectedText())
             : "";
 
-    private void OpenSearch(string initial = "")
+    private void ApplySearchScope(SearchScope scope, string? targetPath, bool targetIsDir)
     {
+        _searchScope = scope;
+        _searchTargetPath = targetPath;
+        _searchTargetIsDir = targetIsDir;
+        _liveQuery = "";
+        _liveSource = new List<SearchHit>();
+        _hits = new List<SearchHit>();
+        _hitIndex = 0;
+        _hitScroll = 0;
+        _resultsVisible = false;
+    }
+
+    private void OpenSearch(string initial, SearchScope scope, string? targetPath = null, bool targetIsDir = false)
+    {
+        if (scope != SearchScope.AllFolders && targetPath == null)
+        {
+            _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
+            return;
+        }
+
+        ApplySearchScope(scope, targetPath, targetIsDir);
         _searchQuery.Clear();
         if (initial.Length > 0) _searchQuery.Append(initial);
-        _liveQuery = "";
         _mode = UiMode.SearchInput;
         if (_searchQuery.Length > 0) RunLiveSearch();
+    }
+
+    /// <summary>Ctrl+F: search from the focused target (selected file/folder or open file).</summary>
+    private void OpenScopedSearch(string initial)
+    {
+        if (ResolveScopedSearchTarget() is { } target)
+            OpenSearch(initial, target.Scope, target.Path, target.IsDir);
+        else
+            _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
+    }
+
+    /// <summary>Second Ctrl+F: widen to all folders (or narrow back to the focused target).</summary>
+    private void ToggleSearchScope()
+    {
+        if (_searchScope != SearchScope.AllFolders)
+            ApplySearchScope(SearchScope.AllFolders, null, false);
+        else if (ResolveScopedSearchTarget() is { } target)
+            ApplySearchScope(target.Scope, target.Path, target.IsDir);
+        else
+            return; // stay on all folders; the prompt shows the active scope
+
+        RunLiveSearch();
+    }
+
+    private void ArmRenameChord()
+    {
+        _renameChordArmed = true;
+        _renameChordExpiresAtMs = Environment.TickCount64 + 1200;
+        _status = "Ctrl+R+R: press Ctrl+R again to rename.";
+    }
+
+    /// <summary>Complete Ctrl+R+R only on a second Ctrl+R press.</summary>
+    private bool TryCompleteRenameChord(ConsoleKeyInfo key)
+    {
+        if (!_renameChordArmed) return false;
+        _renameChordArmed = false;
+        if (_mode != UiMode.Normal || Environment.TickCount64 > _renameChordExpiresAtMs)
+            return false;
+        if (!IsCtrlR(key))
+            return false;
+
+        StartRenameForCurrentFocus();
+        return true;
+    }
+
+    private void StartRenameForCurrentFocus()
+    {
+        if (_focus == Focus.Editor && _editor.HasFile)
+            StartRenamePath(_editor.FilePath!, isDir: false);
+        else
+            StartRename();
     }
 
     /// <summary>Copy the editor selection to the system clipboard.</summary>
@@ -67,6 +135,8 @@ internal sealed partial class App
 
     private void HandleKey(ConsoleKeyInfo key)
     {
+        if (TryCompleteRenameChord(key)) return;
+
         // Ctrl+C with a title path selected — copy the path.
         if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control)
             && _mode == UiMode.Normal && HasTitleSelection)
@@ -87,7 +157,7 @@ internal sealed partial class App
 
         // In raw mode Ctrl+C arrives as a byte, not a signal — handle it ourselves.
         // It copies (handled above) or cancels a prompt; it never quits the app
-        // (quitting is Ctrl+Q / F10, so a stray Ctrl+C can't throw work away).
+        // (quitting is Ctrl+Q, so a stray Ctrl+C can't throw work away).
         if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         {
             if (_mode != UiMode.Normal)
@@ -108,27 +178,17 @@ internal sealed partial class App
         }
 
         // Global keys of the normal mode
-        if ((key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-            || key.Key == ConsoleKey.F10)
+        if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         { TryQuit(); return; }
         if (key.Key == ConsoleKey.S && key.Modifiers.HasFlag(ConsoleModifiers.Control))
         { Save(); return; }
-        // F2 renames in both panels (in the tree it is handled per-mode below).
-        if (key.Key == ConsoleKey.F2 && _focus == Focus.Editor && _editor.HasFile)
-        { StartRenamePath(_editor.FilePath!, isDir: false); return; }
-        // Shift+F with an editor selection searches for it instead of overwriting it with F.
-        if (_focus == Focus.Editor && IsShiftF(key))
+        // Rename: Ctrl+R+R.
+        if (IsCtrlR(key)) { ArmRenameChord(); return; }
+        // Ctrl+F — inside the selected file/folder (tree) or the open file (editor).
+        // A second Ctrl+F in the input widens the same query to all folders.
+        if (IsCtrlF(key))
         {
-            string seed = SelectionSearchSeed();
-            if (seed.Length > 0)
-            {
-                OpenSearch(seed);
-                return;
-            }
-        }
-        if (IsSearchShortcut(key))
-        {
-            OpenSearch(SelectionSearchSeed());
+            OpenScopedSearch(SelectionSearchSeed());
             return;
         }
         if (key.Key == ConsoleKey.O && key.Modifiers.HasFlag(ConsoleModifiers.Control))
@@ -144,8 +204,8 @@ internal sealed partial class App
                 : PathPurpose.CreateFile);
             return;
         }
-        if (key.Key == ConsoleKey.F8) { JumpHit(+1); return; }
-        if (key.Key == ConsoleKey.F9) { JumpHit(-1); return; }
+        int searchJump = SearchJumpDelta(key);
+        if (searchJump != 0) { JumpHit(searchJump); return; }
 
         // Undo / Redo of the active tab
         bool ctrl = key.Modifiers.HasFlag(ConsoleModifiers.Control);
@@ -241,7 +301,7 @@ internal sealed partial class App
         switch (key.Key)
         {
             case ConsoleKey.Escape:
-                if (_resultsVisible) { _resultsVisible = false; _status = "Search panel hidden (F8 brings it back)."; }
+                if (_resultsVisible) { _resultsVisible = false; _status = "Search panel hidden (Ctrl+G brings it back)."; }
                 break;
             case ConsoleKey.UpArrow: _tree.MoveUp(); break;
             case ConsoleKey.DownArrow: _tree.MoveDown(); break;
@@ -265,26 +325,14 @@ internal sealed partial class App
                 if (_editor.HasFile) { _focus = Focus.Editor; _status = "Editing. Esc returns to the tree."; }
                 else _status = "Open a file with Enter first.";
                 break;
-            case ConsoleKey.F5:
-                _tree.Refresh();
-                SyncWatcher();
-                _status = "Tree refreshed.";
-                break;
-            case ConsoleKey.R when key.Modifiers == 0:
-                _tree.Refresh();
-                SyncWatcher();
-                _status = "Tree refreshed.";
-                break;
             case ConsoleKey.Delete:
-                if (key.Modifiers.HasFlag(ConsoleModifiers.Shift))
+                if (key.Modifiers.HasFlag(ConsoleModifiers.Control)
+                    && !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
                 {
-                    RequestDeleteSelected(); // Shift+Delete — delete from disk (with confirmation)
+                    RequestDeleteSelected(); // Ctrl+Delete — delete from disk (with confirmation)
                 }
-                else if (_tree.Selected is { IsRoot: true } rootNode) RemoveRootUi(rootNode);
-                else _status = "Delete only removes a root folder from the panel; Shift+Delete deletes from disk.";
-                break;
-            case ConsoleKey.F2:
-                StartRename();
+                else if (key.Modifiers == 0 && _tree.Selected is { IsRoot: true } rootNode) RemoveRootUi(rootNode);
+                else _status = "Delete only removes a root folder from the panel; Ctrl+Delete deletes from disk.";
                 break;
         }
     }
@@ -296,6 +344,11 @@ internal sealed partial class App
         bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt);
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
 
+        // Ctrl+Shift+arrows is not a combination in this editor — ignore it.
+        if (ctrl && shift && key.Key is ConsoleKey.LeftArrow or ConsoleKey.RightArrow
+                or ConsoleKey.UpArrow or ConsoleKey.DownArrow)
+            return;
+
         // Shift extends the selection; plain movement without Shift clears it.
         void Prep()
         {
@@ -304,8 +357,8 @@ internal sealed partial class App
         }
 
         // Option+B/F: how meta-mode terminals send Option+←/→ (Esc+b / Esc+f).
-        if (alt && key.KeyChar is 'b' or 'B') { Prep(); _editor.WordLeft(); return; }
-        if (alt && key.KeyChar is 'f' or 'F') { Prep(); _editor.WordRight(); return; }
+        if (alt && key.KeyChar is 'b') { Prep(); _editor.WordLeft(); return; }
+        if (alt && key.KeyChar is 'f') { Prep(); _editor.WordRight(); return; }
         // Ctrl+X — cut the selection to the clipboard.
         if (ctrl && key.Key == ConsoleKey.X && _editor.HasSelection)
         {
@@ -324,7 +377,7 @@ internal sealed partial class App
         {
             case ConsoleKey.Escape:
                 _focus = Focus.Tree;
-                _status = "File panel. Enter opens, Shift+F searches.";
+                _status = "File panel. Enter opens; Ctrl+F searches the selection, Ctrl+F+F all folders.";
                 return;
             case ConsoleKey.LeftArrow:
                 if (_editor.HasSelection && !shift && !alt && !ctrl) { _editor.CollapseSelection(toStart: true); return; }
@@ -354,7 +407,7 @@ internal sealed partial class App
             case ConsoleKey.Tab: _editor.InsertTab(); return;
         }
 
-        // Regular printable characters (including capital F — Shift+F types here!)
+        // Regular printable characters.
         if (!ctrl && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)
             && key.KeyChar >= ' ' && key.KeyChar != (char)127)
             _editor.InsertChar(key.KeyChar);
@@ -362,6 +415,8 @@ internal sealed partial class App
 
     private void HandleSearchInput(ConsoleKeyInfo key)
     {
+        if (IsCtrlF(key)) { ToggleSearchScope(); return; }
+
         int page = Math.Max(1, _resultsRowCount);
         switch (key.Key)
         {
@@ -414,13 +469,20 @@ internal sealed partial class App
 
     private void HandleSearchResults(ConsoleKeyInfo key)
     {
+        if (IsCtrlF(key))
+        {
+            ToggleSearchScope();
+            _mode = UiMode.SearchInput;
+            return;
+        }
+
         int page = Math.Max(1, _resultsRowCount);
         switch (key.Key)
         {
             case ConsoleKey.Escape:
                 _mode = UiMode.Normal;
                 _resultsVisible = false;
-                _status = "Search panel hidden (F8 brings it back).";
+                _status = "Search panel hidden (Ctrl+G brings it back).";
                 break;
             case ConsoleKey.UpArrow:
                 if (_hitIndex > 0) _hitIndex--;

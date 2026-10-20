@@ -250,7 +250,7 @@ internal sealed partial class App
     {
         if (_mode is UiMode.SearchInput or UiMode.PathInput)
         {
-            string label = _mode == UiMode.SearchInput ? SearchPrompt : CurrentPathPrompt();
+            string label = _mode == UiMode.SearchInput ? CurrentSearchPrompt() : CurrentPathPrompt();
             int typed = _mode == UiMode.SearchInput ? _searchQuery.Length : _pathInput.Length;
             int x = Math.Min(w - 1, label.Length + typed);
             MoveTo(Math.Max(0, x), _statusY);
@@ -268,7 +268,12 @@ internal sealed partial class App
         }
     }
 
-    private const string SearchPrompt = " Search contents: ";
+    private string CurrentSearchPrompt() => _searchScope switch
+    {
+        SearchScope.CurrentFile => " Search file: ",
+        SearchScope.SelectedFolder => " Search folder: ",
+        _ => " Search all folders: ",
+    };
     private const string PathPrompt = " Add folder: ";
 
     private void DrawPanels(int w, int contentH)
@@ -338,7 +343,7 @@ internal sealed partial class App
                 string hint = r switch
                 {
                     0 => " Pick a file on the left and press Enter.",
-                    1 => " Shift+F — fuzzy content search across the whole folder.",
+                    1 => " Ctrl+F — search here; Ctrl+F+F — search all folders.",
                     3 => " ←/→ collapse and expand folders,",
                     4 => " Tab switches panels, Ctrl+Q quits.",
                     _ => "",
@@ -429,8 +434,18 @@ internal sealed partial class App
     private void DrawResultsPanel(int w)
     {
         bool focused = _mode is UiMode.SearchResults or UiMode.SearchInput;
+        string targetName = _searchTargetPath == null
+            ? ""
+            : Path.GetFileName(_searchTargetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (targetName.Length == 0) targetName = _searchTargetPath ?? "";
+        string scopeLabel = _searchScope switch
+        {
+            SearchScope.CurrentFile => $"file {targetName}",
+            SearchScope.SelectedFolder => $"folder {targetName}",
+            _ => "all folders",
+        };
         WriteAt(0, _resultsTop,
-            $" Search results for \"{_searchQuery}\": {_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count} · Enter opens · F8/F9 next/prev · Esc hides",
+            $" Search results ({scopeLabel}) for \"{_searchQuery}\": {_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count} · Enter opens · Ctrl+G next · Esc hides",
             focused ? ConsoleColor.White : ConsoleColor.Magenta,
             focused ? ConsoleColor.DarkMagenta : ConsoleColor.Black, w);
 
@@ -531,9 +546,17 @@ internal sealed partial class App
             string suffix = _searchQuery.ToString().Trim().Length >= 2
                 ? $"   · found: {_hits.Count}"
                 : "   · search starts at 2 characters";
-            WriteAt(0, _statusY, SearchPrompt + _searchQuery + suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
-            WriteAt(0, helpY, " Searching live as you type · ↑↓ pick in the bottom panel · Enter opens · Esc to results · \"mngr\" finds \"manager\"",
-                ConsoleColor.DarkGray, ConsoleColor.Black, w);
+            WriteAt(0, _statusY, CurrentSearchPrompt() + _searchQuery + suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
+            string scopeHelp = _searchScope switch
+            {
+                SearchScope.CurrentFile =>
+                    " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results",
+                SearchScope.SelectedFolder =>
+                    " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results",
+                _ =>
+                    " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results",
+            };
+            WriteAt(0, helpY, scopeHelp, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
         }
         if (_mode == UiMode.Confirm)
@@ -560,10 +583,10 @@ internal sealed partial class App
         string help = _mode == UiMode.SearchResults
             ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
-                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · F2 rename · Shift+Del delete · Ctrl+O add root · Shift+F search"
-                : " Esc to tree · mouse/Shift+arrows select, double-click a word · Option+←→ by words, Option+↑↓ by paragraphs · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W/P tabs";
+                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R+R rename · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root"
+                : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+R+R rename · mouse/Shift+arrows select · Option+←→ by words · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W/P tabs";
         if (_mode == UiMode.Normal && _resultsVisible)
-            help += " · F8/F9 — search results";
+            help += " · Ctrl+G — next hit";
         WriteAt(0, helpY, help, ConsoleColor.DarkGray, ConsoleColor.Black, w);
     }
 }

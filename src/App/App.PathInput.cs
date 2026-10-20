@@ -1,6 +1,6 @@
 namespace ConsoleEditor;
 
-/// <summary>Path prompts (Ctrl+O / Ctrl+N / F2): input state, live completion, root add/remove.</summary>
+/// <summary>Path prompts (Ctrl+O / Ctrl+N / Ctrl+R+R): input state, live completion, root add/remove.</summary>
 internal sealed partial class App
 {
     private string CurrentPathPrompt() => _pathPurpose switch

@@ -72,7 +72,7 @@ internal sealed partial class App
         StartRenamePath(node.FullPath, node.IsDir);
     }
 
-    /// <summary>F2 in either panel: rename a tree node, or the file open in the editor.</summary>
+    /// <summary>Ctrl+R+R in either panel: rename a tree node, or the file open in the editor.</summary>
     private void StartRenamePath(string fullPath, bool isDir)
     {
         if (Path.GetDirectoryName(fullPath) == null)

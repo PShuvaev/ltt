@@ -331,7 +331,7 @@ internal sealed class RawTerminalInput : ITerminalInput
     /// <summary>
     /// CSI u (kitty): `cp[:shifted[:base]] ; mods[:event] ; text... u`.
     /// The physical key identity comes from the base-layout codepoint when the
-    /// terminal reports it, so shortcuts like Shift+F work on any keyboard
+    /// terminal reports it, so shortcuts like Ctrl+F work on any keyboard
     /// layout; the typed character comes from the associated text, or from the
     /// (shifted) key codepoint itself.
     /// </summary>

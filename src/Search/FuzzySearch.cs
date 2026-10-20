@@ -12,7 +12,7 @@ public sealed record SearchHit(
 
 /// <summary>
 /// Fuzzy search over the contents of all text files in a directory,
-/// recursively (Shift+F). A multi-word query: every word must fuzzy-match
+/// recursively. A multi-word query: every word must fuzzy-match
 /// somewhere in the line. Fuzzy means the query characters appear in the
 /// same order but not necessarily adjacent: "mngr" finds "manager".
 /// An exact substring scores the maximum; beyond that, ranking is by
@@ -146,6 +146,62 @@ public static class FuzzySearch
                 result.Add(h with { Score = score, MatchStart = st, MatchLength = len });
         }
         return Rank(result);
+    }
+
+    /// <summary>Like <see cref="Refine"/>, but preserves the existing (document) order.</summary>
+    public static List<SearchHit> RefineInOrder(IReadOnlyList<SearchHit> previous, string query)
+    {
+        var result = new List<SearchHit>();
+        foreach (var h in previous)
+        {
+            int score = ScoreQuery(query, h.LineText, out int st, out int len);
+            if (score >= 0)
+                result.Add(h with { Score = score, MatchStart = st, MatchLength = len });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Search supplied lines in document order (used for an open editor buffer,
+    /// so Ctrl+F sees unsaved edits). Stops at a binary-looking line or maxResults.
+    /// </summary>
+    public static List<SearchHit> SearchLines(
+        string filePath, string relativePath, IEnumerable<string> lines, string query, int maxResults = 500)
+    {
+        var hits = new List<SearchHit>();
+        if (string.IsNullOrWhiteSpace(query)) return hits;
+
+        int lineNo = 0;
+        foreach (var line in lines)
+        {
+            lineNo++;
+            if (line.Contains('\0')) break;
+            int score = ScoreQuery(query, line, out int st, out int len);
+            if (score < 0) continue;
+            hits.Add(new SearchHit(filePath, relativePath, lineNo, line, score, st, len));
+            if (hits.Count >= maxResults) break;
+        }
+        return hits;
+    }
+
+    /// <summary>Stream-search a single file from disk in document order.</summary>
+    public static List<SearchHit> SearchFile(
+        string filePath, string relativePath, string query, int maxResults = 500)
+    {
+        if (BinaryExt.Contains(Path.GetExtension(filePath))) return new List<SearchHit>();
+        string full = Path.GetFullPath(filePath);
+        try
+        {
+            if (new FileInfo(full).Length > MaxFileSize) return new List<SearchHit>();
+            return SearchLines(
+                full,
+                relativePath,
+                File.ReadLines(full, System.Text.Encoding.UTF8),
+                query,
+                maxResults);
+        }
+        catch (IOException) { return new List<SearchHit>(); }
+        catch (UnauthorizedAccessException) { return new List<SearchHit>(); }
     }
 
     private static List<SearchHit> Rank(List<SearchHit> hits) => hits

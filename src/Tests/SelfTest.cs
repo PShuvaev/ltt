@@ -43,6 +43,13 @@ internal static class SelfTest
         int fuzzy = FuzzySearch.ScoreQuery("opnf", "OpenFile()", out _, out _);
         Check(exact > fuzzy && fuzzy > 0, "fuzzy: an exact hit ranks above a fuzzy one");
 
+        var fileHits = FuzzySearch.SearchLines(
+            "/tmp/current.txt", "current.txt",
+            new[] { "m a n a g e r in prose", "nothing here", "manager exact" },
+            "manager");
+        Check(fileHits.Select(h => h.LineNumber).SequenceEqual(new[] { 1, 3 }),
+            "file search: in-file hits stay in document order, not score order");
+
         // --- Syntax highlighting ---
         bool inBlock = false;
         const string srcLine = "class Foo { string s = \"hi\"; int n = 42; } // note";
@@ -88,21 +95,24 @@ internal static class SelfTest
               && ctrlShiftZ.Value.Modifiers.HasFlag(ConsoleModifiers.Shift),
             "input: CSI u 122;6 — Ctrl+Shift+Z");
 
-        // --- Shift+F on a selected word must not overwrite the selection ---
-        Check(App.IsShiftF(new ConsoleKeyInfo('F', ConsoleKey.F, shift: true, alt: false, control: false)),
-            "search: Shift+F is recognised as the search shortcut");
-        Check(!App.IsShiftF(new ConsoleKeyInfo('F', ConsoleKey.F, shift: false, alt: false, control: false)),
-            "search: plain F without Shift stays typing");
-        Check(!App.IsShiftF(new ConsoleKeyInfo('F', ConsoleKey.F, shift: true, alt: false, control: true)),
-            "search: Ctrl+Shift+F is not confused with Shift+F");
-        Check(RawTerminalInput.ParseCsi("1040:1040:102;2", 'u') is KeyInput kf
-              && kf.Key.KeyChar == (char)1040 && App.IsShiftF(kf.Key),
-            "input: kitty base-layout key identifies physical Shift+F on any layout");
+        Check(RawTerminalInput.ParseCsi("1040:1040:102;5", 'u') is KeyInput kf
+              && kf.Key.KeyChar == (char)1040 && App.IsCtrlF(kf.Key),
+            "input: kitty base-layout key identifies physical Ctrl+F on any layout");
+        Check(App.SearchJumpDelta(new ConsoleKeyInfo((char)7, ConsoleKey.G, shift: false, alt: false, control: true)) == +1
+              && App.SearchJumpDelta(new ConsoleKeyInfo((char)7, ConsoleKey.G, shift: true, alt: false, control: true)) == -1
+              && App.SearchJumpDelta(new ConsoleKeyInfo('g', ConsoleKey.G, shift: false, alt: false, control: false)) == 0,
+            "keys: Ctrl+G / Ctrl+Shift+G jump to the next/previous hit");
         Check(RawTerminalInput.ParseCsi("97;2;65", 'u') is KeyInput ka
               && ka.Key.Key == ConsoleKey.A && ka.Key.KeyChar == 'A',
             "input: kitty associated text carries the typed character");
         Check(RawTerminalInput.ParseCsi("27", 'u') is KeyInput ke && ke.Key.Key == ConsoleKey.Escape,
             "input: kitty all-keys mode Escape as CSI u");
+        Check(App.IsCtrlF(new ConsoleKeyInfo((char)6, ConsoleKey.F, shift: false, alt: false, control: true))
+              && App.IsCtrlR(new ConsoleKeyInfo((char)18, ConsoleKey.R, shift: false, alt: false, control: true)),
+            "keys: Ctrl+F and Ctrl+R are recognised for the double-press rules");
+        Check(!App.IsCtrlF(new ConsoleKeyInfo('F', ConsoleKey.F, shift: true, alt: false, control: false))
+              && !App.IsCtrlR(new ConsoleKeyInfo('R', ConsoleKey.R, shift: false, alt: false, control: false)),
+            "keys: plain F/R are not confused with Ctrl+F/Ctrl+R");
         Check(App.NormalizeSearchSeed("  hello\n brave\tworld  ") == "hello brave world",
             "search: selected text becomes a tidy query");
         Check(App.NormalizeSearchSeed(" \n\t ") == "",
@@ -134,6 +144,9 @@ internal static class SelfTest
             var hits = FuzzySearch.Search(tmp, "mngr");
             Check(hits.Count == 2 && hits[0].LineNumber == 2,
                 "search: \"mngr\" is found by content in both files, recursively");
+            var subHits = FuzzySearch.Search(Path.Combine(tmp, "sub"), "mngr");
+            Check(subHits.Count == 1 && subHits[0].RelativePath == "b.cs",
+                "folder search: a selected folder scopes results to its descendants");
 
             // Live search: a grown query refines previous results without the disk.
             var broad = FuzzySearch.Search(tmp, "m");
@@ -142,6 +155,10 @@ internal static class SelfTest
             Check(broad.Count == 3
                   && refined.Select(Key).OrderBy(x => x).SequenceEqual(hits.Select(Key).OrderBy(x => x)),
                 "search: Refine of a grown query yields the same set as a full search");
+            var singleFileHits = FuzzySearch.SearchFile(Path.Combine(tmp, "a.txt"), "a.txt", "mngr");
+            Check(singleFileHits.Count == 1 && singleFileHits[0].LineNumber == 2
+                  && singleFileHits[0].RelativePath == "a.txt",
+                "file search: SearchFile only returns hits from the chosen file");
 
             var ed = new TextEditor();
             ed.Open(Path.Combine(tmp, "a.txt"));

@@ -3,7 +3,7 @@ namespace ConsoleEditor;
 /// <summary>
 /// Watching the left panel's root folders: files and folders created,
 /// deleted or renamed anywhere inside the roots (recursively) must refresh
-/// the tree display on their own, without pressing F5.
+/// the tree display on their own, without a manual refresh.
 ///
 /// How it works:
 /// - The primary path is a FileSystemWatcher per root (recursive) plus a
@@ -22,7 +22,7 @@ namespace ConsoleEditor;
 /// </summary>
 internal sealed class FolderWatcher : IDisposable
 {
-    private const int MaxPollDirs = 20_000; // polling ceiling; beyond that it's manual F5 only
+    private const int MaxPollDirs = 20_000; // polling ceiling; beyond that a polled tree may go stale
 
     private readonly object _lock = new();
     private readonly int _debounceMs;

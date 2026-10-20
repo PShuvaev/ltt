@@ -3,6 +3,7 @@ using System.Text;
 namespace ConsoleEditor;
 
 internal enum Focus { Tree, Editor }
+internal enum SearchScope { CurrentFile, SelectedFolder, AllFolders }
 internal enum UiMode { Normal, SearchInput, SearchResults, Confirm, PathInput }
 internal enum PendingKind { None, CloseTab, Quit, DeleteNode }
 internal enum PathPurpose { AddRoot, CreateFile, CreateFolder, Rename }
@@ -89,9 +90,9 @@ internal static class Program
 /// <summary>
 /// A two-panel console editor: on the left — the file tree of the current
 /// folder, on the right — an editor with syntax highlighting.
-/// Shift+F / F7 / Ctrl+F — fuzzy content search across all files of the directory.
-/// In the editor without a selection Shift+F types the letter F; with text
-/// selected, Shift+F searches for exactly that text without overwriting it.
+/// Ctrl+F searches from the focused target (the selected tree file/folder or
+/// the open file); pressing Ctrl+F again widens the same query to all folders.
+/// No application shortcut uses a function key; bare Shift only extends selection.
 /// </summary>
 internal sealed partial class App
 {
@@ -111,6 +112,9 @@ internal sealed partial class App
     private int _pathCandidateIndex = -1;              // candidate selected while cycling with Tab/↑↓
     private string _pathGhost = "";                    // grey ghost-text continuation after the typed text
     private List<SearchHit> _hits = new();
+    private SearchScope _searchScope = SearchScope.AllFolders;
+    private string? _searchTargetPath; // file/folder while the search scope is not AllFolders
+    private bool _searchTargetIsDir;
     private int _hitIndex;
     private int _hitScroll;
     private bool _resultsVisible; // bottom panel with search results
@@ -119,10 +123,12 @@ internal sealed partial class App
     private EditorTab? _pendingTab;
     private PathPurpose _pathPurpose = PathPurpose.AddRoot;
     private string _pathBaseDir = "";          // directory a file/folder is created in
-    private string? _pendingRenamePath;        // what is being renamed (F2)
+    private string? _pendingRenamePath;        // what is being renamed (Ctrl+R+R)
     private bool _pendingRenameIsDir;
-    private bool _renameFromEditor;            // F2 came from the editor — return focus there
-    private string? _pendingDeletePath;        // what is being deleted from disk (Shift+Delete)
+    private bool _renameFromEditor;            // rename came from the editor — return focus there
+    private bool _renameChordArmed;             // first Ctrl+R seen; a second R completes Ctrl+R+R
+    private long _renameChordExpiresAtMs;
+    private string? _pendingDeletePath;        // what is being deleted from disk (Ctrl+Delete)
     private bool _pendingDeleteIsDir;
 
     // Live search: the previous query and its results, for incremental refinement.
@@ -143,6 +149,7 @@ internal sealed partial class App
     private int _lastClickX = -1, _lastClickY = -1;
     private bool _dragging; // a mouse drag selection is in progress
     private int _treeWheelNumerator; // accumulated fraction of tree scrolling (in fifths of the old step)
+    private int _resultsWheelNumerator; // same accumulation for the search-results wheel
 
     // Watching the left panel's folders for external changes.
     private const int WatchTickMs = 200; // how often the main loop wakes up without input
@@ -229,7 +236,7 @@ internal sealed partial class App
         _watcher.SyncRoots(_tree.RootPaths, forceRecreate);
         foreach (string bad in _watcher.UnwatchableRoots)
             if (_warnedUnwatchable.Add(bad))
-                _status = $"Could not watch folder {bad} for changes — refresh it manually (F5 in the tree).";
+                _status = $"Could not watch folder {bad} for changes.";
     }
 
     /// <summary>
@@ -434,10 +441,22 @@ internal sealed partial class App
             return;
         }
 
-        if (_liveQuery.Length >= 2 && query.StartsWith(_liveQuery, StringComparison.OrdinalIgnoreCase))
-            _liveSource = FuzzySearch.Refine(_liveSource, query);
+        bool canRefine = _liveQuery.Length >= 2
+            && query.StartsWith(_liveQuery, StringComparison.OrdinalIgnoreCase);
+        if (_searchScope == SearchScope.CurrentFile)
+            _liveSource = canRefine
+                ? FuzzySearch.RefineInOrder(_liveSource, query)
+                : SearchCurrentFile(query);
+        else if (_searchScope == SearchScope.SelectedFolder)
+            _liveSource = canRefine
+                ? FuzzySearch.Refine(_liveSource, query)
+                : _searchTargetPath == null
+                    ? new List<SearchHit>()
+                    : FuzzySearch.Search(_searchTargetPath, query);
         else
-            _liveSource = FuzzySearch.SearchMany(_tree.RootPaths, query);
+            _liveSource = canRefine
+                ? FuzzySearch.Refine(_liveSource, query)
+                : FuzzySearch.SearchMany(_tree.RootPaths, query);
 
         _liveQuery = query;
         _hits = _liveSource;
@@ -446,20 +465,48 @@ internal sealed partial class App
         _resultsVisible = _hits.Count > 0;
     }
 
+    /// <summary>
+    /// The target Ctrl+F applies to from here: in the tree — inside the
+    /// selected file, or recursively under the selected folder/root;
+    /// in the editor — the active tab's file.
+    /// </summary>
+    private (SearchScope Scope, string Path, bool IsDir)? ResolveScopedSearchTarget()
+    {
+        if (_focus == Focus.Tree && _tree.Selected is { } node)
+            return node.IsDir
+                ? (SearchScope.SelectedFolder, node.FullPath, true)
+                : (SearchScope.CurrentFile, node.FullPath, false);
+        return _editor.FilePath is { } file
+            ? (SearchScope.CurrentFile, file, false)
+            : null;
+    }
+
+    /// <summary>Search one file, preferring its open editor buffer so unsaved edits count.</summary>
+    private List<SearchHit> SearchCurrentFile(string query)
+    {
+        if (_searchTargetPath == null) return new List<SearchHit>();
+        string full = Path.GetFullPath(_searchTargetPath);
+        string rel = Path.GetFileName(full);
+        int tabIndex = _tabs.IndexOfPath(full);
+        return tabIndex >= 0
+            ? FuzzySearch.SearchLines(full, rel, _tabs.Tabs[tabIndex].Editor.Lines, query)
+            : FuzzySearch.SearchFile(full, rel, query);
+    }
+
     private void OpenHit(SearchHit hit)
     {
         _tree.SelectPath(hit.FilePath);
         TryOpen(hit.FilePath, hit.LineNumber - 1); // the bottom panel stays visible
     }
 
-    /// <summary>F8/F9: jump to the next/previous hit right from the editor.</summary>
+    /// <summary>Ctrl+G / Ctrl+Shift+G: jump to the next/previous hit right from the editor.</summary>
     private void JumpHit(int delta)
     {
-        if (_hits.Count == 0) { _status = "Run a search first (Shift+F)."; return; }
+        if (_hits.Count == 0) { _status = "Run a search first (Ctrl+F)."; return; }
         _resultsVisible = true;
         _hitIndex = Math.Clamp(_hitIndex + delta, 0, _hits.Count - 1);
         OpenHit(_hits[_hitIndex]);
         if (_mode == UiMode.Normal)
-            _status = $"Hit {_hitIndex + 1}/{_hits.Count}: {_hits[_hitIndex].RelativePath}:{_hits[_hitIndex].LineNumber} · F8/F9 — next/prev";
+            _status = $"Hit {_hitIndex + 1}/{_hits.Count}: {_hits[_hitIndex].RelativePath}:{_hits[_hitIndex].LineNumber} · Ctrl+G/Ctrl+Shift+G — next/prev";
     }
 }
