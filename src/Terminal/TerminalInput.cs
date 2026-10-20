@@ -69,12 +69,20 @@ internal sealed class RawTerminalInput : ITerminalInput
     private readonly byte[] _savedTermios = new byte[TermiosSize];
     private readonly byte[] _one = new byte[1];
     private readonly Queue<InputEvent> _pending = new();
+    private readonly int _savedStdinDup = -1; // original stdin when /dev/tty was substituted
     private bool _disposed;
 
     [DllImport("libc", SetLastError = true)] private static extern int tcgetattr(int fd, IntPtr termios);
     [DllImport("libc", SetLastError = true)] private static extern int tcsetattr(int fd, int act, IntPtr termios);
     [DllImport("libc")] private static extern void cfmakeraw(IntPtr termios);
     [DllImport("libc", SetLastError = true)] private static extern nint read(int fd, byte[] buf, nuint count);
+    [DllImport("libc", SetLastError = true)] private static extern int fcntl(int fd, int cmd, int arg);
+    [DllImport("libc", SetLastError = true)] private static extern int open(byte[] path, int flags);
+    [DllImport("libc", SetLastError = true)] private static extern int dup(int fd);
+    [DllImport("libc", SetLastError = true)] private static extern int dup2(int fd, int newFd);
+    [DllImport("libc", SetLastError = true)] private static extern int close(int fd);
+    private const int FGetFl = 3;
+    private static readonly int ONonBlock = OperatingSystem.IsMacOS() ? 0x0004 : 0x0800;
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PollFd { public int Fd; public short Events; public short Revents; }
@@ -84,6 +92,21 @@ internal sealed class RawTerminalInput : ITerminalInput
     {
         if (tcgetattr(StdinFd, _termios) != 0)
             throw new InvalidOperationException("stdin is not a terminal");
+        // A tty opened read-only (e.g. stdin redirected from /dev/tty by an
+        // installer script) makes macOS poll() report instant POLLNVAL forever,
+        // so a blocking read() after such a wakeup would freeze the UI.
+        // Substitute our own read-write non-blocking open of the same terminal.
+        int flags = fcntl(StdinFd, FGetFl, 0);
+        if (flags >= 0 && (flags & 0x3) != 2) // not O_RDWR
+        {
+            int tty = open("/dev/tty\0"u8.ToArray(), 2 /* O_RDWR */ | ONonBlock);
+            if (tty >= 0)
+            {
+                _savedStdinDup = dup(StdinFd);
+                dup2(tty, StdinFd);
+                close(tty);
+            }
+        }
         Marshal.Copy(_termios, _savedTermios, 0, TermiosSize);
         cfmakeraw(_termios);
         tcsetattr(StdinFd, TcsaNow, _termios);
@@ -104,6 +127,7 @@ internal sealed class RawTerminalInput : ITerminalInput
         Console.Write("\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1000l");
         Marshal.Copy(_savedTermios, 0, _termios, TermiosSize);
         tcsetattr(StdinFd, TcsaNow, _termios);
+        if (_savedStdinDup >= 0) { dup2(_savedStdinDup, StdinFd); close(_savedStdinDup); }
         Marshal.FreeHGlobal(_termios);
     }
 
@@ -111,16 +135,25 @@ internal sealed class RawTerminalInput : ITerminalInput
     private int ReadByte(int timeoutMs)
     {
         var pfd = new[] { new PollFd { Fd = StdinFd, Events = 1 /* POLLIN */ } };
+        long deadline = timeoutMs < 0 ? long.MaxValue : Environment.TickCount64 + timeoutMs;
         while (true)
         {
-            int ready = poll(pfd, 1, timeoutMs);
-            if (ready < 0) return -2;
-            if (ready == 0) return -1; // timeout expired (never reached when timeoutMs < 0)
-            nint n = read(StdinFd, _one, 1);
-            if (n > 0) return _one[0];
-            if ((pfd[0].Revents & 0x18) != 0) return -2; // POLLHUP | POLLERR — the terminal is gone
-            if (timeoutMs >= 0) return -1;
-            // read()==0 without hangup happens in canonical mode after Ctrl+D — just keep waiting.
+            int wait = timeoutMs < 0 ? -1 : (int)Math.Max(0, deadline - Environment.TickCount64);
+            int ready = poll(pfd, 1, wait);
+            if (ready < 0)
+            {
+                if (Marshal.GetLastPInvokeError() == 4 /* EINTR */) continue;
+                return -2;
+            }
+            if (ready > 0)
+            {
+                nint n = read(StdinFd, _one, 1);
+                if (n > 0) return _one[0];
+                if (n == 0 && (pfd[0].Revents & 0x18) != 0) return -2; // POLLHUP | POLLERR — the terminal is gone
+                // Spurious wakeup or EAGAIN (see the ctor note): fall through to the deadline check.
+            }
+            if (Environment.TickCount64 >= deadline) return -1;
+            Thread.Sleep(2); // pace retries when poll() cannot really wait (POLLNVAL case)
         }
     }
 
