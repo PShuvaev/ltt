@@ -169,6 +169,26 @@ internal static class SelfTest
             Check(!ed.Dirty && File.ReadAllText(Path.Combine(tmp, "a.txt")).StartsWith('X'),
                 "editor: saving writes to disk");
 
+            // BOM is never invented: a file opened without one is saved without one,
+            // a file opened with one keeps it.
+            static bool HasBom(string p)
+            {
+                var b = File.ReadAllBytes(p);
+                return b.Length >= 3 && b[0] == 0xEF && b[1] == 0xBB && b[2] == 0xBF;
+            }
+            string plainPath = Path.Combine(tmp, "plain.txt");
+            File.WriteAllText(plainPath, "plain\n", new System.Text.UTF8Encoding(false));
+            var bomEd = new TextEditor();
+            bomEd.Open(plainPath);
+            bomEd.Save();
+            Check(!HasBom(plainPath), "editor: saving a BOM-less file does not add a BOM");
+            string bomPath = Path.Combine(tmp, "withbom.txt");
+            File.WriteAllText(bomPath, "bommed\n", new System.Text.UTF8Encoding(true));
+            bomEd.Open(bomPath);
+            Check(bomEd.LineText(0) == "bommed", "editor: a BOM is not shown as text");
+            bomEd.Save();
+            Check(HasBom(bomPath), "editor: saving a BOM file preserves its BOM");
+
             File.WriteAllText(Path.Combine(tmp, "big.txt"),
                 string.Join("\n", Enumerable.Range(1, 50).Select(i => $"line {i}")));
             ed.Open(Path.Combine(tmp, "big.txt"));

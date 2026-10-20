@@ -98,6 +98,8 @@ public sealed class TextEditor
     private string _extension = "";
     /// <summary>File extension, cached (read on every rendered frame).</summary>
     public string Extension => _extension;
+
+    private bool _hasBom; // the file started with a UTF-8 BOM — preserve it, never invent one
     public int LineCount => Lines.Count;
     public string LineText(int i) => Lines[i];
 
@@ -108,6 +110,14 @@ public sealed class TextEditor
         bool endsWithBreak = false;
         using (var fs = File.OpenRead(path))
         {
+            _hasBom = false;
+            if (fs.Length >= 3)
+            {
+                Span<byte> head = stackalloc byte[3];
+                fs.ReadExactly(head);
+                _hasBom = head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
+                fs.Position = 0;
+            }
             if (fs.Length > 0)
             {
                 fs.Seek(-1, SeekOrigin.End);
@@ -156,7 +166,8 @@ public sealed class TextEditor
     public void Save()
     {
         if (FilePath == null) throw new InvalidOperationException("No file is open.");
-        using (var writer = new StreamWriter(FilePath, append: false, Encoding.UTF8, bufferSize: 65536) { NewLine = Environment.NewLine })
+        // Encoding.UTF8 would always emit a BOM; write exactly the BOM-ness the file had.
+        using (var writer = new StreamWriter(FilePath, append: false, new UTF8Encoding(_hasBom), bufferSize: 65536) { NewLine = Environment.NewLine })
             foreach (var line in Lines) writer.WriteLine(line);
         _savedContent = ContentCopy();
         Dirty = false;

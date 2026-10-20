@@ -115,7 +115,8 @@ search panel, cancel a confirmation.
 - The tree watches its folders (`FileSystemWatcher`, polling fallback);
   file *contents* in open tabs are never reloaded behind your back.
 - Search skips `.git`, `bin`, `obj`, `node_modules`, binaries and files
-  over 2 MB. Tabs become 4 spaces on open; files are saved as UTF-8.
+  over 2 MB. Tabs become 4 spaces on open; files are saved as UTF-8
+  (a BOM is preserved when the file had one, never added otherwise).
 - No terminal? `dotnet run -- --search "mngr" .` prints matches, and
   `dotnet run -- --self-test` runs the built-in checks.
 
