@@ -212,29 +212,32 @@ public static class FuzzySearch
     /// Search several left-panel roots at once. With multiple roots, a hit's
     /// relative path is prefixed with the root name: "projA/src/x.cs".
     /// </summary>
-    public static List<SearchHit> SearchMany(IEnumerable<string> roots, string query, int maxResults = 500)
+    public static List<SearchHit> SearchMany(IEnumerable<string> roots, string query, int maxResults = 500,
+        CancellationToken ct = default)
     {
         var rootList = roots
             .Select(Path.GetFullPath)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         if (rootList.Count <= 1)
-            return rootList.Count == 1 ? Search(rootList[0], query, maxResults) : new List<SearchHit>();
+            return rootList.Count == 1 ? Search(rootList[0], query, maxResults, ct: ct) : new List<SearchHit>();
 
         var all = new List<SearchHit>();
         foreach (var root in rootList)
         {
+            if (ct.IsCancellationRequested) break;
             string name = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
             if (name.Length == 0) name = root;
-            foreach (var h in Search(root, query, maxResults))
+            foreach (var h in Search(root, query, maxResults, ct: ct))
                 all.Add(h with { RelativePath = name + Path.DirectorySeparatorChar + h.RelativePath });
         }
         return Rank(all).Take(maxResults).ToList();
     }
 
-    /// <summary>Search a whole directory recursively. onProgress — current file (for the status line).</summary>
+    /// <summary>Search a whole directory recursively. onProgress — current file (for the status line).
+    /// When cancelled, returns whatever was found so far.</summary>
     public static List<SearchHit> Search(string root, string query, int maxResults = 500,
-        Action<string>? onProgress = null)
+        Action<string>? onProgress = null, CancellationToken ct = default)
     {
         var hits = new List<SearchHit>();
         if (string.IsNullOrWhiteSpace(query)) return hits;
@@ -242,7 +245,8 @@ public static class FuzzySearch
 
         foreach (var file in EnumerateFiles(root))
         {
-            ScanFile(file, Path.GetRelativePath(root, file), query, hits, hardCap, onProgress);
+            if (ct.IsCancellationRequested) break;
+            ScanFile(file, Path.GetRelativePath(root, file), query, hits, hardCap, onProgress, ct);
             if (hits.Count >= hardCap) break;
         }
 
@@ -255,7 +259,7 @@ public static class FuzzySearch
     /// Binary extensions and files over the size limit are skipped.
     /// </summary>
     private static void ScanFile(string file, string rel, string query,
-        List<SearchHit> hits, int hardCap, Action<string>? onProgress)
+        List<SearchHit> hits, int hardCap, Action<string>? onProgress, CancellationToken ct)
     {
         if (BinaryExt.Contains(Path.GetExtension(file))) return;
         try
@@ -265,7 +269,7 @@ public static class FuzzySearch
             int lineNo = 0;
             foreach (var line in File.ReadLines(file, System.Text.Encoding.UTF8))
             {
-                lineNo++;
+                if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) return;
                 if (line.Contains('\0')) break; // binary file — stop looking further
                 int score = ScoreQuery(query, line, out int st, out int len);
                 if (score >= 0)

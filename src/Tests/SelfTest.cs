@@ -41,6 +41,15 @@ internal static class SelfTest
         int fuzzy = FuzzySearch.ScoreQuery("opnf", "OpenFile()", out _, out _);
         Check(exact > fuzzy && fuzzy > 0, "fuzzy: an exact hit ranks above a fuzzy one");
 
+        // Non-ASCII (Cyrillic via escapes): exact substring and subsequence both match.
+        string cyrLine = "say \u043F\u0440\u0438\u0432\u0435\u0442 loudly"; // "say privet loudly" in Cyrillic
+        Check(FuzzySearch.ScoreQuery("\u043F\u0440\u0438\u0432\u0435\u0442", cyrLine, out int cst, out int clen) > 900 && cst == 4 && clen == 6,
+            "fuzzy: a Cyrillic exact substring matches");
+        Check(FuzzySearch.ScoreQuery("\u043F\u0440\u0432\u0442", cyrLine, out _, out _) > 0,
+            "fuzzy: a Cyrillic subsequence matches");
+        Check(FuzzySearch.ScoreQuery("\u044F\u044F\u044F", "plain english line", out _, out _) < 0,
+            "fuzzy: absent Cyrillic characters do not match Latin text");
+
         var fileHits = FuzzySearch.SearchLines(
             "/tmp/current.txt", "current.txt",
             new[] { "m a n a g e r in prose", "nothing here", "manager exact" },
@@ -157,6 +166,15 @@ internal static class SelfTest
             Check(singleFileHits.Count == 1 && singleFileHits[0].LineNumber == 2
                   && singleFileHits[0].RelativePath == "a.txt",
                 "file search: SearchFile only returns hits from the chosen file");
+
+            using (var cts = new CancellationTokenSource())
+            {
+                cts.Cancel();
+                Check(FuzzySearch.Search(tmp, "mngr", ct: cts.Token).Count == 0,
+                    "search: a pre-cancelled scan returns immediately without hits");
+                Check(FuzzySearch.SearchMany(new[] { tmp, Path.Combine(tmp, "sub") }, "mngr", ct: cts.Token).Count == 0,
+                    "search: a pre-cancelled multi-root scan returns immediately without hits");
+            }
 
             var ed = new TextEditor();
             ed.Open(Path.Combine(tmp, "a.txt"));

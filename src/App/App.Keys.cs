@@ -32,6 +32,7 @@ internal sealed partial class App
 
     private void ApplySearchScope(SearchScope scope, string? targetPath, bool targetIsDir)
     {
+        CancelSearch();
         _searchScope = scope;
         _searchTargetPath = targetPath;
         _searchTargetIsDir = targetIsDir;

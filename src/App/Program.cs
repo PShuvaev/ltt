@@ -132,6 +132,11 @@ internal sealed partial class App
     // Live search: the previous query and its results, for incremental refinement.
     private string _liveQuery = "";
     private List<SearchHit> _liveSource = new();
+    // Full folder scans run off the UI thread; a generation counter makes sure
+    // only the newest scan's results are ever applied.
+    private (Task<List<SearchHit>> Task, int Gen, string Query)? _pendingSearch;
+    private CancellationTokenSource? _searchCts;
+    private int _searchGen;
 
     // Tab-bar cells of the last frame — for mouse clicks.
     private readonly List<(int Index, int X0, int X1, int CloseX)> _tabCells = new();
@@ -179,8 +184,41 @@ internal sealed partial class App
 
     private void ResetLiveSearch()
     {
+        CancelSearch();
         _liveQuery = "";
         _liveSource = new List<SearchHit>();
+    }
+
+    /// <summary>Drop any in-flight folder scan; its results will never be applied.</summary>
+    private void CancelSearch()
+    {
+        _searchGen++;
+        _pendingSearch = null;
+        _searchCts?.Cancel();
+        _searchCts?.Dispose();
+        _searchCts = null;
+    }
+
+    /// <summary>Apply a finished background scan, if it is still the current one.</summary>
+    private bool PollSearch()
+    {
+        if (_pendingSearch is not { } p || !p.Task.IsCompleted) return false;
+        _pendingSearch = null;
+        _searchCts?.Dispose();
+        _searchCts = null;
+        if (p.Gen != _searchGen || p.Task.Status != TaskStatus.RanToCompletion) return false;
+        _liveSource = p.Task.Result;
+        _liveQuery = p.Query;
+        ApplyHits();
+        return true;
+    }
+
+    private void ApplyHits()
+    {
+        _hits = _liveSource;
+        _hitIndex = 0;
+        _hitScroll = 0;
+        _resultsVisible = _hits.Count > 0;
     }
 
     private void DispatchEvent(InputEvent? ev)
@@ -217,11 +255,13 @@ internal sealed partial class App
                     dirty = true; // the terminal was resized while we waited for input
                 _watcher?.PollIfDue(); // roots without a live FileSystemWatcher are polled by signature
                 if (ApplyExternalChanges()) dirty = true;
+                if (PollSearch()) dirty = true;
                 if (dirty) Draw();
             }
         }
         finally
         {
+            CancelSearch();
             _watcher.Dispose();
             _watcher = null;
         }
@@ -430,6 +470,7 @@ internal sealed partial class App
         string query = _searchQuery.ToString().Trim();
         if (query.Length < 2)
         {
+            CancelSearch();
             _hits = new List<SearchHit>();
             _liveSource = new List<SearchHit>();
             _liveQuery = "";
@@ -441,26 +482,32 @@ internal sealed partial class App
 
         bool canRefine = _liveQuery.Length >= 2
             && query.StartsWith(_liveQuery, StringComparison.OrdinalIgnoreCase);
-        if (_searchScope == SearchScope.CurrentFile)
-            _liveSource = canRefine
-                ? FuzzySearch.RefineInOrder(_liveSource, query)
-                : SearchCurrentFile(query);
-        else if (_searchScope == SearchScope.SelectedFolder)
-            _liveSource = canRefine
-                ? FuzzySearch.Refine(_liveSource, query)
-                : _searchTargetPath == null
-                    ? new List<SearchHit>()
-                    : FuzzySearch.Search(_searchTargetPath, query);
-        else
-            _liveSource = canRefine
-                ? FuzzySearch.Refine(_liveSource, query)
-                : FuzzySearch.SearchMany(_tree.RootPaths, query);
+        if (canRefine || _searchScope == SearchScope.CurrentFile)
+        {
+            // Refining ≤500 known hits and scanning one open file are instant: stay synchronous.
+            CancelSearch();
+            _liveSource = _searchScope == SearchScope.CurrentFile
+                ? canRefine ? FuzzySearch.RefineInOrder(_liveSource, query) : SearchCurrentFile(query)
+                : FuzzySearch.Refine(_liveSource, query);
+            _liveQuery = query;
+            ApplyHits();
+            return;
+        }
 
-        _liveQuery = query;
-        _hits = _liveSource;
-        _hitIndex = 0;
-        _hitScroll = 0;
-        _resultsVisible = _hits.Count > 0;
+        // A full folder scan can take seconds on large roots (a query with no
+        // matches never reaches the early hit cap), so it runs in the
+        // background and is cancelled by the next keystroke.
+        CancelSearch();
+        int gen = _searchGen;
+        _searchCts = new CancellationTokenSource();
+        var ct = _searchCts.Token;
+        string? target = _searchTargetPath;
+        var roots = _tree.RootPaths;
+        bool selectedFolder = _searchScope == SearchScope.SelectedFolder;
+        var task = Task.Run(() => selectedFolder
+            ? target == null ? new List<SearchHit>() : FuzzySearch.Search(target, query, ct: ct)
+            : FuzzySearch.SearchMany(roots, query, ct: ct));
+        _pendingSearch = (task, gen, query);
     }
 
     /// <summary>

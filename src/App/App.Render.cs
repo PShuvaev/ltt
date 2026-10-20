@@ -541,9 +541,11 @@ internal sealed partial class App
         }
         if (_mode == UiMode.SearchInput)
         {
-            string suffix = _searchQuery.ToString().Trim().Length >= 2
-                ? $"   · found: {_hits.Count}"
-                : "   · search starts at 2 characters";
+            string suffix = _pendingSearch is { } ps && !ps.Task.IsCompleted
+                ? "   · searching…"
+                : _searchQuery.ToString().Trim().Length >= 2
+                    ? $"   · found: {_hits.Count}"
+                    : "   · search starts at 2 characters";
             WriteAt(0, _statusY, CurrentSearchPrompt() + _searchQuery + suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
             string scopeHelp = _searchScope switch
             {
