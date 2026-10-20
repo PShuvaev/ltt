@@ -102,26 +102,21 @@ internal sealed partial class App
         }
     }
 
-    /// <summary>Compact right-aligned size: `999`, `1.5K`, `23M`, `4.2G`; a leading `≥` marks a lower bound.</summary>
+    /// <summary>Compact size at two significant digits: `99`, `510`, `1.5K`, `980K`, `4.2G`;
+    /// a leading `≥` marks a lower bound.</summary>
     internal static string FormatSize(long bytes, bool exact)
     {
         if (bytes == 0) return exact ? "0" : "…";
-        string core;
-        if (bytes < 1024)
-        {
-            core = bytes.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        }
-        else
-        {
-            double v = bytes;
-            int u = -1;
-            while (v >= 1024 && u < 5) { v /= 1024; u++; }
-            string num = v >= 100
-                ? Math.Round(v).ToString(System.Globalization.CultureInfo.InvariantCulture)
-                : v.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
-            if (num == "1000" && u < 5) { num = "1"; u++; }
-            core = num + "KMGTPE"[Math.Max(u, 0)];
-        }
+        double v = bytes;
+        int u = -1; // -1 = bytes, then K M G T P E
+        while (v >= 1024 && u < 5) { v /= 1024; u++; }
+        double mag = Math.Pow(10, Math.Floor(Math.Log10(v)) - 1);
+        double r = Math.Round(v / mag) * mag; // two significant digits
+        string num = r == Math.Floor(r)
+            ? r.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
+            : r.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        if (num == "1000" && u < 5) { num = "1"; u++; } // 999 B rounds to 1K, 1000K to 1M
+        string core = u < 0 ? num : num + "KMGTPE"[u];
         return exact ? core : "≥" + core;
     }
 
