@@ -185,6 +185,7 @@ public static class Highlighter
             {
                 FlushNormal(i);
                 int start = i;
+                if (line[i] == '@') i++; // consume it, or the scan below makes no progress
                 while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_')) i++;
                 var word = line[start..i];
                 if (word.StartsWith("@")) word = word[1..];

@@ -73,6 +73,16 @@ internal static class SelfTest
         var mid = Highlighter.Tokenize("middle of the comment", ".cs", ref inBlock);
         Check(inBlock && mid.All(t => t.Kind == TokenKind.Comment), "highlight: multi-line /* */ comment");
 
+        // A '@' must always make progress (lines like "@docs/x.md" once froze tokenization).
+        foreach (var tricky in new[]
+            { "@docs/agents/rules-all-agents.md", "@", "@@", "a@b", "@\"verbatim\"", "user@example.com", "@class @if x = @" })
+        {
+            bool b = false;
+            var tt = Highlighter.Tokenize(tricky, ".md", ref b);
+            Check(string.Concat(tt.Select(t => tricky.Substring(t.Start, t.Length))) == tricky,
+                $"highlight: tokenization terminates and tiles \"{tricky}\"");
+        }
+
     }
 
     private static void TestInputParsing()
@@ -662,12 +672,13 @@ internal static class SelfTest
             Check(kids.First(c => c.Name == "big.txt").SizeExact && kids.First(c => c.Name == "hugeDir").SizeExact,
                 "size display: small trees settle as exact right away");
             Check(App.FormatSize(0, true) == "0" && App.FormatSize(0, false) == "…"
-                  && App.FormatSize(999, true) == "999" && App.FormatSize(1024, true) == "1K"
+                  && App.FormatSize(99, true) == "99" && App.FormatSize(512, true) == "510"
+                  && App.FormatSize(999, true) == "1K" && App.FormatSize(1024, true) == "1K"
                   && App.FormatSize(1536, true) == "1.5K" && App.FormatSize(10 * 1024, true) == "10K"
-                  && App.FormatSize(999_000, true) == "976K" && App.FormatSize(1_048_576, true) == "1M"
+                  && App.FormatSize(999_000, true) == "980K" && App.FormatSize(1_048_576, true) == "1M"
                   && App.FormatSize(1_610_612_736, true) == "1.5G" && App.FormatSize(2_199_023_255_552, true) == "2T"
                   && App.FormatSize(1536, false) == "≥1.5K",
-                "size display: compact K/M/G formatting with a lower-bound marker");
+                "size display: two significant digits with a lower-bound marker");
 
             // Disk-delete protection: roots and system-critical paths are undeletable.
             string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
