@@ -659,6 +659,25 @@ internal static class SelfTest
                 "size sort: a folder's size is its recursive total");
             Check(kids.First(c => c.Name == "big.txt").Size == 1000,
                 "size sort: a file's size is its length");
+
+            // Disk-delete protection: roots and system-critical paths are undeletable.
+            string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            var roots = new[] { tmp };
+            Check(App.IsDeleteProtected(tmp, roots),
+                "delete guard: a panel root is protected");
+            Check(!App.IsDeleteProtected(Path.Combine(tmp, "big.txt"), roots),
+                "delete guard: a regular file inside a root is not protected");
+            Check(!App.IsDeleteProtected(Path.Combine(tmp, "tinyDir"), roots),
+                "delete guard: a regular subfolder is not protected");
+            Check(App.IsDeleteProtected(home, Array.Empty<string>()),
+                "delete guard: the home folder is protected");
+            Check(App.IsDeleteProtected(Path.GetPathRoot(home)!, Array.Empty<string>()),
+                "delete guard: the filesystem root is protected");
+            string? homeParent = Path.GetDirectoryName(home);
+            Check(homeParent == null || App.IsDeleteProtected(homeParent, Array.Empty<string>()),
+                "delete guard: an ancestor of home is protected");
+            Check(!App.IsDeleteProtected(Path.Combine(home, "some-file.txt"), Array.Empty<string>()),
+                "delete guard: a file inside home is not protected");
         }
         finally
         {

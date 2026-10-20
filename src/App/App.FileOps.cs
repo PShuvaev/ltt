@@ -146,10 +146,36 @@ internal sealed partial class App
         _status = $"Renamed: {Path.GetFileName(oldPath)} → {newName}";
     }
 
+    /// <summary>
+    /// Paths that must never be deleted from disk through the UI: panel roots,
+    /// the home folder and everything above it, and filesystem roots.
+    /// Getting rid of a root here is plain Delete (removes it from the panel).
+    /// </summary>
+    internal static bool IsDeleteProtected(string path, IEnumerable<string> rootPaths)
+    {
+        static string Norm(string p) => Path.GetFullPath(p)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string full = Norm(path);
+        if (full.Length == 0) return true; // filesystem root
+        string home = Norm(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        if (home.Length > 0
+            && (string.Equals(full, home, StringComparison.OrdinalIgnoreCase)
+                || home.StartsWith(full + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
+            return true; // home itself or an ancestor of it
+        return rootPaths.Any(r => string.Equals(Norm(r), full, StringComparison.OrdinalIgnoreCase));
+    }
+
     private void RequestDeleteSelected()
     {
         var node = _tree.Selected;
         if (node == null) return;
+        if (IsDeleteProtected(node.FullPath, _tree.RootPaths))
+        {
+            _status = node.IsRoot
+                ? "Roots are never deleted from disk. Plain Delete removes a root from the panel."
+                : $"Protected path - never deleted from disk: {node.FullPath}";
+            return;
+        }
         _pendingDeletePath = node.FullPath;
         _pendingDeleteIsDir = node.IsDir;
         _pending = PendingKind.DeleteNode;
@@ -162,6 +188,11 @@ internal sealed partial class App
         bool isDir = _pendingDeleteIsDir;
         _pendingDeletePath = null;
         if (path == null) return;
+        if (IsDeleteProtected(path, _tree.RootPaths))
+        {
+            _status = $"Protected path - not deleted: {path}";
+            return;
+        }
 
         try
         {
