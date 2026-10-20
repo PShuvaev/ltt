@@ -137,6 +137,9 @@ internal sealed partial class App
     private (Task<List<SearchHit>> Task, int Gen, string Query)? _pendingSearch;
     private CancellationTokenSource? _searchCts;
     private int _searchGen;
+    // Background folder-size refinement (see FileTree.TakeUnfinishedSizing).
+    private (Task Task, TreeNode Parent, FolderSizer Sizer)? _pendingSizing;
+    private CancellationTokenSource? _sizingCts;
 
     // Tab-bar cells of the last frame — for mouse clicks.
     private readonly List<(int Index, int X0, int X1, int CloseX)> _tabCells = new();
@@ -221,6 +224,37 @@ internal sealed partial class App
         _resultsVisible = _hits.Count > 0;
     }
 
+    /// <summary>Start refining folder sizes in the background when a load left them approximate.</summary>
+    private void StartSizingIfIdle()
+    {
+        if (_pendingSizing != null) return;
+        if (_tree.TakeUnfinishedSizing() is not { } job) return;
+        _sizingCts?.Dispose();
+        _sizingCts = new CancellationTokenSource();
+        var ct = _sizingCts.Token;
+        var sizer = job.Sizer;
+        _pendingSizing = (Task.Run(() => sizer.Step(int.MaxValue, ct: ct)), job.Parent, sizer);
+    }
+
+    /// <summary>Apply refined folder sizes (re-sorts). True when the screen needs a redraw.</summary>
+    private bool PollSizing()
+    {
+        if (_pendingSizing is not { } p || !p.Task.IsCompleted) return false;
+        _pendingSizing = null;
+        bool ok = p.Task.Status == TaskStatus.RanToCompletion;
+        if (ok) _tree.CompleteSizing(p.Parent, p.Sizer);
+        p.Sizer.Dispose();
+        return ok;
+    }
+
+    private void CancelSizing()
+    {
+        _sizingCts?.Cancel();
+        _sizingCts?.Dispose();
+        _sizingCts = null;
+        _pendingSizing = null;
+    }
+
     private void DispatchEvent(InputEvent? ev)
     {
         switch (ev)
@@ -256,12 +290,15 @@ internal sealed partial class App
                 _watcher?.PollIfDue(); // roots without a live FileSystemWatcher are polled by signature
                 if (ApplyExternalChanges()) dirty = true;
                 if (PollSearch()) dirty = true;
+                if (PollSizing()) dirty = true;
+                StartSizingIfIdle();
                 if (dirty) Draw();
             }
         }
         finally
         {
             CancelSearch();
+            CancelSizing();
             _watcher.Dispose();
             _watcher = null;
         }

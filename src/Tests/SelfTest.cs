@@ -678,6 +678,31 @@ internal static class SelfTest
                 "delete guard: an ancestor of home is protected");
             Check(!App.IsDeleteProtected(Path.Combine(home, "some-file.txt"), Array.Empty<string>()),
                 "delete guard: a file inside home is not protected");
+
+            // Stepped sizing: small steps give lower bounds and converge to the exact total.
+            var hugeNode = kids.First(c => c.Name == "hugeDir");
+            using (var sizer = new FolderSizer(
+                new[] { (hugeNode, Directory.GetLastWriteTimeUtc(hugeNode.FullPath)) }))
+            {
+                sizer.Step(1);
+                Check(sizer.Snapshot()[0].Size <= 5500,
+                    "sizing: a partial step never overestimates");
+                while (!sizer.Step(2)) { }
+                var done = sizer.Snapshot()[0];
+                Check(done.Size == 5500 && done.Complete,
+                    "sizing: repeated steps converge to the exact recursive total");
+            }
+
+            // Cache: a deep change does not bump the folder's own mtime, so the
+            // cached exact size stands across Refresh; bumping the mtime recomputes.
+            File.WriteAllBytes(Path.Combine(tmp, "hugeDir", "nested", "h"), new byte[700]);
+            tree.Refresh();
+            Check(tree.Roots[0].Children.First(c => c.Name == "hugeDir").Size == 5500,
+                "sizing cache: a deep change keeps the cached size");
+            Directory.SetLastWriteTimeUtc(Path.Combine(tmp, "hugeDir"), DateTime.UtcNow.AddMinutes(1));
+            tree.Refresh();
+            Check(tree.Roots[0].Children.First(c => c.Name == "hugeDir").Size == 6200,
+                "sizing cache: an mtime change recomputes the size");
         }
         finally
         {

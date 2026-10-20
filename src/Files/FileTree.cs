@@ -32,6 +32,11 @@ public sealed class TreeNode
 public sealed class FileTree
 {
     public List<TreeNode> Roots { get; private set; } = new();
+
+    /// <summary>Exact folder sizes from finished scans, valid while the folder's own mtime stands.</summary>
+    private readonly Dictionary<string, (long Size, DateTime WriteUtc)> _sizeCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Queue<(TreeNode Parent, FolderSizer Sizer)> _unfinishedSizing = new();
+
     public IReadOnlyList<string> RootPaths => Roots.Select(r => r.FullPath).ToList();
     public List<TreeNode> Visible { get; private set; } = new();
     public int SelectedIndex { get; private set; }
@@ -55,7 +60,7 @@ public sealed class FileTree
         RebuildVisible();
     }
 
-    private static TreeNode CreateRoot(string path)
+    private TreeNode CreateRoot(string path)
     {
         string full = Path.GetFullPath(path);
         string name = Path.GetFileName(full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
@@ -74,15 +79,16 @@ public sealed class FileTree
     public TreeNode? Selected =>
         Visible.Count == 0 ? null : Visible[Math.Clamp(SelectedIndex, 0, Visible.Count - 1)];
 
-    private static void LoadChildren(TreeNode node)
+    private void LoadChildren(TreeNode node)
     {
         if (!node.IsDir || node.ChildrenLoaded) return;
         node.ChildrenLoaded = true;
         try
         {
+            var dirMtimes = new Dictionary<TreeNode, DateTime>();
             foreach (var e in new DirectoryInfo(node.FullPath).EnumerateFileSystemInfos())
             {
-                node.Children.Add(new TreeNode
+                var child = new TreeNode
                 {
                     Name = e.Name,
                     FullPath = e.FullName,
@@ -90,23 +96,79 @@ public sealed class FileTree
                     Depth = node.Depth + 1,
                     Parent = node,
                     Size = e is FileInfo fi ? SafeLength(fi) : 0,
-                });
+                };
+                node.Children.Add(child);
+                if (e is DirectoryInfo di) dirMtimes[child] = di.LastWriteTimeUtc;
             }
             MarkIgnored(node);
-            ComputeFolderSizes(node.Children.Where(c => c.IsDir).ToList());
-            // Order: normal entries first, git-ignored (dimmed) last;
-            // within each group folders before files, largest first, name breaks ties.
-            var sorted = node.Children
-                .OrderBy(c => c.Ignored)
-                .ThenByDescending(c => c.IsDir)
-                .ThenByDescending(c => c.Size)
-                .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            node.Children.Clear();
-            node.Children.AddRange(sorted);
+            StartSizing(node, dirMtimes);
+            SortChildren(node);
         }
         catch (UnauthorizedAccessException) { /* folder not accessible — just empty */ }
         catch (IOException) { /* folder may have disappeared */ }
+    }
+
+    /// <summary>Order: normal entries first, git-ignored (dimmed) last;
+    /// within each group folders before files, largest first, name breaks ties.</summary>
+    private static void SortChildren(TreeNode node)
+    {
+        var sorted = node.Children
+            .OrderBy(c => c.Ignored)
+            .ThenByDescending(c => c.IsDir)
+            .ThenByDescending(c => c.Size)
+            .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        node.Children.Clear();
+        node.Children.AddRange(sorted);
+    }
+
+    /// <summary>
+    /// Sizes only drive the sort order, so a load must never block on them:
+    /// cached folders are free, the rest get a small synchronous budget
+    /// (exact for small folders, a lower bound for huge ones) and any
+    /// remainder is queued for background refinement via TakeUnfinishedSizing.
+    /// </summary>
+    private void StartSizing(TreeNode parent, Dictionary<TreeNode, DateTime> dirMtimes)
+    {
+        List<(TreeNode, DateTime)>? need = null;
+        foreach (var (child, mtime) in dirMtimes)
+        {
+            if (_sizeCache.TryGetValue(child.FullPath, out var hit) && hit.WriteUtc == mtime)
+                child.Size = hit.Size;
+            else
+                (need ??= new()).Add((child, mtime));
+        }
+        if (need == null) return;
+        var sizer = new FolderSizer(need);
+        bool settled = sizer.Step(SyncSizeEntryBudget, Environment.TickCount64 + SyncSizeMsBudget);
+        ApplySizer(sizer);
+        if (settled) sizer.Dispose();
+        else _unfinishedSizing.Enqueue((parent, sizer));
+    }
+
+    private void ApplySizer(FolderSizer sizer)
+    {
+        foreach (var (node, size, mtime, complete) in sizer.Snapshot())
+        {
+            node.Size = size;
+            if (!complete) continue;
+            if (_sizeCache.Count > 8192) _sizeCache.Clear();
+            _sizeCache[node.FullPath] = (size, mtime);
+        }
+    }
+
+    /// <summary>Next folder-sizing job for the background (null when none).</summary>
+    internal (TreeNode Parent, FolderSizer Sizer)? TakeUnfinishedSizing() =>
+        _unfinishedSizing.Count > 0 ? _unfinishedSizing.Dequeue() : null;
+
+    /// <summary>Apply background-refined sizes and re-sort, keeping the selected node selected.</summary>
+    internal void CompleteSizing(TreeNode parent, FolderSizer sizer)
+    {
+        var selected = Selected;
+        ApplySizer(sizer);
+        SortChildren(parent);
+        RebuildVisible();
+        if (selected != null) SelectNode(selected);
     }
 
     private static long SafeLength(FileInfo fi)
@@ -116,56 +178,9 @@ public sealed class FileTree
         catch (UnauthorizedAccessException) { return 0; }
     }
 
-    /// <summary>Entries one directory load may scan while sizing child folders.</summary>
-    private const int SizeScanBudget = 20_000;
-
-    /// <summary>
-    /// Recursive sizes of child folders, for size sorting. All folders share
-    /// one entry budget, consumed round-robin: on huge trees the load stays
-    /// fast and every folder gets a fair partial estimate instead of the
-    /// first folder eating the whole budget. Symlinked folders are never
-    /// descended into (cycles), unreadable subtrees are skipped.
-    /// </summary>
-    private static void ComputeFolderSizes(List<TreeNode> dirs)
-    {
-        var pending = new List<(TreeNode Node, Stack<string> Todo)>();
-        foreach (var d in dirs)
-        {
-            var todo = new Stack<string>();
-            try
-            {
-                if ((File.GetAttributes(d.FullPath) & FileAttributes.ReparsePoint) != 0) continue;
-            }
-            catch (IOException) { continue; }
-            catch (UnauthorizedAccessException) { continue; }
-            todo.Push(d.FullPath);
-            pending.Add((d, todo));
-        }
-
-        int budget = SizeScanBudget;
-        bool progress = true;
-        while (budget > 0 && progress)
-        {
-            progress = false;
-            foreach (var (node, todo) in pending)
-            {
-                if (budget <= 0 || todo.Count == 0) continue;
-                progress = true;
-                string dir = todo.Pop();
-                try
-                {
-                    foreach (var e in new DirectoryInfo(dir).EnumerateFileSystemInfos())
-                    {
-                        if (budget-- <= 0) break;
-                        if (e is FileInfo fi) node.Size += SafeLength(fi);
-                        else if ((e.Attributes & FileAttributes.ReparsePoint) == 0) todo.Push(e.FullName);
-                    }
-                }
-                catch (IOException) { /* vanished mid-walk — the partial size stands */ }
-                catch (UnauthorizedAccessException) { /* skip the unreadable subtree */ }
-            }
-        }
-    }
+    // Synchronous sizing allowance per directory load; the rest is refined in the background.
+    private const int SyncSizeEntryBudget = 1_500;
+    private const int SyncSizeMsBudget = 30;
 
     /// <summary>
     /// Mark children that git ignores, asking git itself (`git check-ignore`)
@@ -396,7 +411,7 @@ public sealed class FileTree
         foreach (var c in n.Children) CollectExpanded(c, into);
     }
 
-    private static void RestoreExpanded(TreeNode n, HashSet<string> expanded)
+    private void RestoreExpanded(TreeNode n, HashSet<string> expanded)
     {
         foreach (var c in n.Children)
             if (c.IsDir && expanded.Contains(c.FullPath))
@@ -427,4 +442,113 @@ public sealed class FileTree
             if (idx >= 0) { SelectedIndex = idx; EnsureVisible(); }
         }
     }
+}
+
+/// <summary>
+/// Steppable recursive folder sizing for sort order. Folders share the walk
+/// round-robin, so a limited step gives every folder a fair partial estimate
+/// (a lower bound) instead of the first folder eating the whole budget.
+/// Accumulates privately — callers copy results onto nodes via Snapshot(),
+/// so a background step never races the UI. Symlinked folders are never
+/// descended into, unreadable subtrees are skipped, and a generous total
+/// cap keeps even a whole-home walk finite (sizes stay approximate past it).
+/// </summary>
+internal sealed class FolderSizer : IDisposable
+{
+    private const int TotalEntryBudget = 2_000_000;
+
+    private sealed class Work(TreeNode node, DateTime writeUtc)
+    {
+        public TreeNode Node = node;
+        public DateTime WriteUtc = writeUtc;
+        public readonly Stack<string> Todo = new();
+        public IEnumerator<FileSystemInfo>? Current; // directory enumeration in progress (resumable)
+        public long Partial;
+        public bool Complete => Todo.Count == 0 && Current == null;
+    }
+
+    private readonly List<Work> _work = new();
+    private int _spent;
+
+    public FolderSizer(IEnumerable<(TreeNode Node, DateTime WriteUtc)> dirs)
+    {
+        foreach (var (node, mtime) in dirs)
+        {
+            var w = new Work(node, mtime);
+            try
+            {
+                if ((File.GetAttributes(node.FullPath) & FileAttributes.ReparsePoint) == 0)
+                    w.Todo.Push(node.FullPath);
+            }
+            catch (IOException) { /* vanished — stays zero and complete */ }
+            catch (UnauthorizedAccessException) { /* same */ }
+            _work.Add(w);
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (var w in _work) { w.Current?.Dispose(); w.Current = null; }
+    }
+
+    /// <summary>True when no further progress will be made (done, capped or cancelled).</summary>
+    public bool Settled => _spent >= TotalEntryBudget || _work.All(w => w.Complete);
+
+    /// <summary>Advance the walk by up to maxEntries entries (and till the deadline). Returns Settled.</summary>
+    public bool Step(int maxEntries, long deadlineTickMs = long.MaxValue, CancellationToken ct = default)
+    {
+        int budget = Math.Min(maxEntries, TotalEntryBudget - _spent);
+        bool progress = true;
+        while (budget > 0 && progress && !ct.IsCancellationRequested)
+        {
+            progress = false;
+            foreach (var w in _work)
+            {
+                if (budget <= 0 || w.Complete) continue;
+                progress = true;
+                budget = DrainOneDirectory(w, budget, deadlineTickMs, ct);
+            }
+        }
+        return Settled;
+    }
+
+    /// <summary>Process one directory of this folder (resuming where a previous step paused).</summary>
+    private int DrainOneDirectory(Work w, int budget, long deadlineTickMs, CancellationToken ct)
+    {
+        if (w.Current == null)
+        {
+            if (w.Todo.Count == 0) return budget;
+            string dir = w.Todo.Pop();
+            try { w.Current = new DirectoryInfo(dir).EnumerateFileSystemInfos().GetEnumerator(); }
+            catch (IOException) { return budget; }
+            catch (UnauthorizedAccessException) { return budget; }
+        }
+        var en = w.Current;
+        while (budget > 0 && !ct.IsCancellationRequested)
+        {
+            FileSystemInfo e;
+            try
+            {
+                if (!en.MoveNext()) { en.Dispose(); w.Current = null; return budget; }
+                e = en.Current;
+            }
+            catch (IOException) { en.Dispose(); w.Current = null; return budget; }
+            catch (UnauthorizedAccessException) { en.Dispose(); w.Current = null; return budget; }
+            budget--;
+            if ((++_spent & 0xFF) == 0 && Environment.TickCount64 > deadlineTickMs) return budget;
+            if (e is FileInfo fi)
+            {
+                try { w.Partial += fi.Length; }
+                catch (IOException) { /* vanished mid-walk */ }
+                catch (UnauthorizedAccessException) { /* same */ }
+            }
+            else if ((e.Attributes & FileAttributes.ReparsePoint) == 0)
+                w.Todo.Push(e.FullName);
+        }
+        return budget;
+    }
+
+    /// <summary>Current sizes: exact where Complete, a lower bound elsewhere.</summary>
+    public List<(TreeNode Node, long Size, DateTime WriteUtc, bool Complete)> Snapshot() =>
+        _work.Select(w => (w.Node, w.Partial, w.WriteUtc, w.Complete)).ToList();
 }
