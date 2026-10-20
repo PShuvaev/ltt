@@ -1,4 +1,4 @@
-# ConsoleEditor
+# ltt
 
 **A fast, tiny two-panel console editor for the age of coding agents.**
 
@@ -8,14 +8,14 @@ symbol, fix a line or two, hand the keyboard back. An IDE — project
 systems, indexers, language servers, slow startup — is heavy machinery
 for that loop.
 
-ConsoleEditor is the opposite. It starts instantly in the terminal you
+ltt is the opposite. It starts instantly in the terminal you
 already keep open next to your agent, shows folders on the left and code
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
 dependencies: ~5k lines of C# in a 140 KB assembly (.NET 10).
 
 ```
- ConsoleEditor · /home/you/project/src/Program.cs
+ ltt · /home/you/project/src/Program.cs
 ▾ project/            │ Program.cs ×   ⚑ notes.txt
   ▾ src/              │   1  using System;
       Program.cs      │   2

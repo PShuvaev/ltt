@@ -1,7 +1,5 @@
 using System.Text;
 
-namespace ConsoleEditor;
-
 /// <summary>
 /// Read/edit panel for a single file.
 /// Tabs are expanded to 4 spaces on open — for simple cursor arithmetic.

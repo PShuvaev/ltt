@@ -1,7 +1,5 @@
 using System.Text;
 
-namespace ConsoleEditor;
-
 /// <summary>Mouse handling, the tree wheel, and title-path selection (auto-copied).</summary>
 internal sealed partial class App
 {
@@ -9,7 +7,7 @@ internal sealed partial class App
     internal static (string Text, (int Start, int Len) Path) BuildTitle(
         string activeLabel, bool isPath, bool dirty, string tabLabel)
     {
-        var sb = new StringBuilder(" ConsoleEditor · ");
+        var sb = new StringBuilder(" ltt · ");
         int pathStart = sb.Length;
         sb.Append(activeLabel);
         if (dirty) sb.Append(" ●");

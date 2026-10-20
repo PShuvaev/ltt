@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>Live path completion for the path prompts (Ctrl+O, Ctrl+N).</summary>
 internal static class PathCompletion
 {

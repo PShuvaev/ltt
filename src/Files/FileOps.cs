@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>Moving files and folders on disk.</summary>
 internal static class FileOps
 {

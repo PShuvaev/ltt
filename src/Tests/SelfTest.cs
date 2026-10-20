@@ -1,7 +1,5 @@
 using System.Diagnostics;
 
-namespace ConsoleEditor;
-
 /// <summary>Quick checks without a terminal: dotnet run -- --self-test</summary>
 internal static class SelfTest
 {
@@ -406,7 +404,7 @@ internal static class SelfTest
 
             // --- Title: path segments for mouse selection ---
             var (titleText, pathSeg) = App.BuildTitle("/tmp/cedemo2/code.cs", true, false, "");
-            Check(titleText == " ConsoleEditor · /tmp/cedemo2/code.cs"
+            Check(titleText == " ltt · /tmp/cedemo2/code.cs"
                   && titleText.Substring(pathSeg.Start, pathSeg.Len) == "/tmp/cedemo2/code.cs",
                 "title: one path — of the active element — and the segment points exactly at it");
             var (_, noFileSeg) = App.BuildTitle("no file open", false, false, "");

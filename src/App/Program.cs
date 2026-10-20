@@ -1,7 +1,5 @@
 using System.Text;
 
-namespace ConsoleEditor;
-
 internal enum Focus { Tree, Editor }
 internal enum SearchScope { CurrentFile, SelectedFolder, AllFolders }
 internal enum UiMode { Normal, SearchInput, SearchResults, Confirm, PathInput }

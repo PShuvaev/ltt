@@ -1,5 +1,7 @@
 #!/bin/sh
 set -e
+start_dir=$PWD
 cd "$(mktemp -d)"
 git clone -q --depth 1 https://github.com/PShuvaev/ltt .
+if [ "$#" -eq 0 ]; then set -- "$start_dir"; fi
 exec dotnet run -- "$@" </dev/tty

@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using System.Text;
 
-namespace ConsoleEditor;
-
 /// <summary>
 /// Putting text on the system clipboard via two routes at once: the system
 /// utility (pbcopy etc. — works in terminals without OSC 52) and OSC 52

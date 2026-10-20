@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>
 /// Watching the left panel's root folders: files and folders created,
 /// deleted or renamed anywhere inside the roots (recursively) must refresh

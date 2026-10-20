@@ -1,7 +1,5 @@
 using System.Text;
 
-namespace ConsoleEditor;
-
 /// <summary>Rendering: title, panels, tab bar, results panel, status and help lines.</summary>
 internal sealed partial class App
 {

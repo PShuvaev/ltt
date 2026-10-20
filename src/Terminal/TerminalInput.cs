@@ -1,8 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace ConsoleEditor;
-
 /// <summary>Input event: a key or the mouse.</summary>
 internal abstract record InputEvent;
 

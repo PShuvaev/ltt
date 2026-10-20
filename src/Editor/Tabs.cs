@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>One editor tab: an open file and its pinned flag.</summary>
 internal sealed class EditorTab
 {

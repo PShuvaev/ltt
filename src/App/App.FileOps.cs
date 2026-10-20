@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>Creating, renaming and deleting files/folders from the tree panel.</summary>
 internal sealed partial class App
 {

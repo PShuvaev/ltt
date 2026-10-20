@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>Keyboard handling: search entry points and per-mode key handlers.</summary>
 internal sealed partial class App
 {

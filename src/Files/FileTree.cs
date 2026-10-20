@@ -1,7 +1,5 @@
 using System.Diagnostics;
 
-namespace ConsoleEditor;
-
 /// <summary>Tree node: a folder or a file. Root folders have Parent == null.</summary>
 public sealed class TreeNode
 {

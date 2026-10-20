@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 /// <summary>One line of a content search result.</summary>
 public sealed record SearchHit(
     string FilePath,

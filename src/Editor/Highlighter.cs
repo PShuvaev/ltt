@@ -1,5 +1,3 @@
-namespace ConsoleEditor;
-
 public enum TokenKind { Normal, Keyword, Str, Comment, Number, Preproc }
 
 /// <summary>A highlighted range of the source line (no text is copied).</summary>
