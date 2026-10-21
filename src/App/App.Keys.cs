@@ -147,6 +147,11 @@ internal sealed partial class App
             if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasSelection) CopySelection();
             else if (_mode != UiMode.Normal)
             {
+                if (_mode is UiMode.SearchInput or UiMode.SearchResults)
+                {
+                    CancelSearch(); // a scan still running must not pop the panel up later
+                    _resultsVisible = false;
+                }
                 _mode = UiMode.Normal;
                 _confirm = null;
                 _status = "Cancelled (Ctrl+C).";
@@ -405,6 +410,7 @@ internal sealed partial class App
 
     private void HandleSearchInput(ConsoleKeyInfo key)
     {
+        PollSearch(); // a scan that has just finished counts for this key (Esc, Enter)
         if (IsCtrlF(key)) { ToggleSearchScope(); return; }
         if (MoveHit(key.Key, homeEnd: false)) return;
 

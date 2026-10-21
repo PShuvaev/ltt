@@ -38,8 +38,24 @@ internal static class FileOps
 
     private static void MoveOne(string from, string to, bool isDir)
     {
-        if (isDir) Directory.Move(from, to);
-        else File.Move(from, to);
+        if (isDir)
+        {
+            Directory.Move(from, to);
+            return;
+        }
+        bool taken = Path.Exists(to);
+        try
+        {
+            File.Move(from, to);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // File.Move links the new name first: when the old one cannot go, the new one must not stay.
+            if (!taken && Path.Exists(from) && TextFile.Stat(from) is { } a && TextFile.Stat(to) is { } b
+                && (a.Dev, a.Ino) == (b.Dev, b.Ino))
+                File.Delete(to);
+            throw;
+        }
     }
 
     /// <summary>
@@ -49,22 +65,27 @@ internal static class FileOps
     /// </summary>
     internal static void Relocate(string from, string to, bool isDir, CopyProgress progress, CancellationToken ct)
     {
-        try
+        if (!isDir || !OtherDisk(from, to))
         {
-            Move(from, to, isDir);
-            return;
+            try
+            {
+                Move(from, to, isDir);
+                return;
+            }
+            catch (IOException e) when (isDir && !OperatingSystem.IsWindows() && e.HResult == 18) { } // EXDEV
         }
-        catch (IOException e) when (CrossDevice(e, from, to)) { }
         Copy(from, to, progress, ct);
         if (progress.Failed > 0 || progress.Skipped > 0 || ct.IsCancellationRequested) return;
         if (isDir) Directory.Delete(from, recursive: true); // a symlink: just the link
         else File.Delete(from);
     }
 
-    // rename(2) stops at the file system's edge (EXDEV); Windows moves a folder within its volume only.
-    private static bool CrossDevice(IOException e, string from, string to) => OperatingSystem.IsWindows()
+    // rename(2) stops at the file system's edge, and so does Directory.Move — whose error does not say
+    // so reliably (.NET on macOS reports EXDEV as 203). The folders the entry leaves and enters tell.
+    private static bool OtherDisk(string from, string to) => OperatingSystem.IsWindows()
         ? !string.Equals(Path.GetPathRoot(from), Path.GetPathRoot(to), StringComparison.OrdinalIgnoreCase)
-        : e.HResult == 18;
+        : TextFile.Stat(Path.GetDirectoryName(from)!) is { } a && TextFile.Stat(Path.GetDirectoryName(to)!) is { } b
+          && a.Dev != b.Dev;
 
     /// <summary>
     /// Copy a file or folder to a path that does not exist yet. Links are copied

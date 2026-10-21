@@ -26,6 +26,7 @@ internal static class Clipboard
     }
 
     private const int MaxPasteChars = 4_000_000;
+    private const int MaxOsc52Chars = 1_000_000; // terminals cap OSC 52 anyway; a bigger one would flood them
     private static readonly object CopyLock = new();
     private static Task _copying = Task.CompletedTask; // copies run one after another, off the UI thread
 
@@ -55,6 +56,7 @@ internal static class Clipboard
     {
         if (FirstOnPath(HelperCandidates()) is { } helper)
             lock (CopyLock) _copying = _copying.ContinueWith(_ => RunHelper(helper, text, 3000), TaskScheduler.Default);
+        if (text.Length > MaxOsc52Chars) return;
         string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
         Console.Write($"\x1b]52;c;{b64}\a");
     }

@@ -544,7 +544,7 @@ internal sealed partial class App
         }
         if (_mode == UiMode.SearchInput)
         {
-            string suffix = _pendingSearch is { } ps && !ps.Task.IsCompleted
+            string suffix = _pendingSearch != null // until its results are applied, not merely ready
                 ? "   · searching…"
                 : _searchQuery.ToString().Trim().Length >= 2
                     ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"

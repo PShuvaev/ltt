@@ -312,6 +312,7 @@ internal sealed class RawTerminalInput : ITerminalInput
                     if (p.Length > 256) return null; // overlong: dropped whole, never typed
                     string ps = p.ToString();
                     if (c == '~' && ps == "200") return ReadPaste();
+                    if (c == 'M' && ps.Length == 0) return ReadX10Mouse();
                     if (c == 'u' && !ps.StartsWith('<'))
                     {
                         var events = ParseCsiU(ps);
@@ -330,6 +331,12 @@ internal sealed class RawTerminalInput : ITerminalInput
             if (c < 0) return null;
             return ParseSs3((char)c);
         }
+        // OSC, DCS, APC, PM, SOS: a terminal's reply to someone's query (a colour, a version), never typed.
+        if (b2 is ']' or 'P' or '_' or '^' or 'X')
+        {
+            SkipString();
+            return null;
+        }
         // Alt+Backspace (Esc then DEL) — delete-word in the editor.
         if (b2 is 0x7F or 0x08)
             return new KeyInput(MakeKey('\b', ConsoleKey.Backspace, alt: true));
@@ -342,6 +349,35 @@ internal sealed class RawTerminalInput : ITerminalInput
         }
         if (b2 >= 0x80) return ReadUtf8(b2, alt: true); // Alt+ö, Alt+ф: the whole character
         return null;
+    }
+
+    /// <summary>Skip a string sequence up to its end: BEL or ST (ESC \); a pause in the input ends it too.</summary>
+    private void SkipString()
+    {
+        for (int n = 0; n < 1 << 16; n++)
+        {
+            int b = ReadByte(40);
+            if (b < 0 || b == 0x07) return;
+            if (b != 0x1B) continue;
+            int c = ReadByte(40);
+            if (c >= 0 && c != '\\')
+            {
+                _unread.Push(c); // not ST: another sequence starts here
+                _unread.Push(0x1B);
+            }
+            return;
+        }
+    }
+
+    /// <summary>A mouse report in the old X10 form (ESC [ M and three bytes), from terminals without SGR reports.</summary>
+    private InputEvent? ReadX10Mouse()
+    {
+        int b = ReadByte(40), x = ReadByte(40), y = ReadByte(40);
+        if (b < 32 || x < 33 || y < 33) return null;
+        b -= 32;
+        bool release = (b & 3) == 3 && (b & 64) == 0; // X10 does not say which button went up
+        int button = release ? b & ~3 : b;
+        return button < 128 ? new MouseInput(button, x - 33, y - 33, !release) : null;
     }
 
     /// <summary>SS3 sequences: F1-F4, arrows, Home/End and the application-mode keypad.</summary>
@@ -421,6 +457,7 @@ internal sealed class RawTerminalInput : ITerminalInput
 
         int Arg(int i, int def) => int.TryParse(Field(p, i), out int v) ? v : def;
         var (shift, alt, ctrl, super) = DecodeModifiers(SubInt(Field(p, 1), 0));
+        if (SubInt(Field(p, 1), 1) == 3) return null; // a key going up (kitty event type 3): nothing happens
 
         // CSI u (kitty keyboard protocol) has its own field grammar.
         if (final == 'u')

@@ -19,9 +19,11 @@ internal sealed class Changes
         public string Head = "";            // the last commit; "" before the first one
         public Dictionary<string, Kind> Entries = new(Paths.Comparer); // changed files and the folders above them
         public List<string> NewDirs = new();                          // untracked folders: all inside is new
+        public (DateTime, DateTime, DateTime)? GitStamp;               // its .git as last seen (see CheckGitDirs)
     }
 
-    private sealed record Answer(string? Root, string Head, Dictionary<string, Kind> Entries, List<string> NewDirs);
+    private sealed record Answer(string Folder, string? Root, string Head, Dictionary<string, Kind> Entries,
+        List<string> NewDirs, (DateTime, DateTime, DateTime) Git = default);
 
     private readonly DateTime _since = DateTime.UtcNow;
     private readonly List<Repo> _repos = new();
@@ -45,6 +47,7 @@ internal sealed class Changes
         foreach (string d in dirs)
         {
             if (RepoFor(d) is { } repo) { _wanted.Add(repo.Root); continue; }
+            if (Path.Exists(Path.Combine(d, ".git"))) _wanted.Add(d); // `git init` here: a repository from now on
             string? root = panelRoots.Where(r => Paths.IsSameOrInside(d, r)).MaxBy(r => r.Length);
             for (string? p = d; root != null && p != null && Paths.IsInside(p, root); p = Path.GetDirectoryName(p))
                 _touched.Add(p);
@@ -66,6 +69,37 @@ internal sealed class Changes
         foreach (var r in _repos) _wanted.Add(r.Root);
     }
 
+    /// <summary>
+    /// A repository whose .git lies outside the panel's roots (a root inside a
+    /// repository) gets no watcher events from it: look at its .git now and then,
+    /// so an outside commit or checkout re-reads its status.
+    /// </summary>
+    public void CheckGitDirs(IReadOnlyList<string> panelRoots)
+    {
+        foreach (var r in _repos)
+        {
+            string git = Path.Combine(r.Root, ".git");
+            if (panelRoots.Any(p => Paths.IsSameOrInside(git, p))) continue;
+            var stamp = GitStamp(git);
+            if (r.GitStamp == stamp) continue;
+            r.GitStamp = stamp;
+            _wanted.Add(r.Root);
+        }
+    }
+
+    /// <summary>When .git (or the folder a worktree's .git file points to), its index and HEAD last changed.</summary>
+    private static (DateTime, DateTime, DateTime) GitStamp(string git)
+    {
+        try
+        {
+            if (File.Exists(git) && File.ReadAllText(git) is var link && link.StartsWith("gitdir:", StringComparison.Ordinal))
+                git = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(git)!, link[7..].Trim()));
+            return (Directory.GetLastWriteTimeUtc(git), File.GetLastWriteTimeUtc(Path.Combine(git, "index")),
+                File.GetLastWriteTimeUtc(Path.Combine(git, "HEAD")));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return default; }
+    }
+
     /// <summary>Apply finished git answers and start the next round; true when the marks may have changed.</summary>
     public bool Poll()
     {
@@ -74,11 +108,19 @@ internal sealed class Changes
         {
             _running = null;
             if (done.Status == TaskStatus.RanToCompletion)
-                foreach (var a in done.Result.Where(a => a.Root != null))
+                foreach (var a in done.Result)
                 {
+                    if (a.Root == null)
+                    {
+                        // A repository's own folder without .git any more: what is in it is plain files now.
+                        if (!Path.Exists(Path.Combine(a.Folder, ".git"))
+                            && _repos.RemoveAll(r => Paths.Same(r.Root, a.Folder)) > 0)
+                            changed = true;
+                        continue;
+                    }
                     var repo = _repos.Find(r => Paths.Same(r.Root, a.Root));
                     if (repo == null) _repos.Add(repo = new Repo(a.Root!));
-                    (repo.Head, repo.Entries, repo.NewDirs) = (a.Head, a.Entries, a.NewDirs);
+                    (repo.Head, repo.Entries, repo.NewDirs, repo.GitStamp) = (a.Head, a.Entries, a.NewDirs, a.Git);
                     changed = true;
                 }
         }
@@ -87,7 +129,8 @@ internal sealed class Changes
             var batch = _wanted.ToList();
             _wanted.Clear();
             var roots = _repos.Select(r => r.Root).ToHashSet(Paths.Comparer);
-            _running = Task.Run(() => batch.Select(f => Ask(f, roots.Contains(f))).DistinctBy(a => a.Root).ToList());
+            _running = Task.Run(() => batch.Select(f => Ask(f, roots.Contains(f)))
+                .GroupBy(a => a.Root ?? "\0" + a.Folder).Select(g => g.First()).ToList());
         }
         return changed;
     }
@@ -97,7 +140,11 @@ internal sealed class Changes
     {
         if (node.IsRoot || node.Ignored) return Kind.None;
         if (RepoFor(node.FullPath) is { } repo)
+        {
+            // A repository's own folder inside a plain one: marked by what changed in it.
+            if (Paths.Same(node.FullPath, repo.Root)) return repo.Entries.Count > 0 ? Kind.Modified : Kind.None;
             return repo.Entries.TryGetValue(node.FullPath, out var kind) ? kind : InNewDir(repo, node.FullPath);
+        }
         if (node.IsNew || IsCreated(node.FullPath)) return Kind.Added;
         return (node.IsDir ? _touched.Contains(node.FullPath) : node.WriteUtc > _since) ? Kind.Modified : Kind.None;
     }
@@ -137,7 +184,7 @@ internal sealed class Changes
     /// <summary>In the background: the repository holding `folder` (a known root as it is) and its status.</summary>
     private static Answer Ask(string folder, bool isRoot)
     {
-        var none = new Answer(null, "", new(), new());
+        var none = new Answer(folder, null, "", new(), new());
         string root = folder;
         if (!isRoot)
         {
@@ -146,11 +193,12 @@ internal sealed class Changes
             foreach (var _ in prefix.Trim().Split('/', StringSplitOptions.RemoveEmptyEntries))
                 root = Path.GetDirectoryName(root) ?? root;
         }
+        var git = GitStamp(Path.Combine(root, ".git")); // before the status: a commit after it shows as a change
         string? status = Proc.Run("git", "--no-optional-locks status --porcelain=v2 -z --branch --untracked-files=normal",
             root, timeoutMs: 15_000);
         if (status == null) return none;
         var (head, entries, newDirs) = Parse(root, status);
-        return new Answer(root, head, entries, newDirs);
+        return new Answer(folder, root, head, entries, newDirs, git);
     }
 
     /// <summary>`git status --porcelain=v2 -z --branch`: the last commit and the changed paths, folders above them included.</summary>

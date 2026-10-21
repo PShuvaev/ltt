@@ -36,7 +36,7 @@ internal static class TextFile
     /// <summary>Read a file into lines (without their breaks) and its format.</summary>
     public static (List<string> Lines, TextFormat Format) Read(string path)
     {
-        var info = new FileInfo(path);
+        var info = Followed(path);
         if (!info.Exists) throw new FileNotFoundException($"File not found: {path}", path);
         if (info.Length == 0)
         {
@@ -48,6 +48,20 @@ internal static class TextFile
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 1 << 16);
         return Decode(fs);
+    }
+
+    /// <summary>
+    /// A file's lines streamed (for search), decoded as Read decodes them: by its
+    /// BOM, else as UTF-8 — strictly, so a file that is not UTF-8 throws
+    /// DecoderFallbackException, to be read again as Latin-1 (latin1: true).
+    /// </summary>
+    public static IEnumerable<string> ReadLines(string path, bool latin1)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16);
+        using var reader = latin1
+            ? new StreamReader(fs, Encoding.Latin1, detectEncodingFromByteOrderMarks: false)
+            : new StreamReader(fs, DecoderFor(TextEncoding.Utf8), detectEncodingFromByteOrderMarks: true);
+        while (reader.ReadLine() is { } line) yield return line;
     }
 
     /// <summary>Lines from bytes, decoded the way a file is read (a committed version of one, say).</summary>
@@ -257,12 +271,16 @@ internal static class TextFile
     [DllImport("libc", EntryPoint = "__xstat", SetLastError = true)]
     private static extern int xstat(int version, string path, byte[] buf);
 
-    /// <summary>Whether path is a regular file and how many names it has; null when unknown.</summary>
-    internal static (bool Regular, long Links)? Stat(string path)
+    /// <summary>
+    /// Whether path is a regular file, how many names it has, and which file it is
+    /// (the device and the inode); null when unknown. Links are followed.
+    /// </summary>
+    internal static (bool Regular, long Links, long Dev, long Ino)? Stat(string path)
     {
         var arch = RuntimeInformation.ProcessArchitecture;
         bool mac = OperatingSystem.IsMacOS(), linux = OperatingSystem.IsLinux();
-        // Byte offsets of st_mode and st_nlink, and the size of st_nlink.
+        // Byte offsets of st_mode and st_nlink, and the size of st_nlink. st_dev comes first
+        // (4 bytes on macOS, 8 on Linux) and st_ino sits at 8 everywhere.
         var (mode, links, linkSize) =
             mac ? (4, 6, 2)
             : linux && arch == Architecture.X64 ? (24, 16, 8)
@@ -287,7 +305,8 @@ internal static class TextFile
             4 => BitConverter.ToUInt32(buf, links),
             _ => BitConverter.ToInt64(buf, links),
         };
-        return ((BitConverter.ToUInt16(buf, mode) & 0xF000) == 0x8000, count);
+        long dev = mac ? BitConverter.ToInt32(buf, 0) : BitConverter.ToInt64(buf, 0);
+        return ((BitConverter.ToUInt16(buf, mode) & 0xF000) == 0x8000, count, dev, BitConverter.ToInt64(buf, 8));
     }
 
     /// <summary>What identifies a version of the file on disk; null when it is missing.</summary>
@@ -295,9 +314,16 @@ internal static class TextFile
     {
         try
         {
-            var fi = new FileInfo(path);
+            var fi = Followed(path);
             return fi.Exists ? (fi.LastWriteTimeUtc, fi.Length) : null;
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
+    }
+
+    /// <summary>The file a path names: through any links to their final target (whose time and size are the file's).</summary>
+    private static FileInfo Followed(string path)
+    {
+        var fi = new FileInfo(path);
+        return fi.LinkTarget != null && fi.ResolveLinkTarget(returnFinalTarget: true) is FileInfo target ? target : fi;
     }
 }

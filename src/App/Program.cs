@@ -29,6 +29,7 @@ internal static class Program
         {
             if (arg.StartsWith('-'))
             {
+                TerminalModes.ResetKeys();
                 Console.Error.WriteLine($"Unknown option: {arg}. Usage: ltt [folder…] [file[:line]…]");
                 return 2;
             }
@@ -38,6 +39,7 @@ internal static class Program
                 files.Add((Path.GetFullPath(loc.Path), loc.Line));
                 continue;
             }
+            TerminalModes.ResetKeys();
             Console.Error.WriteLine($"Path not found: {arg}");
             return 2;
         }
@@ -53,6 +55,7 @@ internal static class Program
 
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
         {
+            TerminalModes.ResetKeys();
             Console.Error.WriteLine("The editor needs an interactive terminal.");
             return 2;
         }
@@ -161,6 +164,17 @@ internal static class TerminalModes
         // Also back to normal cursor keys and keypad: the runtime switches both to application mode.
         Write((_raw ? "\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l" : "")
               + "\x1b[0m\x1b[?25h\x1b[?1049l\x1b[?1l\x1b>");
+    }
+
+    /// <summary>
+    /// Normal cursor keys and keypad after an early exit: the runtime switches the
+    /// terminal to application mode as soon as the console is set up.
+    /// </summary>
+    public static void ResetKeys()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Console.IsOutputRedirected) Write("\x1b[?1l\x1b>");
+        else if (!Console.IsErrorRedirected) Console.Error.Write("\x1b[?1l\x1b>");
     }
 
     private static void Write(string s)
@@ -272,6 +286,7 @@ internal sealed partial class App
 
     // Watching the left panel's folders for external changes.
     private const int WatchTickMs = 200; // how often the main loop wakes up without input
+    private const int SearchTickMs = 15; // … while a search runs: its results show as soon as it ends
     private FolderWatcher? _watcher;
 
     // What changed (git status, or since start): the tree's colours and the editor's line marks.
@@ -312,7 +327,7 @@ internal sealed partial class App
             while (_running)
             {
                 bool dirty = false;
-                if (input.TryRead(WatchTickMs, out var ev))
+                if (input.TryRead(_pendingSearch != null ? SearchTickMs : WatchTickMs, out var ev))
                 {
                     SafeDispatch(ev);
                     dirty = true;
@@ -343,6 +358,7 @@ internal sealed partial class App
                 {
                     _diskCheckAt = Environment.TickCount64;
                     if (CheckOpenTabsOnDisk()) dirty = true;
+                    _changes.CheckGitDirs(_tree.RootPaths);
                 }
                 if (dirty && _running) SafeDraw();
             }
@@ -507,7 +523,7 @@ internal sealed partial class App
         bool changed = !before.SequenceEqual(after) || beforeSel != _tree.Selected?.FullPath;
         if (changed && batch.Summary.Length > 0)
             _status = $"External change: {batch.Summary} — left panel refreshed.";
-        return changed || redraw;
+        return true; // even with the same rows: a size or a change colour may be new
     }
 
     /// <summary>Tabs of a file (or of files in a folder) renamed outside follow it to the new path.</summary>

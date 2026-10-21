@@ -147,16 +147,17 @@ public sealed class TextEditor
     public void Open(string path, int goToLine = 0)
     {
         string full = Path.GetFullPath(path);
+        var stamp = TextFile.Stamp(full); // before reading: a write landing meanwhile shows as a change
         var (lines, format) = TextFile.Read(full);
-        Load(full, lines, format);
+        Load(full, lines, format, stamp);
         Cy = Math.Clamp(goToLine, 0, _lines.Count - 1);
         EnsureCursorVisible();
     }
 
     /// <summary>A path whose file is gone (a recovered buffer): empty, marked missing on disk.</summary>
-    public void OpenMissing(string path) => Load(Path.GetFullPath(path), new List<string> { "" }, TextFormat.Default);
+    public void OpenMissing(string path) => Load(Path.GetFullPath(path), new List<string> { "" }, TextFormat.Default, null);
 
-    private void Load(string full, List<string> lines, TextFormat format)
+    private void Load(string full, List<string> lines, TextFormat format, (DateTime, long)? stamp)
     {
         BeginChange();
         _lines = lines;
@@ -168,7 +169,7 @@ public sealed class TextEditor
         Format = format;
         SetSyntax(Syntax.For(full));
         IndentWithTabs = DetectTabIndent(_lines, full);
-        DiskStamp = TextFile.Stamp(full);
+        DiskStamp = stamp;
         ChangedOnDisk = false;
         MissingOnDisk = DiskStamp == null;
         _undo.Clear();
@@ -281,6 +282,7 @@ public sealed class TextEditor
     public void Reload()
     {
         if (FilePath == null) return;
+        var stamp = TextFile.Stamp(FilePath); // before reading, as in Open
         var (lines, format) = TextFile.Read(FilePath);
         int pre = 0;
         while (pre < lines.Count && pre < _lines.Count && lines[pre] == _lines[pre]) pre++;
@@ -301,7 +303,7 @@ public sealed class TextEditor
         _open = null;
         Format = format;
         _savedContent = _lines.ToArray();
-        DiskStamp = TextFile.Stamp(FilePath);
+        DiskStamp = stamp;
         ChangedOnDisk = MissingOnDisk = false;
         Dirty = false;
         // Lines below the changed block keep their place on screen.

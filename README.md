@@ -32,7 +32,7 @@ for that loop.
 already keep open next to your agent, shows folders on the left and files
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
-dependencies: ~7.6k lines of C# in a 220 KB assembly (.NET 10).
+dependencies: ~7.9k lines of C# in a 230 KB assembly (.NET 10).
 
 It is a general tool, not only for codebases: notes, docs, configs, logs —
 any folder of text works the same way. Open several folders side by side,
@@ -78,7 +78,7 @@ terminal part.
   stay smooth; the undo history keeps only the lines you touched.
 - 🔎 **Search keeps up with typing** — fuzzy content search runs live from
   2 characters and streams files instead of loading them whole
-  (~40 ms across this repo, process startup included).
+  (~35 ms across this repo).
 - 🤖 **Made for agent workflows** — when your agent (or git, or a build)
   creates, renames or deletes files, the tree updates by itself. An open
   tab follows its file: a clean tab

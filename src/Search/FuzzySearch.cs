@@ -238,6 +238,15 @@ public static class FuzzySearch
             else if (RankCompare(h, _heap.Peek()) < 0) _heap.EnqueueDequeue(h, h);
         }
 
+        /// <summary>Take back the `offered` hits of one file (it is being read again in another encoding).</summary>
+        public void Forget(string file, int offered)
+        {
+            var keep = _heap.UnorderedItems.Select(x => x.Element).Where(h => h.FilePath != file).ToList();
+            _heap.Clear();
+            foreach (var h in keep) _heap.Enqueue(h, h);
+            _offered -= offered;
+        }
+
         public SearchResult Result()
         {
             var list = _heap.UnorderedItems.Select(x => x.Element).ToList();
@@ -307,7 +316,14 @@ public static class FuzzySearch
         {
             // A FIFO or a device reports no length and would block: only real content is read.
             if (new FileInfo(full).Length == 0) return SearchResult.Empty;
-            return SearchLines(full, relativePath, File.ReadLines(full, System.Text.Encoding.UTF8), query, maxResults, ct);
+            try
+            {
+                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: false), query, maxResults, ct);
+            }
+            catch (System.Text.DecoderFallbackException)
+            {
+                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: true), query, maxResults, ct);
+            }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return SearchResult.Empty; }
     }
@@ -343,7 +359,7 @@ public static class FuzzySearch
                     if (!seen.Add(file)) continue;
                     string rel = prefix + Path.GetRelativePath(home, file);
                     if (buffers != null && buffers.TryGetValue(file, out var lines))
-                        ScanLines(file, rel, lines, query, top, ct);
+                        ScanLines(file, rel, lines, query, top.Offer, ct);
                     else switch (ScanFile(file, rel, query, top, ct))
                     {
                         case Scan.TooLarge: skipped++; break;
@@ -377,7 +393,18 @@ public static class FuzzySearch
                     ? Scan.Folder : Scan.Done;
             if (BinaryExt.Contains(info.Extension)) return Scan.Done;
             if (info.Length > MaxFileSize) return Scan.TooLarge;
-            if (info.Length > 0) ScanLines(file, rel, File.ReadLines(file, System.Text.Encoding.UTF8), query, top, ct);
+            if (info.Length == 0) return Scan.Done;
+            int offered = 0;
+            try
+            {
+                ScanLines(file, rel, TextFile.ReadLines(file, latin1: false), query, h => { offered++; top.Offer(h); }, ct);
+            }
+            catch (System.Text.DecoderFallbackException)
+            {
+                // Not UTF-8: as the editor does, read every byte as one Latin-1 character.
+                top.Forget(file, offered);
+                ScanLines(file, rel, TextFile.ReadLines(file, latin1: true), query, top.Offer, ct);
+            }
         }
         catch (IOException) { /* unreadable or vanished — skip it */ }
         catch (UnauthorizedAccessException) { /* same */ }
@@ -385,7 +412,7 @@ public static class FuzzySearch
     }
 
     private static void ScanLines(string file, string rel, IEnumerable<string> lines, string query,
-        TopHits top, CancellationToken ct)
+        Action<SearchHit> offer, CancellationToken ct)
     {
         int lineNo = 0;
         foreach (var line in lines)
@@ -393,7 +420,7 @@ public static class FuzzySearch
             if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) return;
             if (line.Contains('\0')) break; // binary file — stop looking further
             int score = ScoreQuery(query, line, out int st, out int len);
-            if (score >= 0) top.Offer(new SearchHit(file, rel, lineNo, line, score, st, len));
+            if (score >= 0) offer(new SearchHit(file, rel, lineNo, line, score, st, len));
         }
     }
 }
