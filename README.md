@@ -2,7 +2,8 @@
 
 # look-touch-toss editor
 
-**A fast, tiny two-panel console editor for the age of coding agents.**
+### <ins>l</ins>ightweight <ins>t</ins>erminal <ins>t</ins>ext editor
+for the age of coding agents
 
 👀 look at what the agent wrote · ✏️ touch a line or two · 🪃 toss it back
 
