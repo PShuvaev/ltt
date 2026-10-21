@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs ltt in the current folder from a clone kept in ~/.cache/ltt, updated
-# on every start. Arguments pass through: curl -sL ltt.is-an.ai | sh -s -- src/
+# on every start. Arguments pass through: curl https:/ltt.is-an.ai|sh -s -- src/
 set -e
 dir="${XDG_CACHE_HOME:-$HOME/.cache}/ltt"
 if [ -d "$dir/.git" ]; then

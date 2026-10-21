@@ -14,11 +14,11 @@
 ## Quick start
 
 ```sh
-curl -sL https://ltt.is-an.ai | sh
+curl https:/ltt.is-an.ai|sh
 ```
 
 It opens the current folder; pass folders or `file:line` after `sh -s --`
-(`curl -sL https://ltt.is-an.ai | sh -s -- src/ README.md:10`). The script
+(`curl https:/ltt.is-an.ai|sh -s -- src/ README.md:10`). The script
 keeps one clone in `~/.cache/ltt` and updates it on every start.
 
 > [!NOTE]
