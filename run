@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Run ltt's tests.
+
+  ./run                 everything: the functional tests in parallel, then the timing tests alone
+  ./run [pytest args]   pytest with these arguments (in parallel unless -n is given),
+                        e.g. ./run cases/test_save.py -k crlf, ./run -m perf -n0
+
+The first run creates .venv with the pinned packages. Each run builds the
+ltt checkout into .build/ first: the worktree on `main` of this repository
+by default, or --ltt-src=PATH (also LTT_SRC=PATH); --ltt-dll=PATH tests a
+built ltt.dll as it is.
+"""
+import hashlib
+import os
+import subprocess
+import sys
+import venv
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+VENV = os.path.join(HERE, ".venv")
+REQ = os.path.join(HERE, "requirements.txt")
+
+
+def ensure_venv():
+    py = os.path.join(VENV, "bin", "python")
+    stamp = os.path.join(VENV, ".requirements")
+    with open(REQ, "rb") as f:
+        want = hashlib.sha256(f.read()).hexdigest()
+    if not os.path.exists(py):
+        print("ltt tests: creating .venv", file=sys.stderr)
+        venv.create(VENV, with_pip=True)
+    try:
+        with open(stamp) as f:
+            have = f.read()
+    except FileNotFoundError:
+        have = ""
+    if have != want:
+        subprocess.run([py, "-m", "pip", "install", "-q", "--disable-pip-version-check", "-r", REQ], check=True)
+        with open(stamp, "w") as f:
+            f.write(want)
+    return py
+
+
+def pytest(py, args):
+    return subprocess.run([py, "-m", "pytest", *args], cwd=HERE).returncode
+
+
+def main():
+    py = ensure_venv()
+    args = sys.argv[1:]
+    if args:
+        if not any(a == "-n" or a.startswith("-n") or a.startswith("--numprocesses") for a in args):
+            args = ["-n", "auto", *args]
+        return pytest(py, args)
+    functional = pytest(py, ["-n", "auto", "-m", "not perf"])
+    timing = pytest(py, ["-p", "no:xdist", "-m", "perf"])
+    return functional or (0 if timing == 5 else timing)  # 5: no timing tests collected
+
+
+if __name__ == "__main__":
+    sys.exit(main())
