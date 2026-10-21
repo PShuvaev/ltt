@@ -32,26 +32,25 @@ for that loop.
 already keep open next to your agent, shows folders on the left and files
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
-dependencies: ~7k lines of C# in a 200 KB assembly (.NET 10).
+dependencies: ~7.6k lines of C# in a 220 KB assembly (.NET 10).
 
 It is a general tool, not only for codebases: notes, docs, configs, logs —
 any folder of text works the same way. Open several folders side by side,
 search them all at once, copy and move files between them; in a git
 repository ignored files are dimmed and left out of search.
 
-```
- ltt · /home/you/project/src/Program.cs
-▾ project/            │ Program.cs ● ×  notes.txt ×
-  ▾ src/          48K │   1  using System;
-      Program.cs  21K │   2
-      FileTree.cs 17K │   3  class Program { ... }
-  ▸ docs/        5.1K │
-  README.md      4.6K │
-──────────────────────┴──────────────────────────────────
- Search results for "mngr": 1/3 · Enter opens · Ctrl+G next
- [EDITOR] Saved: Program.cs              Ln 3/120, Col 1
- Esc to tree · Ctrl+F find · Ctrl+L go to line · Ctrl+S save
-```
+👀 **Watch the agent** — new files turn green, changed ones yellow, changed lines get marked;
+your unsaved edits are never overwritten without a question.
+
+![The agent creates, rewrites and renames files; the tree, the tabs and the change marks follow; a conflicting save asks first](https://raw.githubusercontent.com/PShuvaev/ltt/media/watch.gif)
+
+✏️ **Find and fix** — jump to `file:line`, search every file as you type, fix the line, copy the code back to the agent.
+
+![Jump to file:line, fuzzy search across the project, a one-character fix, the function copied for the agent](https://raw.githubusercontent.com/PShuvaev/ltt/media/fix.gif)
+
+📂 **Any folder** — notes, configs and logs side by side: one search across them, files copied between them.
+
+![Three folders in one panel: search them all, edit a config, copy a log into the notes, write a new note](https://raw.githubusercontent.com/PShuvaev/ltt/media/folders.gif)
 
 ## Why a terminal
 
@@ -85,6 +84,9 @@ terminal part.
   tab follows its file: a clean tab
   reloads when the agent rewrites it, a tab with your unsaved edits is
   marked ⚠ and saving it asks before overwriting the agent's version.
+  What changed since the last commit stands out: new files green, changed
+  ones yellow, changed lines marked next to the line numbers (outside git:
+  what changed since ltt started).
 
 ## Keys
 
