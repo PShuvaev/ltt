@@ -26,7 +26,7 @@ internal static class SelfTest
             ("save", TestSaveSafety), ("editing", TestEditing), ("undo", TestUndo),
             ("disk", TestDiskChanges), ("scrolling", TestScrolling), ("search", TestSearch), ("refine", TestSearchRefine),
             ("git search", TestGitSearch), ("tree", TestTree), ("git tree", TestGitTree), ("sizes", TestSizes),
-            ("watcher", TestWatcher), ("misc", TestMisc),
+            ("copy/move", TestCopyMove), ("watcher", TestWatcher), ("misc", TestMisc),
         };
         try
         {
@@ -1028,6 +1028,59 @@ internal static class SelfTest
         Check(approximate && single && bt.Roots[0].Children[0] is { Size: 2000, SizeExact: true },
             "sizing: a big folder is counted in the background, once, and settles exact");
         job?.Sizer.Dispose();
+    }
+
+    private static void TestCopyMove()
+    {
+        string tmp = TempDir("copy");
+        string Free(string name, bool isDir = false) => Path.GetFileName(FileOps.FreeName(tmp, name, isDir));
+        Put(tmp, "a.txt", "a");
+        Put(tmp, "a 2.txt", "a");
+        Put(tmp, ".env", "e");
+        Directory.CreateDirectory(Path.Combine(tmp, "v1.2"));
+        Check(Free("a.txt") == "a 3.txt" && Free("new.txt") == "new.txt" && Free(".env") == ".env 2" && Free("v1.2", isDir: true) == "v1.2 2",
+            "paste names: a taken name gets a number, before a file's extension");
+
+        // Nested files, an executable script; on Unix also links (copied as links) and a pipe (skipped).
+        string src = Path.Combine(tmp, "src");
+        Put(src, "top.txt", "top");
+        Put(src, "deep/er/leaf.txt", "leaf");
+        string script = Put(src, "run.sh", "#!/bin/sh\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(script, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.CreateSymbolicLink(Path.Combine(src, "link.txt"), "top.txt");
+            Directory.CreateSymbolicLink(Path.Combine(src, "loop"), src); // followed, the copy would never end
+            Run(src, "mkfifo", "pipe");
+            File.CreateSymbolicLink(Path.Combine(tmp, "dangling.txt"), "nowhere");
+            Check(Free("dangling.txt") == "dangling 2.txt", "paste names: a dangling link takes its name too");
+        }
+        string dst = Path.Combine(tmp, "dst", "src");
+        Directory.CreateDirectory(Path.GetDirectoryName(dst)!);
+        var progress = new FileOps.CopyProgress();
+        FileOps.Copy(src, dst, progress, CancellationToken.None);
+        Check(File.ReadAllText(Path.Combine(dst, "deep", "er", "leaf.txt")) == "leaf" && File.ReadAllText(Path.Combine(dst, "top.txt")) == "top"
+              && progress.Failed == 0,
+            "copy: a folder with everything inside");
+        if (!OperatingSystem.IsWindows())
+            Check(new FileInfo(Path.Combine(dst, "link.txt")).LinkTarget == "top.txt" && new DirectoryInfo(Path.Combine(dst, "loop")).LinkTarget == src
+                  && File.GetUnixFileMode(Path.Combine(dst, "run.sh")).HasFlag(UnixFileMode.UserExecute)
+                  && progress.Skipped == 1 && !Path.Exists(Path.Combine(dst, "pipe")),
+                "copy: links stay links, modes are kept, a pipe is skipped");
+
+        bool refused = false;
+        try { FileOps.Copy(src, dst, new FileOps.CopyProgress(), CancellationToken.None); }
+        catch (IOException) { refused = true; }
+        var stopped = new FileOps.CopyProgress();
+        FileOps.Copy(src, Path.Combine(tmp, "stopped"), stopped, new CancellationToken(canceled: true));
+        Check(refused && !Path.Exists(Path.Combine(tmp, "stopped")) && stopped.Copied == 0,
+            "copy: never onto an existing path; a stopped copy makes nothing more");
+
+        FileOps.Relocate(dst, Path.Combine(tmp, "moved"), isDir: true, new FileOps.CopyProgress(), CancellationToken.None);
+        FileOps.Relocate(Path.Combine(tmp, "a.txt"), Path.Combine(tmp, "moved", "a.txt"), isDir: false, new FileOps.CopyProgress(), CancellationToken.None);
+        Check(!Path.Exists(dst) && File.ReadAllText(Path.Combine(tmp, "moved", "deep", "er", "leaf.txt")) == "leaf"
+              && !Path.Exists(Path.Combine(tmp, "a.txt")) && File.ReadAllText(Path.Combine(tmp, "moved", "a.txt")) == "a",
+            "move: a folder and a file go to another folder");
     }
 
     private static void TestWatcher()

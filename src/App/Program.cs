@@ -332,6 +332,7 @@ internal sealed partial class App
                 if (ApplyExternalChanges()) dirty = true;
                 if (PollSearch()) dirty = true;
                 if (PollSizing()) dirty = true;
+                if (PollPaste()) dirty = true;
                 StartSizingIfIdle();
                 if (Environment.TickCount64 - _diskCheckAt >= DiskCheckIntervalMs)
                 {
@@ -346,6 +347,7 @@ internal sealed partial class App
         {
             CancelSearch();
             CancelSizing();
+            _paste?.Cts.Cancel();
             _watcher.Dispose();
             _watcher = null;
             _emergencyDone.Set();
@@ -751,8 +753,14 @@ internal sealed partial class App
         SaveTab(next, then: () => SaveAllThen(done));
     }
 
-    private void TryQuit()
+    private void TryQuit(bool stopCopy = false)
     {
+        if (_paste != null && !stopCopy)
+        {
+            Ask("Files are still being copied!  Q stops the copy and quits · Esc keeps it going",
+                ('q', () => TryQuit(stopCopy: true)));
+            return;
+        }
         if (!_tabs.AnyDirty) { _running = false; return; }
         Ask($"Unsaved tabs: {_tabs.DirtyCount}!  S saves all · D quits without saving · Esc cancels",
             ('s', () => SaveAllThen(() => _running = false)),

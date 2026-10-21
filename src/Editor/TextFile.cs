@@ -246,7 +246,7 @@ internal static class TextFile
     private static extern int xstat(int version, string path, byte[] buf);
 
     /// <summary>Whether path is a regular file and how many names it has; null when unknown.</summary>
-    private static (bool Regular, long Links)? Stat(string path)
+    internal static (bool Regular, long Links)? Stat(string path)
     {
         var arch = RuntimeInformation.ProcessArchitecture;
         bool mac = OperatingSystem.IsMacOS(), linux = OperatingSystem.IsLinux();

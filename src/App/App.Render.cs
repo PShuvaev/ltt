@@ -260,6 +260,7 @@ internal sealed partial class App
                 bool sel = idx == _tree.SelectedIndex;
                 var bg = sel ? (_focus == Focus.Tree ? ConsoleColor.DarkCyan : ConsoleColor.DarkGray) : ConsoleColor.Black;
                 var fg = sel ? ConsoleColor.White
+                    : _picked is { } picked && Paths.Same(picked.Path, node.FullPath) ? ConsoleColor.DarkYellow // Ctrl+C / Ctrl+X
                     : node.Ignored ? ConsoleColor.DarkGray // git-ignored entries stay in the background
                     : node.IsDir ? ConsoleColor.White : ConsoleColor.Gray;
                 // Size hugs the right edge in a dim colour; roots have no size of their own.
@@ -556,8 +557,11 @@ internal sealed partial class App
         string help = _mode == UiMode.SearchResults
             ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
-                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
+                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
                 : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab";
+        if (_paste is { } job) help = PasteProgress(job);
+        else if (_picked is { } p && _focus == Focus.Tree && _mode == UiMode.Normal)
+            help = $" Ctrl+V {(p.Cut ? "moves" : "copies")} {p.Label} here · Esc forgets it ·" + help;
         if (_mode == UiMode.Normal && _resultsVisible)
             help += " · Ctrl+G — next hit";
         WriteAt(0, helpY, help, ConsoleColor.DarkGray, ConsoleColor.Black, w);

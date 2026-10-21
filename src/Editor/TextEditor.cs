@@ -207,14 +207,18 @@ public sealed class TextEditor
 
     /// <summary>
     /// The file was moved: only the path changes. The known disk version stays —
-    /// a move keeps time and size, so an edit made after it still shows.
+    /// a move keeps time and size, so an edit made after it still shows. A copy
+    /// to another disk may round the time: a buffer that was in sync with the
+    /// file before (wasInSync) takes the new stamp.
     /// </summary>
-    public void RenameTo(string newPath)
+    public void RenameTo(string newPath, bool wasInSync = false)
     {
         FilePath = Path.GetFullPath(newPath);
         var syntax = Syntax.For(FilePath);
         if (!ReferenceEquals(syntax, Syntax)) SetSyntax(syntax); // the language may have changed
-        MissingOnDisk = TextFile.Stamp(FilePath) == null;
+        var stamp = TextFile.Stamp(FilePath);
+        MissingOnDisk = stamp == null;
+        if (wasInSync && stamp != null) DiskStamp = stamp;
     }
 
     /// <summary>Write the buffer back in the file's own format (atomically, see TextFile.Write).</summary>

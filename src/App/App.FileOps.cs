@@ -1,4 +1,4 @@
-/// <summary>Creating, renaming and deleting files/folders from the tree panel.</summary>
+/// <summary>Creating, renaming, deleting, copying and moving files/folders from the tree panel.</summary>
 internal sealed partial class App
 {
     /// <summary>Directory to create in: the selected node's folder or the open file's folder.</summary>
@@ -21,15 +21,17 @@ internal sealed partial class App
 
     /// <summary>
     /// Re-read the loaded folders on the way to `path` (a new entry may sit in any
-    /// of them — "a/b/c.txt" creates folders too), then select `path`.
+    /// of them — "a/b/c.txt" creates folders too) and `alsoDir` (one an entry
+    /// left), then select `path` unless told not to.
     /// </summary>
-    private void ShowInTree(string path)
+    private void ShowInTree(string path, string? alsoDir = null, bool select = true)
     {
         var dirs = new List<string>();
         for (string? d = Path.GetDirectoryName(Paths.Normalize(path)); d != null; d = Path.GetDirectoryName(d))
             dirs.Add(d);
+        if (alsoDir != null) dirs.Add(alsoDir);
         _tree.RefreshDirs(dirs);
-        _tree.SelectPath(path);
+        if (select) _tree.SelectPath(path);
         FilesChanged();
     }
 
@@ -140,20 +142,142 @@ internal sealed partial class App
             return;
         }
 
-        // Open tabs of the renamed file/folder follow along.
-        foreach (var tab in _tabs.Tabs)
-        {
-            string? fp = tab.Editor.FilePath;
-            if (fp == null) continue;
-            if (Paths.Same(fp, oldPath)) tab.Editor.RenameTo(newPath);
-            else if (isDir && Paths.IsInside(fp, oldPath)) tab.Editor.RenameTo(newPath + fp[oldPath.Length..]);
-        }
-
+        MoveTabs(oldPath, newPath, isDir);
         if (_tree.ReplaceRootPath(oldPath, newPath)) FilesChanged();
         else ShowInTree(newPath);
         SyncWatcher();
         _status = $"Renamed: {Path.GetFileName(oldPath)} → {newName}";
     }
+
+    /// <summary>Open tabs of a moved file, or of the files in a moved folder, follow it.</summary>
+    private void MoveTabs(string oldPath, string newPath, bool isDir, IReadOnlySet<TextEditor>? inSync = null)
+    {
+        foreach (var tab in _tabs.Tabs)
+        {
+            string? fp = tab.Editor.FilePath;
+            if (fp == null) continue;
+            bool synced = inSync?.Contains(tab.Editor) == true;
+            if (Paths.Same(fp, oldPath)) tab.Editor.RenameTo(newPath, synced);
+            else if (isDir && Paths.IsInside(fp, oldPath)) tab.Editor.RenameTo(newPath + fp[oldPath.Length..], synced);
+        }
+    }
+
+    // ---- Copy and move: Ctrl+C / Ctrl+X picks an entry up, Ctrl+V pastes it into a folder of any root ----
+
+    private sealed record PickedUp(string Path, bool IsDir, bool IsLink, bool Cut)
+    {
+        public string Label => System.IO.Path.GetFileName(Path) + (IsDir ? "/" : "");
+    }
+
+    /// <summary>A paste still at work: a big copy goes on in the background. InSync — tabs that knew their file's disk version.</summary>
+    private sealed record PasteJob(PickedUp What, string To, string? SelectedAt, IReadOnlySet<TextEditor> InSync, Task Task,
+        FileOps.CopyProgress Progress, CancellationTokenSource Cts);
+
+    private PickedUp? _picked;
+    private PasteJob? _paste;
+
+    /// <summary>Ctrl+C / Ctrl+X in the tree: pick the selected entry up for Ctrl+V; a copy also puts its path on the clipboard.</summary>
+    private void PickUp(bool cut)
+    {
+        if (_tree.Selected is not { } node) return;
+        if (cut && IsDeleteProtected(node.FullPath, _tree.RootPaths))
+        {
+            _status = node.IsRoot
+                ? "A root stays where it is: Ctrl+C copies it instead."
+                : $"Protected path - never moved: {node.FullPath}";
+            return;
+        }
+        _picked = new PickedUp(node.FullPath, node.IsDir, node.IsLink, cut);
+        if (!cut) Clipboard.Copy(node.FullPath);
+        _status = cut
+            ? $"Cut {_picked.Label} — Ctrl+V in a folder of any root moves it there."
+            : $"Copied {_picked.Label} and its path — Ctrl+V in a folder of any root pastes it.";
+    }
+
+    /// <summary>
+    /// Ctrl+V in the tree: copy or move what was picked up into the selected
+    /// folder (or the selected file's folder). Nothing is overwritten: a taken
+    /// name gets a number.
+    /// </summary>
+    private void Paste()
+    {
+        if (_picked is not { } what)
+        {
+            _status = "Ctrl+V here pastes a file or folder picked up with Ctrl+C or Ctrl+X; text goes into the editor (Tab).";
+            return;
+        }
+        if (_paste != null) { _status = "Still copying — Esc stops it."; return; }
+        string dir = TargetDirectory();
+        if (!Path.Exists(what.Path)) { _picked = null; _status = $"{what.Label} is no longer on disk."; return; }
+        // A folder pasted into itself would copy its own copy without end.
+        if (what is { IsDir: true, IsLink: false }
+            && (Paths.IsSameOrInside(dir, what.Path) || Paths.IsSameOrInside(Paths.Real(dir), Paths.Real(what.Path))))
+        {
+            _status = $"{what.Label} cannot go inside itself.";
+            return;
+        }
+        if (what.Cut && Paths.Same(Path.GetDirectoryName(what.Path), dir)) { _status = $"{what.Label} is already here."; return; }
+        if (what.Cut && IsDeleteProtected(what.Path, _tree.RootPaths)) { _status = $"Protected path - never moved: {what.Path}"; return; }
+
+        string to = FileOps.FreeName(dir, Path.GetFileName(what.Path), what.IsDir);
+        // A tab that matches its file now still does after the move, even where another disk rounds the time.
+        var inSync = what.Cut
+            ? _tabs.Tabs.Select(t => t.Editor).Where(e => e.FilePath is { } fp && Paths.IsSameOrInside(fp, what.Path)
+                && e.CheckDisk() == TextEditor.DiskState.Same).ToHashSet()
+            : new HashSet<TextEditor>();
+        var progress = new FileOps.CopyProgress();
+        var cts = new CancellationTokenSource();
+        var ct = cts.Token;
+        var task = Task.Run(() =>
+        {
+            if (what.Cut) FileOps.Relocate(what.Path, to, what.IsDir, progress, ct);
+            else FileOps.Copy(what.Path, to, progress, ct);
+        });
+        _paste = new PasteJob(what, to, _tree.Selected?.FullPath, inSync, task, progress, cts);
+        Task.WaitAny(new[] { task }, 150); // most pastes are done by then
+        PollPaste();
+    }
+
+    /// <summary>
+    /// A finished paste: the tree shows the result (selected, unless the
+    /// selection moved on meanwhile), tabs follow a move, the status says how
+    /// it went. True while a paste runs too — its progress is on screen.
+    /// </summary>
+    private bool PollPaste()
+    {
+        if (_paste is not { } job) return false;
+        if (!job.Task.IsCompleted) return true;
+        _paste = null;
+        bool stopped = job.Cts.IsCancellationRequested;
+        job.Cts.Dispose();
+        var (what, p) = (job.What, job.Progress);
+        bool moved = what.Cut && !Path.Exists(what.Path) && Path.Exists(job.To);
+        if (moved)
+        {
+            _picked = null;
+            MoveTabs(what.Path, job.To, what.IsDir, job.InSync);
+        }
+        string name = Path.GetFileName(job.To);
+        string into = Path.GetFileName(Path.GetDirectoryName(job.To)) + "/"
+                      + (name == Path.GetFileName(what.Path) ? "" : $" as {name}");
+        string problems = (p.Skipped > 0 ? $" Skipped {p.Skipped} pipe(s) or device(s)." : "")
+                          + (p.Failed > 0 ? $" {p.Failed} failed: {p.FirstError}" : "");
+        string error = what.Cut ? "Move error: " : "Copy error: ";
+        _status = job.Task.Exception?.InnerException is { } ex ? error + ex.Message
+            : moved ? $"Moved {what.Label} into {into}."
+            : stopped ? $"Stopped: the copy in {into} is incomplete." + (what.Cut ? " The original stays." : "")
+            : p is { Copied: 0, Failed: > 0 } ? error + p.FirstError
+            : what.Cut ? $"Copied {what.Label} into {into}, but the original stays:" + problems
+            : $"Copied {what.Label} into {into}" + (what.IsDir ? $" ({p.Copied} files)." : ".") + problems;
+        ShowInTree(job.To, alsoDir: moved ? Path.GetDirectoryName(what.Path) : null,
+            select: Paths.Same(_tree.Selected?.FullPath, job.SelectedAt));
+        return true;
+    }
+
+    /// <summary>The help line while a paste runs.</summary>
+    private static string PasteProgress(PasteJob job) =>
+        $" {(job.What.Cut ? "Moving" : "Copying")} {job.What.Label} into {Path.GetFileName(Path.GetDirectoryName(job.To))}/: "
+        + $"{job.Progress.Copied} files so far · Esc in the tree stops it";
 
     /// <summary>
     /// Paths that must never be deleted from disk through the UI: panel roots

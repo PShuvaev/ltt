@@ -29,10 +29,15 @@ systems, indexers, language servers, slow startup — is heavy machinery
 for that loop.
 
 **ltt** is the opposite. It starts instantly in the terminal you
-already keep open next to your agent, shows folders on the left and code
+already keep open next to your agent, shows folders on the left and files
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
-dependencies: ~7k lines of C# in a 190 KB assembly (.NET 10).
+dependencies: ~7k lines of C# in a 200 KB assembly (.NET 10).
+
+It is a general tool, not only for codebases: notes, docs, configs, logs —
+any folder of text works the same way. Open several folders side by side,
+search them all at once, copy and move files between them; in a git
+repository ignored files are dimmed and left out of search.
 
 ```
  ltt · /home/you/project/src/Program.cs
@@ -90,6 +95,7 @@ dependencies: ~7k lines of C# in a 190 KB assembly (.NET 10).
 |---|---|
 | <kbd>Enter</kbd> / <kbd>→</kbd> · <kbd>←</kbd> | open file (on a folder: expand) · collapse |
 | <kbd>Tab</kbd> | to the editor (<kbd>Esc</kbd> returns) |
+| <kbd>Ctrl+C</kbd> / <kbd>Ctrl+X</kbd> · <kbd>Ctrl+V</kbd> | copy / cut a file or folder · paste it into the selected folder, in any root |
 | <kbd>Ctrl+R</kbd> · <kbd>Ctrl+Delete</kbd> · <kbd>Delete</kbd> | rename · delete from disk · remove root from panel |
 
 ### Editor (right panel)
@@ -113,43 +119,25 @@ dependencies: ~7k lines of C# in a 190 KB assembly (.NET 10).
 
 ## Good to know
 
-- <kbd>Ctrl+F</kbd> searches from the focused target: in the tree, inside
-  the selected file or recursively under the selected folder/root; in the
-  editor, the open file including unsaved edits. Pressing <kbd>Ctrl+F</kbd>
-  again widens the same query to all folders — that's <kbd>Ctrl+F+F</kbd>.
-- No shortcut uses a function key. Bare <kbd>Shift</kbd> only extends the
-  selection with the arrow keys; every other <kbd>Shift</kbd> combination
-  comes with <kbd>Ctrl</kbd> (<kbd>Ctrl+Shift+G</kbd>,
-  <kbd>Ctrl+Shift+N</kbd>, <kbd>Ctrl+Shift+Z</kbd>) and needs a
-  kitty-protocol terminal (kitty, WezTerm, Ghostty, foot) to be told apart
-  from its unshifted form. Fallbacks: type a trailing `/` in the new-file
-  prompt to make a folder; <kbd>Ctrl+Y</kbd> redoes.
+- <kbd>Ctrl+Shift</kbd> shortcuts need a terminal with the kitty keyboard
+  protocol (kitty, WezTerm, Ghostty, foot); elsewhere a trailing `/` in the
+  new-file prompt makes a folder and <kbd>Ctrl+Y</kbd> redoes.
 - Shortcuts follow the letters of your keyboard layout (AZERTY, QWERTZ…);
   with a Cyrillic or other non-Latin layout they use the physical keys.
-  In kitty-protocol terminals <kbd>Cmd</kbd> works like <kbd>Ctrl</kbd>
-  on a Mac (<kbd>Cmd+S</kbd> saves, <kbd>Cmd+←</kbd> goes to the line start).
-- <kbd>Ctrl+V</kbd> pastes the system clipboard; your terminal's own paste
-  works too (one undo step, no auto-indent) — and is the only route over
-  SSH, where the clipboard can't be read back. <kbd>Ctrl+C</kbd> copies a
-  selection or cancels a prompt; it never quits (that's <kbd>Ctrl+Q</kbd>).
-- Files are saved exactly as they were read: encoding (UTF-8 with or
-  without a BOM, UTF-16, Latin-1 for anything that is not valid UTF-8),
-  line endings and the final newline stay as they were, tabs stay tabs
-  (shown 4 wide). A save replaces the file in one atomic rename, keeping
-  its permissions; a file with other hard links, or in a read-only folder,
-  is overwritten in place instead. Read-only files, pipes and devices are
-  refused. Lines over 20,000 characters (minified code, logs) are shown
-  without syntax colours.
-- The tree watches its folders (`FileSystemWatcher`, polling fallback) and
-  shows sizes, largest first: files exactly, folders counted in the
-  background (`≥` while still counting) and counted again whenever
-  something inside them changes.
-- In a git repository, search covers the files git knows — tracked and
-  untracked, minus `.gitignore` (repositories nested inside, and inside
-  plain folders, by their own rules); elsewhere it skips `.git`,
-  `node_modules` and the like. Binaries and files over 8 MB are skipped in
-  folder searches; unsaved edits in open tabs are searched too.
-- If ltt crashes, is killed (SIGTERM, SIGHUP) or loses its terminal,
-  unsaved tabs are written to a recovery folder (`~/Library/Application
-  Support/ltt/recovery` on macOS, `~/.local/share/ltt/recovery` on Linux)
-  and reopen as unsaved tabs on the next start.
+  On a Mac, <kbd>Cmd</kbd> works like <kbd>Ctrl</kbd> in kitty-protocol terminals.
+- In the editor <kbd>Ctrl+V</kbd> pastes the system clipboard; your
+  terminal's own paste works too and is the only route over SSH.
+  <kbd>Ctrl+C</kbd> never quits (that's <kbd>Ctrl+Q</kbd>).
+- Pasting in the tree never overwrites: a taken name gets a number
+  (`notes 2.txt`). <kbd>Ctrl+C</kbd> on a tree entry also copies its path.
+- Files are saved exactly as they were read — encoding (UTF-8, UTF-16,
+  Latin-1), BOM, line endings, the final newline and tabs stay as they
+  were — in one atomic rename that keeps the file's permissions.
+- The tree shows sizes, largest first; folders are counted in the
+  background (`≥` while still counting).
+- In a git repository search covers the files git knows (tracked and
+  untracked, minus `.gitignore`); elsewhere it skips `.git`,
+  `node_modules` and the like. Unsaved edits in open tabs are searched too.
+- If ltt crashes, is killed or loses its terminal, unsaved tabs go to a
+  recovery folder (`~/Library/Application Support/ltt/recovery` on macOS,
+  `~/.local/share/ltt/recovery` on Linux) and reopen on the next start.

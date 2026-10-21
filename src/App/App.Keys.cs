@@ -140,8 +140,8 @@ internal sealed partial class App
     private void HandleKey(ConsoleKeyInfo key)
     {
         // In raw mode Ctrl+C arrives as a byte, not a signal — handle it ourselves.
-        // It copies an editor selection or cancels a prompt; it never quits the app
-        // (quitting is Ctrl+Q, so a stray Ctrl+C can't throw work away).
+        // It copies an editor selection or a tree entry, or cancels a prompt; it never
+        // quits the app (quitting is Ctrl+Q, so a stray Ctrl+C can't throw work away).
         if (IsCtrlKey(key, ConsoleKey.C))
         {
             if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasSelection) CopySelection();
@@ -151,6 +151,7 @@ internal sealed partial class App
                 _confirm = null;
                 _status = "Cancelled (Ctrl+C).";
             }
+            else if (_focus == Focus.Tree) PickUp(cut: false);
             else _status = "Ctrl+C copies a selection. Ctrl+Q quits.";
             return;
         }
@@ -270,9 +271,13 @@ internal sealed partial class App
     {
         switch (key.Key)
         {
-            case ConsoleKey.Escape:
-                if (_resultsVisible) { _resultsVisible = false; _status = "Search panel hidden (Ctrl+G brings it back)."; }
+            case ConsoleKey.Escape: // stops a paste, forgets what was picked up, hides the results — in that order
+                if (_paste != null) { _paste.Cts.Cancel(); _status = "Stopping the copy…"; }
+                else if (_picked != null) { _status = $"{_picked.Label} is no longer picked up."; _picked = null; }
+                else if (_resultsVisible) { _resultsVisible = false; _status = "Search panel hidden (Ctrl+G brings it back)."; }
                 break;
+            case ConsoleKey.X when Ctrl(key): PickUp(cut: true); break;
+            case ConsoleKey.V when Ctrl(key): Paste(); break;
             case ConsoleKey.UpArrow: _tree.MoveUp(); break;
             case ConsoleKey.DownArrow: _tree.MoveDown(); break;
             case ConsoleKey.RightArrow:
