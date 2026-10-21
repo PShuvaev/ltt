@@ -1,21 +1,25 @@
 /// <summary>Keyboard handling: search entry points and per-mode key handlers.</summary>
 internal sealed partial class App
 {
-    // ============================ Keys ============================
+    private static bool Ctrl(ConsoleKeyInfo key) =>
+        key.Modifiers.HasFlag(ConsoleModifiers.Control) && !key.Modifiers.HasFlag(ConsoleModifiers.Alt);
 
-    internal static bool IsCtrlKey(ConsoleKeyInfo key, ConsoleKey expected) =>
-        key.Key == expected
-        && key.Modifiers.HasFlag(ConsoleModifiers.Control)
-        && !key.Modifiers.HasFlag(ConsoleModifiers.Alt);
+    internal static bool IsCtrlKey(ConsoleKeyInfo key, ConsoleKey expected) => key.Key == expected && Ctrl(key);
 
     internal static bool IsCtrlF(ConsoleKeyInfo key) => IsCtrlKey(key, ConsoleKey.F);
-    internal static bool IsCtrlR(ConsoleKeyInfo key) => IsCtrlKey(key, ConsoleKey.R);
 
     /// <summary>Ctrl+G jumps to the next hit; Ctrl+Shift+G to the previous one.</summary>
     internal static int SearchJumpDelta(ConsoleKeyInfo key) =>
         IsCtrlKey(key, ConsoleKey.G)
             ? key.Modifiers.HasFlag(ConsoleModifiers.Shift) ? -1 : +1
             : 0;
+
+    /// <summary>A plain typed character (no Ctrl/Alt, no control character), or '\0'.</summary>
+    internal static char Typed(ConsoleKeyInfo key) =>
+        !char.IsControl(key.KeyChar)
+        && !key.Modifiers.HasFlag(ConsoleModifiers.Control) && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)
+            ? key.KeyChar
+            : '\0';
 
     /// <summary>Turn selected text into a search query: spaces instead of line breaks, trimmed.</summary>
     internal static string NormalizeSearchSeed(string text)
@@ -30,21 +34,19 @@ internal sealed partial class App
             ? NormalizeSearchSeed(_editor.SelectedText())
             : "";
 
-    private void ApplySearchScope(SearchScope scope, string? targetPath, bool targetIsDir)
+    private void ApplySearchScope(SearchScope scope, string? targetPath)
     {
-        CancelSearch();
+        ResetLiveSearch();
         _searchScope = scope;
         _searchTargetPath = targetPath;
-        _searchTargetIsDir = targetIsDir;
-        _liveQuery = "";
-        _liveSource = new List<SearchHit>();
         _hits = new List<SearchHit>();
+        _hitsTruncated = false;
         _hitIndex = 0;
         _hitScroll = 0;
         _resultsVisible = false;
     }
 
-    private void OpenSearch(string initial, SearchScope scope, string? targetPath = null, bool targetIsDir = false)
+    private void OpenSearch(string initial, SearchScope scope, string? targetPath = null)
     {
         if (scope != SearchScope.AllFolders && targetPath == null)
         {
@@ -52,7 +54,7 @@ internal sealed partial class App
             return;
         }
 
-        ApplySearchScope(scope, targetPath, targetIsDir);
+        ApplySearchScope(scope, targetPath);
         _searchQuery.Clear();
         if (initial.Length > 0) _searchQuery.Append(initial);
         _mode = UiMode.SearchInput;
@@ -63,7 +65,7 @@ internal sealed partial class App
     private void OpenScopedSearch(string initial)
     {
         if (ResolveScopedSearchTarget() is { } target)
-            OpenSearch(initial, target.Scope, target.Path, target.IsDir);
+            OpenSearch(initial, target.Scope, target.Path);
         else
             _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
     }
@@ -72,42 +74,21 @@ internal sealed partial class App
     private void ToggleSearchScope()
     {
         if (_searchScope != SearchScope.AllFolders)
-            ApplySearchScope(SearchScope.AllFolders, null, false);
+            ApplySearchScope(SearchScope.AllFolders, null);
         else if (ResolveScopedSearchTarget() is { } target)
-            ApplySearchScope(target.Scope, target.Path, target.IsDir);
+            ApplySearchScope(target.Scope, target.Path);
         else
             return; // stay on all folders; the prompt shows the active scope
 
         RunLiveSearch();
     }
 
-    private void ArmRenameChord()
-    {
-        _renameChordArmed = true;
-        _renameChordExpiresAtMs = Environment.TickCount64 + 1200;
-        _status = "Ctrl+R+R: press Ctrl+R again to rename.";
-    }
-
-    /// <summary>Complete Ctrl+R+R only on a second Ctrl+R press.</summary>
-    private bool TryCompleteRenameChord(ConsoleKeyInfo key)
-    {
-        if (!_renameChordArmed) return false;
-        _renameChordArmed = false;
-        if (_mode != UiMode.Normal || Environment.TickCount64 > _renameChordExpiresAtMs)
-            return false;
-        if (!IsCtrlR(key))
-            return false;
-
-        StartRenameForCurrentFocus();
-        return true;
-    }
-
     private void StartRenameForCurrentFocus()
     {
         if (_focus == Focus.Editor && _editor.HasFile)
             StartRenamePath(_editor.FilePath!, isDir: false);
-        else
-            StartRename();
+        else if (_tree.Selected is { } node)
+            StartRenamePath(node.FullPath, node.IsDir);
     }
 
     /// <summary>Copy the editor selection to the system clipboard.</summary>
@@ -132,36 +113,42 @@ internal sealed partial class App
         _status = inserted > 0 ? $"Pasted: {inserted} chars" : "Nothing pasteable on the clipboard.";
     }
 
+    /// <summary>A paste through the terminal (bracketed paste): one edit, no auto-indent; a prompt takes one line.</summary>
+    private void HandlePaste(string text)
+    {
+        string oneLine = string.Join(" ", text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None)).Trim();
+        switch (_mode)
+        {
+            case UiMode.SearchInput:
+                _searchQuery.Append(oneLine.Replace('\t', ' '));
+                RunLiveSearch();
+                return;
+            case UiMode.PathInput:
+                _pathInput.Append(oneLine);
+                UpdatePathCompletions();
+                return;
+            case UiMode.Normal when _focus == Focus.Editor && _editor.HasFile:
+                int n = _editor.InsertText(text);
+                _status = n > 0 ? $"Pasted: {n} chars" : "Nothing pasteable.";
+                return;
+            default:
+                _status = "Pasting goes into the editor: open a file and press Tab to get there.";
+                return;
+        }
+    }
+
     private void HandleKey(ConsoleKeyInfo key)
     {
-        if (TryCompleteRenameChord(key)) return;
-
-        // Ctrl+C with a title path selected — copy the path.
-        if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control)
-            && _mode == UiMode.Normal && HasTitleSelection)
-        {
-            CopyTitleSelection();
-            return;
-        }
-        // Ctrl+C with an editor selection — copy, not quit.
-        if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control)
-            && _mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasSelection)
-        {
-            CopySelection();
-            return;
-        }
-        // Any other key press clears the path selection.
-        _titleSelFrom = -1;
-        _titleSelTo = -1;
-
         // In raw mode Ctrl+C arrives as a byte, not a signal — handle it ourselves.
-        // It copies (handled above) or cancels a prompt; it never quits the app
+        // It copies an editor selection or cancels a prompt; it never quits the app
         // (quitting is Ctrl+Q, so a stray Ctrl+C can't throw work away).
-        if (key.Key == ConsoleKey.C && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+        if (IsCtrlKey(key, ConsoleKey.C))
         {
-            if (_mode != UiMode.Normal)
+            if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasSelection) CopySelection();
+            else if (_mode != UiMode.Normal)
             {
-                _mode = UiMode.Normal; _pending = PendingKind.None; _pendingTab = null; _pendingDeletePath = null;
+                _mode = UiMode.Normal;
+                _confirm = null;
                 _status = "Cancelled (Ctrl+C).";
             }
             else _status = "Ctrl+C copies a selection. Ctrl+Q quits.";
@@ -172,80 +159,61 @@ internal sealed partial class App
         {
             case UiMode.SearchInput: HandleSearchInput(key); return;
             case UiMode.PathInput: HandlePathInput(key); return;
-            case UiMode.SearchResults: HandleSearchResults(key); return;
             case UiMode.Confirm: HandleConfirm(key); return;
+            case UiMode.SearchResults:
+                if (HandleSearchResults(key)) return;
+                break; // the shortcuts of the normal mode work over the results too
         }
 
-        // Global keys of the normal mode
-        if (key.Key == ConsoleKey.Q && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        { TryQuit(); return; }
-        if (key.Key == ConsoleKey.S && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        { Save(); return; }
-        // Rename: Ctrl+R+R.
-        if (IsCtrlR(key)) { ArmRenameChord(); return; }
-        // Ctrl+F — inside the selected file/folder (tree) or the open file (editor).
-        // A second Ctrl+F in the input widens the same query to all folders.
-        if (IsCtrlF(key))
-        {
-            OpenScopedSearch(SelectionSearchSeed());
-            return;
-        }
-        if (key.Key == ConsoleKey.O && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            OpenPathInput(PathPurpose.AddRoot);
-            return;
-        }
-        if (key.Key == ConsoleKey.N && key.Modifiers.HasFlag(ConsoleModifiers.Control))
-        {
-            // Ctrl+N — new file; Ctrl+Shift+N — new folder (or a trailing / in the file prompt).
-            OpenPathInput(key.Modifiers.HasFlag(ConsoleModifiers.Shift)
-                ? PathPurpose.CreateFolder
-                : PathPurpose.CreateFile);
-            return;
-        }
-        int searchJump = SearchJumpDelta(key);
-        if (searchJump != 0) { JumpHit(searchJump); return; }
-
-        // Undo / Redo of the active tab
-        bool ctrl = key.Modifiers.HasFlag(ConsoleModifiers.Control);
-        bool shiftMod = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
-        if (ctrl && key.Key == ConsoleKey.Z && !shiftMod)
-        {
-            if (_editor.CanUndo) { _editor.Undo(); _focus = Focus.Editor; _status = "Undone. Ctrl+Y redoes it."; }
-            else _status = "Nothing to undo.";
-            return;
-        }
-        if ((ctrl && key.Key == ConsoleKey.Y) || (ctrl && shiftMod && key.Key == ConsoleKey.Z))
-        {
-            if (_editor.CanRedo) { _editor.Redo(); _focus = Focus.Editor; _status = "Redone. Ctrl+Z undoes it."; }
-            else _status = "Nothing to redo.";
-            return;
-        }
-
-        // Tabs
-        if (key.Key == ConsoleKey.W && ctrl)
-        {
-            if (_tabs.Active is { } at) CloseTab(at);
-            else _status = "No open tabs.";
-            return;
-        }
-        if (key.Key == ConsoleKey.P && ctrl)
-        {
-            if (_tabs.Active is { } at) TogglePin(at);
-            else _status = "No open tab to pin.";
-            return;
-        }
-        if (key.Key == ConsoleKey.PageDown && ctrl) { SwitchTab(+1); return; }
-        if (key.Key == ConsoleKey.PageUp && ctrl) { SwitchTab(-1); return; }
-        if (key.Modifiers.HasFlag(ConsoleModifiers.Alt) && key.KeyChar is >= '1' and <= '9')
-        {
-            int i = key.KeyChar - '1';
-            if (i < _tabs.Tabs.Count) { ActivateTab(i, announce: true); _focus = Focus.Editor; }
-            return;
-        }
-
+        if (HandleGlobalKey(key)) return;
+        if (_mode != UiMode.Normal) return;
         if (_focus == Focus.Tree) HandleTreeKey(key);
         else HandleEditorKey(key);
+    }
+
+    /// <summary>The shortcuts that work everywhere outside prompts. True — the key was one of them.</summary>
+    private bool HandleGlobalKey(ConsoleKeyInfo key)
+    {
+        // The key, not the character: Alt+1 on AZERTY types '&' (and kitty reports the key).
+        if (key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control)
+            && key.Key is >= ConsoleKey.D1 and <= ConsoleKey.D9)
+        {
+            int i = key.Key - ConsoleKey.D1;
+            if (i < _tabs.Tabs.Count) { ActivateTab(i, announce: true); _focus = Focus.Editor; _mode = UiMode.Normal; }
+            return true;
+        }
+        if (!Ctrl(key)) return false;
+        bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+        switch (key.Key)
+        {
+            case ConsoleKey.Q: TryQuit(); return true;
+            case ConsoleKey.S: Save(); return true;
+            case ConsoleKey.R: StartRenameForCurrentFocus(); return true;
+            // Ctrl+F — inside the selected file/folder (tree) or the open file (editor).
+            // A second Ctrl+F in the input widens the same query to all folders.
+            case ConsoleKey.F: OpenScopedSearch(SelectionSearchSeed()); return true;
+            case ConsoleKey.O: OpenPathInput(PathPurpose.AddRoot); return true;
+            // Ctrl+N — new file; Ctrl+Shift+N — new folder (or a trailing / in the file prompt).
+            case ConsoleKey.N: OpenPathInput(shift ? PathPurpose.CreateFolder : PathPurpose.CreateFile); return true;
+            case ConsoleKey.L: OpenPathInput(PathPurpose.GoTo); return true;
+            case ConsoleKey.G: JumpHit(shift ? -1 : +1); return true;
+            case ConsoleKey.Z when !shift:
+                if (_editor.CanUndo) { _editor.Undo(); _focus = Focus.Editor; _status = "Undone. Ctrl+Y redoes it."; }
+                else _status = "Nothing to undo.";
+                return true;
+            case ConsoleKey.Y:
+            case ConsoleKey.Z:
+                if (_editor.CanRedo) { _editor.Redo(); _focus = Focus.Editor; _status = "Redone. Ctrl+Z undoes it."; }
+                else _status = "Nothing to redo.";
+                return true;
+            case ConsoleKey.W:
+                if (_tabs.Active is { } at) CloseTab(at);
+                else _status = "No open tabs.";
+                return true;
+            case ConsoleKey.PageDown: SwitchTab(+1); return true;
+            case ConsoleKey.PageUp: SwitchTab(-1); return true;
+        }
+        return false;
     }
 
     private void HandlePathInput(ConsoleKeyInfo key)
@@ -263,10 +231,15 @@ internal sealed partial class App
                     case PathPurpose.CreateFile: CreateFromInput(makeFolderRequested: false); break;
                     case PathPurpose.CreateFolder: CreateFromInput(makeFolderRequested: true); break;
                     case PathPurpose.Rename: RenameFromInput(); break;
+                    case PathPurpose.GoTo: GoToFromInput(); break;
                 }
                 return;
             case ConsoleKey.Backspace:
-                if (_pathInput.Length > 0) _pathInput.Remove(_pathInput.Length - 1, 1);
+                if (_pathInput.Length > 0)
+                {
+                    string s = _pathInput.ToString();
+                    _pathInput.Remove(Cells.PrevBoundary(s, s.Length), s.Length - Cells.PrevBoundary(s, s.Length));
+                }
                 UpdatePathCompletions();
                 return;
             case ConsoleKey.Tab:
@@ -278,19 +251,17 @@ internal sealed partial class App
             case ConsoleKey.UpArrow:
                 CycleCandidate(-1);
                 return;
-            case ConsoleKey.RightArrow: // accept the whole ghost suggestion
-                if (_pathGhost.Length > 0) SetPathInput(_pathInput.ToString() + _pathGhost);
+            case ConsoleKey.RightArrow: // accept the suggestion, spelled as on disk
+                if (_pathGhost.Length > 0 && _pathCandidates.Count > 0) SetPathInput(_pathCandidates[0]);
                 return;
-            case ConsoleKey.U when key.Modifiers.HasFlag(ConsoleModifiers.Control):
+            case ConsoleKey.U when Ctrl(key):
                 _pathInput.Clear();
                 UpdatePathCompletions();
                 return;
         }
-        if (key.KeyChar >= ' ' && key.KeyChar != (char)127
-            && !key.Modifiers.HasFlag(ConsoleModifiers.Control)
-            && !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+        if (Typed(key) is var c and not '\0')
         {
-            _pathInput.Append(key.KeyChar);
+            _pathInput.Append(c);
             UpdatePathCompletions();
         }
     }
@@ -325,11 +296,7 @@ internal sealed partial class App
                 else _status = "Open a file with Enter first.";
                 break;
             case ConsoleKey.Delete:
-                if (key.Modifiers.HasFlag(ConsoleModifiers.Control)
-                    && !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
-                {
-                    RequestDeleteSelected(); // Ctrl+Delete — delete from disk (with confirmation)
-                }
+                if (Ctrl(key)) RequestDeleteSelected(); // Ctrl+Delete — delete from disk (with confirmation)
                 else if (key.Modifiers == 0 && _tree.Selected is { IsRoot: true } rootNode) RemoveRootUi(rootNode);
                 else _status = "Delete only removes a root folder from the panel; Ctrl+Delete deletes from disk.";
                 break;
@@ -356,18 +323,21 @@ internal sealed partial class App
         }
 
         // Option+B/F: how meta-mode terminals send Option+←/→ (Esc+b / Esc+f).
-        if (alt && key.KeyChar is 'b') { Prep(); _editor.WordLeft(); return; }
-        if (alt && key.KeyChar is 'f') { Prep(); _editor.WordRight(); return; }
-        // Ctrl+X — cut the selection to the clipboard.
-        if (ctrl && key.Key == ConsoleKey.X && _editor.HasSelection)
+        if (alt && !ctrl && key.Key == ConsoleKey.B) { Prep(); _editor.WordLeft(); return; }
+        if (alt && !ctrl && key.Key == ConsoleKey.F) { Prep(); _editor.WordRight(); return; }
+        if (ctrl && !alt)
         {
-            CopySelection();
-            _editor.DeleteSelection();
-            _status = "Cut to the clipboard.";
-            return;
+            switch (key.Key)
+            {
+                case ConsoleKey.A: _editor.SelectAll(); _status = $"Selected all: {_editor.SelectionCharCount()} chars."; return;
+                case ConsoleKey.X when _editor.HasSelection: // cut the selection to the clipboard
+                    CopySelection();
+                    _editor.DeleteSelection();
+                    _status = "Cut to the clipboard.";
+                    return;
+                case ConsoleKey.V: PasteFromClipboard(); return;
+            }
         }
-        // Ctrl+V — paste the system clipboard (multi-line, one undo step).
-        if (ctrl && key.Key == ConsoleKey.V) { PasteFromClipboard(); return; }
         // Option/Ctrl+Backspace — delete the word before the cursor.
         // (Legacy terminals send plain Backspace for Ctrl+Backspace; Alt arrives as Esc+DEL or CSI u.)
         if ((alt || ctrl) && key.Key == ConsoleKey.Backspace) { _editor.DeleteWordBackward(); return; }
@@ -406,27 +376,44 @@ internal sealed partial class App
             case ConsoleKey.Tab: _editor.InsertTab(); return;
         }
 
-        // Regular printable characters.
-        if (!ctrl && !key.Modifiers.HasFlag(ConsoleModifiers.Alt)
-            && key.KeyChar >= ' ' && key.KeyChar != (char)127)
-            _editor.InsertChar(key.KeyChar);
+        if (Typed(key) is var c and not '\0') _editor.InsertChar(c);
+    }
+
+    /// <summary>↑↓ PgUp/PgDn Home/End move through the hits (typing and results alike); false — another key.</summary>
+    private bool MoveHit(ConsoleKey key, bool homeEnd)
+    {
+        int page = Math.Max(1, _resultsRowCount), last = Math.Max(0, _hits.Count - 1);
+        int? to = key switch
+        {
+            ConsoleKey.UpArrow => _hitIndex - 1,
+            ConsoleKey.DownArrow => _hitIndex + 1,
+            ConsoleKey.PageUp => _hitIndex - page,
+            ConsoleKey.PageDown => _hitIndex + page,
+            ConsoleKey.Home when homeEnd => 0,
+            ConsoleKey.End when homeEnd => last,
+            _ => null,
+        };
+        if (to is not { } target) return false;
+        _hitIndex = Math.Clamp(target, 0, last);
+        return true;
     }
 
     private void HandleSearchInput(ConsoleKeyInfo key)
     {
         if (IsCtrlF(key)) { ToggleSearchScope(); return; }
+        if (MoveHit(key.Key, homeEnd: false)) return;
 
-        int page = Math.Max(1, _resultsRowCount);
         switch (key.Key)
         {
             case ConsoleKey.Escape: // to the results below; a second Esc hides the panel
                 if (_hits.Count > 0)
                 {
                     _mode = UiMode.SearchResults;
-                    _status = $"Found: {_hits.Count}. Enter opens above, Esc hides the panel.";
+                    _status = $"Found: {_hits.Count}{(_hitsTruncated ? "+" : "")}. Enter opens above, Esc hides the panel.";
                 }
                 else
                 {
+                    CancelSearch(); // a scan still running must not pop the panel up later
                     _mode = UiMode.Normal;
                     _resultsVisible = false;
                     _status = "Search cancelled.";
@@ -437,111 +424,84 @@ internal sealed partial class App
                     OpenHit(_hits[_hitIndex]);
                 return;
             case ConsoleKey.Backspace:
-                if (_searchQuery.Length > 0) _searchQuery.Remove(_searchQuery.Length - 1, 1);
+                if (_searchQuery.Length > 0)
+                {
+                    string s = _searchQuery.ToString();
+                    int from = Cells.PrevBoundary(s, s.Length);
+                    _searchQuery.Remove(from, s.Length - from);
+                }
                 RunLiveSearch();
                 return;
-            case ConsoleKey.UpArrow:
-                if (_hitIndex > 0) _hitIndex--;
-                return;
-            case ConsoleKey.DownArrow:
-                if (_hitIndex < _hits.Count - 1) _hitIndex++;
-                return;
-            case ConsoleKey.PageUp:
-                _hitIndex = Math.Max(0, _hitIndex - page);
-                return;
-            case ConsoleKey.PageDown:
-                _hitIndex = Math.Min(Math.Max(0, _hits.Count - 1), _hitIndex + page);
-                return;
-            case ConsoleKey.U when key.Modifiers.HasFlag(ConsoleModifiers.Control):
+            case ConsoleKey.U when Ctrl(key):
                 _searchQuery.Clear();
                 RunLiveSearch();
                 return;
         }
-        if (key.KeyChar >= ' ' && key.KeyChar != (char)127
-            && !key.Modifiers.HasFlag(ConsoleModifiers.Control)
-            && !key.Modifiers.HasFlag(ConsoleModifiers.Alt))
+        if (Typed(key) is var c and not '\0')
         {
-            _searchQuery.Append(key.KeyChar);
+            _searchQuery.Append(c);
             RunLiveSearch();
         }
     }
 
-    private void HandleSearchResults(ConsoleKeyInfo key)
+    /// <summary>Keys of the focused results panel; false — not one of them (it then works as usual).</summary>
+    private bool HandleSearchResults(ConsoleKeyInfo key)
     {
         if (IsCtrlF(key))
         {
             ToggleSearchScope();
             _mode = UiMode.SearchInput;
-            return;
+            return true;
         }
 
-        int page = Math.Max(1, _resultsRowCount);
+        if (MoveHit(key.Key, homeEnd: true)) return true;
         switch (key.Key)
         {
             case ConsoleKey.Escape:
                 _mode = UiMode.Normal;
                 _resultsVisible = false;
                 _status = "Search panel hidden (Ctrl+G brings it back).";
-                break;
-            case ConsoleKey.UpArrow:
-                if (_hitIndex > 0) _hitIndex--;
-                break;
-            case ConsoleKey.DownArrow:
-                if (_hitIndex < _hits.Count - 1) _hitIndex++;
-                break;
-            case ConsoleKey.PageUp:
-                _hitIndex = Math.Max(0, _hitIndex - page);
-                break;
-            case ConsoleKey.PageDown:
-                _hitIndex = Math.Min(Math.Max(0, _hits.Count - 1), _hitIndex + page);
-                break;
-            case ConsoleKey.Home: _hitIndex = 0; break;
-            case ConsoleKey.End: _hitIndex = Math.Max(0, _hits.Count - 1); break;
+                return true;
             case ConsoleKey.Enter:
                 if (_hits.Count > 0) OpenHit(_hits[_hitIndex]);
-                break;
+                return true;
         }
+        return false;
+    }
+
+    // The Russian ЙЦУКЕН layout by physical key, so a confirmation can be answered without switching layouts.
+    private const string CyrillicKeys = "йцукенгшщзфывапролдячсмить";
+    private const string LatinKeys = "qwertyuiopasdfghjklzxcvbnm";
+
+    /// <summary>The answer letter of a key: the typed Latin letter, else the physical key's letter.</summary>
+    private static char AnswerLetter(ConsoleKeyInfo key)
+    {
+        char ch = char.ToLowerInvariant(key.KeyChar);
+        if (ch is >= 'a' and <= 'z') return ch;
+        int cyr = CyrillicKeys.IndexOf(ch);
+        if (cyr >= 0) return LatinKeys[cyr];
+        return key.Key is >= ConsoleKey.A and <= ConsoleKey.Z ? (char)('a' + (key.Key - ConsoleKey.A)) : '\0';
     }
 
     private void HandleConfirm(ConsoleKeyInfo key)
     {
-        // Accept both the physical key (ConsoleKey) and the typed character.
-        char ch = char.ToLowerInvariant(key.KeyChar);
-
-        // Disk deletion is irreversible, so only an explicit D/Y deletes —
-        // Enter and Esc cancel (no destructive default on the easiest key).
-        if (_pending == PendingKind.DeleteNode)
+        var confirm = _confirm;
+        if (confirm == null || key.Key == ConsoleKey.Escape)
         {
-            if (key.Key is ConsoleKey.D or ConsoleKey.Y || ch is 'd' or 'y')
-            {
-                DoPending();
-            }
-            else if (key.Key is ConsoleKey.Escape or ConsoleKey.Enter)
-            {
-                _pending = PendingKind.None;
-                _pendingDeletePath = null;
-                _mode = UiMode.Normal;
-                _status = "Deletion cancelled.";
-            }
-            return;
-        }
-        if (key.Key == ConsoleKey.S || ch is 's') // save and continue
-        {
-            if (SaveForConfirm()) DoPending();
-            else { _pending = PendingKind.None; _pendingTab = null; _mode = UiMode.Normal; }
-        }
-        else if (key.Key is ConsoleKey.D or ConsoleKey.N || ch is 'd' or 'n') // do not save
-        {
-            DoPending();
-        }
-        else if (key.Key == ConsoleKey.Escape)
-        {
-            _pending = PendingKind.None;
-            _pendingTab = null;
+            _confirm = null;
             _mode = UiMode.Normal;
             _status = "Cancelled.";
+            return;
         }
+        char answer = AnswerLetter(key);
+        foreach (var (k, act) in confirm.Choices)
+        {
+            if (k != answer) continue;
+            _confirm = null;
+            _mode = UiMode.Normal;
+            act(); // may ask the next question
+            return;
+        }
+        // Any other key (Enter included) leaves the question standing: no destructive default.
     }
-
-    // ============================ Mouse ============================
 }

@@ -1,5 +1,3 @@
-using System.Diagnostics;
-
 /// <summary>Tree node: a folder or a file. Root folders have Parent == null.</summary>
 public sealed class TreeNode
 {
@@ -9,17 +7,24 @@ public sealed class TreeNode
     public required int Depth { get; init; }
     public TreeNode? Parent { get; init; }
 
+    /// <summary>A symbolic link (git asks about the link itself, never about paths beyond it).</summary>
+    public bool IsLink { get; init; }
+
     /// <summary>Hidden from git by .gitignore (also .git and .gitignore themselves) — drawn dimmed.</summary>
     public bool Ignored { get; set; }
 
-    /// <summary>
-    /// Size in bytes for sorting: a file's length; a folder's recursive total
-    /// (approximate when the scan budget runs out on huge trees).
-    /// </summary>
+    /// <summary>Bytes: a file's length; a folder's recursive total (a lower bound until SizeExact).</summary>
     public long Size { get; set; }
 
     /// <summary>True when Size is final; false while it is still a lower-bound estimate.</summary>
     public bool SizeExact { get; set; }
+
+    /// <summary>Modification time when listed: a folder's size stays cached while it stands.</summary>
+    public DateTime WriteUtc { get; set; }
+
+    /// <summary>Bumped by every new count of this folder: a count started earlier no longer applies.</summary>
+    internal int SizeGeneration;
+
     public bool Expanded { get; set; }
     public bool ChildrenLoaded { get; set; }
     public List<TreeNode> Children { get; } = new();
@@ -28,17 +33,22 @@ public sealed class TreeNode
 }
 
 /// <summary>
-/// Left panel: one or more root folders, each with its own hierarchy.
-/// Roots are visible as top rows and collapse like regular folders.
-/// Subdirectories are loaded lazily on first expansion.
+/// Left panel: root folders as top rows, each with its lazily loaded
+/// hierarchy. A refresh re-reads loaded folders only and keeps every node
+/// that still exists, expansion included. Entries are sorted by size, largest
+/// first: folder sizes are counted in the background (FolderSizer), and again
+/// whenever something below them changes.
 /// </summary>
 public sealed class FileTree
 {
-    public List<TreeNode> Roots { get; private set; } = new();
+    public List<TreeNode> Roots { get; } = new();
 
-    /// <summary>Exact folder sizes from finished scans, valid while the folder's own mtime stands.</summary>
-    private readonly Dictionary<string, (long Size, DateTime WriteUtc)> _sizeCache = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Queue<(TreeNode Parent, FolderSizer Sizer)> _unfinishedSizing = new();
+    /// <summary>
+    /// Exact folder sizes from finished counts, valid while the folder's own
+    /// mtime stands and nothing below it is reported changed (see RefreshDirs).
+    /// </summary>
+    private readonly Dictionary<string, (long Size, DateTime WriteUtc)> _sizeCache = new(Paths.Comparer);
+    private List<(TreeNode Parent, FolderSizer Sizer)> _unfinishedSizing = new();
 
     public IReadOnlyList<string> RootPaths => Roots.Select(r => r.FullPath).ToList();
     public List<TreeNode> Visible { get; private set; } = new();
@@ -55,7 +65,7 @@ public sealed class FileTree
         foreach (var p in rootPaths)
         {
             var root = CreateRoot(p);
-            if (Roots.All(r => !string.Equals(r.FullPath, root.FullPath, StringComparison.OrdinalIgnoreCase)))
+            if (Roots.All(r => !Paths.Same(r.FullPath, root.FullPath)))
                 Roots.Add(root);
         }
         if (Roots.Count == 0)
@@ -65,8 +75,8 @@ public sealed class FileTree
 
     private TreeNode CreateRoot(string path)
     {
-        string full = Path.GetFullPath(path);
-        string name = Path.GetFileName(full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        string full = Paths.Normalize(path);
+        string name = Path.GetFileName(full);
         var root = new TreeNode
         {
             Name = name.Length == 0 ? full : name,
@@ -86,34 +96,52 @@ public sealed class FileTree
     {
         if (!node.IsDir || node.ChildrenLoaded) return;
         node.ChildrenLoaded = true;
+        node.Children.Clear();
+        node.Children.AddRange(ReadEntries(node));
+        MarkIgnored(node);
+        StartSizing(node, sync: true);
+        SortChildren(node);
+    }
+
+    /// <summary>The folder's entries from disk as fresh nodes (empty when unreadable or gone).</summary>
+    private static List<TreeNode> ReadEntries(TreeNode node)
+    {
+        var list = new List<TreeNode>();
         try
         {
-            var dirMtimes = new Dictionary<TreeNode, DateTime>();
             foreach (var e in new DirectoryInfo(node.FullPath).EnumerateFileSystemInfos())
-            {
-                var child = new TreeNode
+                list.Add(new TreeNode
                 {
                     Name = e.Name,
                     FullPath = e.FullName,
                     IsDir = e is DirectoryInfo,
+                    IsLink = (e.Attributes & FileAttributes.ReparsePoint) != 0,
                     Depth = node.Depth + 1,
                     Parent = node,
                     Size = e is FileInfo fi ? SafeLength(fi) : 0,
                     SizeExact = e is FileInfo,
-                };
-                node.Children.Add(child);
-                if (e is DirectoryInfo di) dirMtimes[child] = di.LastWriteTimeUtc;
-            }
-            MarkIgnored(node);
-            StartSizing(node, dirMtimes);
-            SortChildren(node);
+                    WriteUtc = SafeWriteTime(e),
+                });
         }
         catch (UnauthorizedAccessException) { /* folder not accessible — just empty */ }
         catch (IOException) { /* folder may have disappeared */ }
+        return list;
     }
 
-    /// <summary>Order: normal entries first, git-ignored (dimmed) last;
-    /// within each group folders before files, largest first, name breaks ties.</summary>
+    private static long SafeLength(FileInfo fi)
+    {
+        try { return fi.Length; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
+    }
+
+    private static DateTime SafeWriteTime(FileSystemInfo fi)
+    {
+        try { return fi.LastWriteTimeUtc; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return default; }
+    }
+
+    /// <summary>Order: normal entries first, git-ignored (dimmed) last; within each group
+    /// folders before files, largest first, name breaks ties.</summary>
     private static void SortChildren(TreeNode node)
     {
         var sorted = node.Children
@@ -121,42 +149,55 @@ public sealed class FileTree
             .ThenByDescending(c => c.IsDir)
             .ThenByDescending(c => c.Size)
             .ThenBy(c => c.Name, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(c => c.Name, StringComparer.Ordinal)
             .ToList();
         node.Children.Clear();
         node.Children.AddRange(sorted);
     }
 
+    private const int SyncSizeEntryBudget = 1_500;
+    private const int SyncSizeMsBudget = 30;
+
     /// <summary>
-    /// Sizes only drive the sort order, so a load must never block on them:
-    /// cached folders are free, the rest get a small synchronous budget
-    /// (exact for small folders, a lower bound for huge ones) and any
-    /// remainder is queued for background refinement via TakeUnfinishedSizing.
+    /// Sizes drive the sort order, so a load never blocks on them: cached
+    /// folders are free; a first load (sync) counts the rest within a small
+    /// budget (a lower bound for huge ones); what remains is queued for the
+    /// background (TakeUnfinishedSizing), replacing a queued count of this folder.
     /// </summary>
-    private void StartSizing(TreeNode parent, Dictionary<TreeNode, DateTime> dirMtimes)
+    private void StartSizing(TreeNode parent, bool sync)
     {
+        DropSizing(job => job.Parent == parent);
         List<(TreeNode, DateTime)>? need = null;
-        foreach (var (child, mtime) in dirMtimes)
+        foreach (var child in parent.Children)
         {
-            if (_sizeCache.TryGetValue(child.FullPath, out var hit) && hit.WriteUtc == mtime)
+            if (!child.IsDir) continue;
+            if (_sizeCache.TryGetValue(child.FullPath, out var hit) && hit.WriteUtc == child.WriteUtc)
             {
                 child.Size = hit.Size;
                 child.SizeExact = true;
             }
-            else
-                (need ??= new()).Add((child, mtime));
+            else (need ??= new()).Add((child, child.WriteUtc));
         }
         if (need == null) return;
         var sizer = new FolderSizer(need);
-        bool settled = sizer.Step(SyncSizeEntryBudget, Environment.TickCount64 + SyncSizeMsBudget);
-        ApplySizer(sizer);
+        bool settled = sync && sizer.Step(SyncSizeEntryBudget, Environment.TickCount64 + SyncSizeMsBudget);
+        if (sync) ApplySizer(sizer);
         if (settled) sizer.Dispose();
-        else _unfinishedSizing.Enqueue((parent, sizer));
+        else _unfinishedSizing.Add((parent, sizer));
+    }
+
+    /// <summary>Forget queued counts that match (their folders were re-read or left the panel).</summary>
+    private void DropSizing(Func<(TreeNode Parent, FolderSizer Sizer), bool> match)
+    {
+        foreach (var job in _unfinishedSizing.Where(match)) job.Sizer.Dispose();
+        _unfinishedSizing.RemoveAll(job => match(job));
     }
 
     private void ApplySizer(FolderSizer sizer)
     {
-        foreach (var (node, size, mtime, complete) in sizer.Snapshot())
+        foreach (var (node, size, mtime, complete, generation) in sizer.Snapshot())
         {
+            if (node.SizeGeneration != generation) continue; // counted again since
             node.Size = size;
             node.SizeExact = complete;
             if (!complete) continue;
@@ -165,11 +206,16 @@ public sealed class FileTree
         }
     }
 
-    /// <summary>Next folder-sizing job for the background (null when none).</summary>
-    internal (TreeNode Parent, FolderSizer Sizer)? TakeUnfinishedSizing() =>
-        _unfinishedSizing.Count > 0 ? _unfinishedSizing.Dequeue() : null;
+    /// <summary>Next folder count for the background (null when none).</summary>
+    internal (TreeNode Parent, FolderSizer Sizer)? TakeUnfinishedSizing()
+    {
+        if (_unfinishedSizing.Count == 0) return null;
+        var job = _unfinishedSizing[0];
+        _unfinishedSizing.RemoveAt(0);
+        return job;
+    }
 
-    /// <summary>Apply background-refined sizes and re-sort, keeping the selected node selected.</summary>
+    /// <summary>Apply background-counted sizes and re-sort, keeping the selected node selected.</summary>
     internal void CompleteSizing(TreeNode parent, FolderSizer sizer)
     {
         var selected = Selected;
@@ -179,66 +225,55 @@ public sealed class FileTree
         if (selected != null) SelectNode(selected);
     }
 
-    private static long SafeLength(FileInfo fi)
-    {
-        try { return fi.Length; }
-        catch (IOException) { return 0; }
-        catch (UnauthorizedAccessException) { return 0; }
-    }
-
-    // Synchronous sizing allowance per directory load; the rest is refined in the background.
-    private const int SyncSizeEntryBudget = 1_500;
-    private const int SyncSizeMsBudget = 30;
-
     /// <summary>
-    /// Mark children that git ignores, asking git itself (`git check-ignore`)
-    /// so nested .gitignore files, negations and global excludes all match
-    /// real git behaviour. Outside a repository, or without git, nothing is
-    /// marked. The .git directory and .gitignore files are marked too:
-    /// check-ignore does not report them, but they are service entries.
+    /// Mark children that git ignores, asking git itself (`git check-ignore`) so
+    /// nested .gitignore files, negations and global excludes count; outside a
+    /// repository nothing is marked. .git and .gitignore are marked too, as
+    /// service entries git does not report.
     /// </summary>
     private static void MarkIgnored(TreeNode dir)
     {
-        if (dir.Children.Count == 0) return;
         foreach (var c in dir.Children)
-            if (c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" })
-                c.Ignored = true;
-        try
+            c.Ignored = c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" };
+        if (dir.Children.Count == 0) return;
+        // A folder is asked about as "name/"; a symlink as the link itself — a path
+        // through it would make git refuse the whole batch ("beyond a symbolic link").
+        static string Query(TreeNode c) => c.Name + (c.IsDir && !c.IsLink ? "/" : "");
+        string? output = Proc.Run("git", "check-ignore --stdin -z", dir.FullPath,
+            string.Concat(dir.Children.Select(c => Query(c) + "\0")), timeoutMs: 2000, okExitCodes: new[] { 0, 1 });
+        if (output == null) return;
+        var ignored = new HashSet<string>(output.Split('\0', StringSplitOptions.RemoveEmptyEntries), StringComparer.Ordinal);
+        foreach (var c in dir.Children)
+            if (ignored.Contains(Query(c))) c.Ignored = true;
+    }
+
+    /// <summary>
+    /// Mark ignored children of many folders under one root with a single
+    /// `git check-ignore`. false — git refused the batch (a path in a nested
+    /// repository, say) and the folders should be asked one by one; outside a
+    /// repository there is nothing to mark, so that counts as done.
+    /// </summary>
+    private static bool MarkIgnoredBatch(string root, IReadOnlyList<TreeNode> dirs)
+    {
+        var queries = new List<(TreeNode Child, string Query)>();
+        foreach (var dir in dirs)
         {
-            using var proc = Process.Start(new ProcessStartInfo
-            {
-                FileName = "git",
-                Arguments = "check-ignore --stdin -z",
-                WorkingDirectory = dir.FullPath,
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-            if (proc == null) return;
-            var reading = proc.StandardOutput.ReadToEndAsync();
+            string rel = Path.GetRelativePath(root, dir.FullPath).Replace('\\', '/');
+            string prefix = rel == "." ? "" : rel + "/";
             foreach (var c in dir.Children)
             {
-                proc.StandardInput.Write(c.Name + (c.IsDir ? "/" : ""));
-                proc.StandardInput.Write('\0');
+                c.Ignored = c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" };
+                queries.Add((c, prefix + c.Name + (c.IsDir && !c.IsLink ? "/" : "")));
             }
-            proc.StandardInput.Close();
-            if (!proc.WaitForExit(2000))
-            {
-                try { proc.Kill(); } catch (InvalidOperationException) { }
-                return;
-            }
-            if (proc.ExitCode is not (0 or 1) || !reading.IsCompletedSuccessfully) return;
-            var ignored = new HashSet<string>(
-                reading.Result.Split('\0', StringSplitOptions.RemoveEmptyEntries),
-                StringComparer.OrdinalIgnoreCase);
-            foreach (var c in dir.Children)
-                if (ignored.Contains(c.Name + (c.IsDir ? "/" : ""))) c.Ignored = true;
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
-        {
-            // git is unavailable — everything simply stays unmarked.
-        }
+        if (queries.Count == 0) return true;
+        string? output = Proc.Run("git", "check-ignore --stdin -z", root, string.Concat(queries.Select(q => q.Query + "\0")),
+            timeoutMs: 5000, okExitCodes: new[] { 0, 1 });
+        if (output == null) return Proc.Run("git", "rev-parse --show-prefix", root) == null; // not a repository at all
+        var ignored = new HashSet<string>(output.Split('\0', StringSplitOptions.RemoveEmptyEntries), StringComparer.Ordinal);
+        foreach (var (c, q) in queries)
+            if (ignored.Contains(q)) c.Ignored = true;
+        return true;
     }
 
     private void RebuildVisible()
@@ -268,9 +303,8 @@ public sealed class FileTree
     /// <summary>Add another root folder to the panel. false — already present (it just gets selected).</summary>
     public bool AddRoot(string path)
     {
-        string full = Path.GetFullPath(path);
-        var existing = Roots.FirstOrDefault(
-            r => string.Equals(r.FullPath, full, StringComparison.OrdinalIgnoreCase));
+        string full = Paths.Normalize(path);
+        var existing = Roots.FirstOrDefault(r => Paths.Same(r.FullPath, full));
         if (existing != null)
         {
             SelectNode(existing);
@@ -287,6 +321,10 @@ public sealed class FileTree
     public bool RemoveRoot(TreeNode root)
     {
         if (Roots.Count <= 1 || !Roots.Remove(root)) return false;
+        DropSizing(job => Paths.IsSameOrInside(job.Parent.FullPath, root.FullPath));
+        // No longer watched: what changes there from now on would go unnoticed.
+        foreach (string key in _sizeCache.Keys.Where(k => Paths.IsSameOrInside(k, root.FullPath)).ToList())
+            _sizeCache.Remove(key);
         RebuildVisible();
         return true;
     }
@@ -368,7 +406,7 @@ public sealed class FileTree
     /// <summary>A root was renamed on disk — replace its path, keeping position and expanded state.</summary>
     public bool ReplaceRootPath(string oldPath, string newPath)
     {
-        int i = Roots.FindIndex(r => string.Equals(r.FullPath, oldPath, StringComparison.OrdinalIgnoreCase));
+        int i = Roots.FindIndex(r => Paths.Same(r.FullPath, Paths.Normalize(oldPath)));
         if (i < 0) return false;
         bool expanded = Roots[i].Expanded;
         var root = CreateRoot(newPath);
@@ -382,27 +420,25 @@ public sealed class FileTree
     /// <summary>Select a node by full path in any root, expanding its parents.</summary>
     public void SelectPath(string fullPath)
     {
-        string full = Path.GetFullPath(fullPath);
+        string full = Paths.Normalize(fullPath);
         foreach (var root in Roots)
         {
-            string rel = Path.GetRelativePath(root.FullPath, full);
-            if (rel == ".")
+            if (Paths.Same(full, root.FullPath))
             {
                 RebuildVisible();
                 SelectNode(root);
                 return;
             }
-            if (rel.StartsWith("..")) continue;
+            if (!Paths.IsInside(full, root.FullPath)) continue;
 
-            var parts = rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            string rel = full[root.FullPath.Length..].TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var current = root;
             bool ok = true;
-            foreach (var part in parts)
+            foreach (var part in rel.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
             {
                 LoadChildren(current);
                 current.Expanded = true;
-                var next = current.Children.FirstOrDefault(
-                    c => string.Equals(c.Name, part, StringComparison.OrdinalIgnoreCase));
+                var next = current.Children.FirstOrDefault(c => Paths.Same(c.Name, part));
                 if (next == null) { ok = false; break; }
                 current = next;
             }
@@ -413,53 +449,109 @@ public sealed class FileTree
         }
     }
 
-    private static void CollectExpanded(TreeNode n, HashSet<string> into)
-    {
-        if (n.Expanded) into.Add(n.FullPath);
-        foreach (var c in n.Children) CollectExpanded(c, into);
-    }
+    /// <summary>Re-read every loaded folder from disk, keeping expansion and the selection.</summary>
+    public void Refresh() => RefreshDirs(null);
 
-    private void RestoreExpanded(TreeNode n, HashSet<string> expanded)
+    /// <summary>
+    /// Something changed in these folders (null — anywhere; deep — anywhere below
+    /// them too). Loaded ones are re-read, keeping the nodes that still exist with
+    /// their expansion; every folder holding a change is counted again up to the
+    /// root, showing its old size as approximate meanwhile. Returns whether
+    /// anything was re-read.
+    /// </summary>
+    public bool RefreshDirs(IReadOnlyCollection<string>? dirs, bool deep = false)
     {
-        foreach (var c in n.Children)
-            if (c.IsDir && expanded.Contains(c.FullPath))
-            {
-                c.Expanded = true;
-                LoadChildren(c);
-                RestoreExpanded(c, expanded);
-            }
-    }
-
-    /// <summary>Re-read all roots from disk, keeping expanded folders and the selection.</summary>
-    public void Refresh()
-    {
-        var expanded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var r in Roots) CollectExpanded(r, expanded);
-        string? selectedPath = Selected?.FullPath;
-
-        Roots = RootPaths.Select(CreateRoot).ToList();
-        foreach (var r in Roots)
+        // Every listed folder by path (a root nested in another is listed twice).
+        static IEnumerable<TreeNode> Folders(TreeNode n) =>
+            n.ChildrenLoaded ? n.Children.Where(c => c.IsDir).SelectMany(Folders).Prepend(n) : new[] { n };
+        var listed = Roots.SelectMany(Folders).ToLookup(n => n.FullPath, Paths.Comparer);
+        var targets = new HashSet<TreeNode>(); // loaded folders to re-read
+        var recount = new HashSet<TreeNode>(); // folders whose subfolders are counted again
+        void Invalidate(TreeNode n)
         {
-            r.Expanded = expanded.Contains(r.FullPath);
-            if (r.Expanded) RestoreExpanded(r, expanded);
+            if (n.Parent == null) return; // a root shows no size of its own
+            _sizeCache.Remove(n.FullPath);
+            n.SizeExact = false;
+            recount.Add(n.Parent);
+        }
+        void Below(TreeNode n)
+        {
+            Invalidate(n);
+            if (!n.ChildrenLoaded) return;
+            targets.Add(n);
+            foreach (var c in n.Children.Where(c => c.IsDir)) Below(c);
+        }
+        if (dirs == null)
+            foreach (var r in Roots) Below(r);
+        else
+            foreach (string d in dirs.Select(Paths.Normalize))
+            {
+                foreach (var n in listed[d])
+                    if (deep) Below(n);
+                    else if (n.ChildrenLoaded) targets.Add(n);
+                for (string? p = d; p != null; p = Path.GetDirectoryName(p))
+                    foreach (var n in listed[p]) Invalidate(n);
+            }
+        foreach (var parent in recount.Where(p => !targets.Contains(p))) StartSizing(parent, sync: false);
+        if (targets.Count == 0) return false;
+
+        var selected = Selected;
+        var order = targets.ToList();
+        var probes = new TreeNode[order.Count];
+        Parallel.For(0, order.Count, new ParallelOptions { MaxDegreeOfParallelism = 8 }, i =>
+        {
+            probes[i] = new TreeNode
+            {
+                Name = order[i].Name, FullPath = order[i].FullPath, IsDir = true, Depth = order[i].Depth,
+            };
+            probes[i].Children.AddRange(ReadEntries(order[i]));
+        });
+        // One git call per root answers for every re-read folder; per-folder calls only if git refuses the batch.
+        foreach (var group in probes.GroupBy(p => Roots.First(r => Paths.IsSameOrInside(p.FullPath, r.FullPath)).FullPath))
+            if (!MarkIgnoredBatch(group.Key, group.ToList()))
+                Parallel.ForEach(group, new ParallelOptions { MaxDegreeOfParallelism = 8 }, MarkIgnored);
+        var fresh = probes.Select(p => p.Children).ToArray();
+        for (int i = 0; i < order.Count; i++)
+        {
+            var node = order[i];
+            var old = node.Children.ToDictionary(c => c.Name + (c.IsDir ? "/" : ""), StringComparer.Ordinal);
+            node.Children.Clear();
+            foreach (var f in fresh[i])
+            {
+                if (old.TryGetValue(f.Name + (f.IsDir ? "/" : ""), out var keep) && keep.IsLink == f.IsLink)
+                {
+                    keep.Ignored = f.Ignored;
+                    keep.WriteUtc = f.WriteUtc;
+                    if (!f.IsDir) keep.Size = f.Size;
+                    node.Children.Add(keep);
+                }
+                else
+                    node.Children.Add(new TreeNode
+                    {
+                        Name = f.Name, FullPath = f.FullPath, IsDir = f.IsDir, IsLink = f.IsLink,
+                        Depth = node.Depth + 1, Parent = node, Ignored = f.Ignored,
+                        Size = f.Size, SizeExact = f.SizeExact, WriteUtc = f.WriteUtc,
+                    });
+            }
+            StartSizing(node, sync: false);
+            SortChildren(node);
         }
         RebuildVisible();
-        if (selectedPath != null)
+        if (selected != null)
         {
-            int idx = Visible.FindIndex(v => v.FullPath == selectedPath);
+            int idx = Visible.FindIndex(v => Paths.Same(v.FullPath, selected.FullPath));
             if (idx >= 0) { SelectedIndex = idx; EnsureVisible(); }
         }
+        return true;
     }
 }
 
 /// <summary>
-/// Steppable recursive folder sizing for sort order. Folders share the walk
-/// round-robin, so a limited step gives every folder a fair partial estimate
-/// (a lower bound) instead of the first folder eating the whole budget.
-/// Accumulates privately — callers copy results onto nodes via Snapshot(),
-/// so a background step never races the UI. Symlinked folders are never
-/// descended into, unreadable subtrees are skipped, and a generous total
-/// cap keeps even a whole-home walk finite (sizes stay approximate past it).
+/// Steppable recursive folder sizing. Folders share the walk round-robin, so a
+/// limited step gives each a fair lower bound. Results stay private until
+/// Snapshot, so a background step never races the UI. Symlinked folders are
+/// not entered, unreadable ones are skipped, and a total cap keeps even a
+/// whole-home walk finite.
 /// </summary>
 internal sealed class FolderSizer : IDisposable
 {
@@ -467,8 +559,9 @@ internal sealed class FolderSizer : IDisposable
 
     private sealed class Work(TreeNode node, DateTime writeUtc)
     {
-        public TreeNode Node = node;
-        public DateTime WriteUtc = writeUtc;
+        public readonly TreeNode Node = node;
+        public readonly DateTime WriteUtc = writeUtc;
+        public readonly int Generation = ++node.SizeGeneration; // on the UI thread, like every node access
         public readonly Stack<string> Todo = new();
         public IEnumerator<FileSystemInfo>? Current; // directory enumeration in progress (resumable)
         public long Partial;
@@ -483,13 +576,7 @@ internal sealed class FolderSizer : IDisposable
         foreach (var (node, mtime) in dirs)
         {
             var w = new Work(node, mtime);
-            try
-            {
-                if ((File.GetAttributes(node.FullPath) & FileAttributes.ReparsePoint) == 0)
-                    w.Todo.Push(node.FullPath);
-            }
-            catch (IOException) { /* vanished — stays zero and complete */ }
-            catch (UnauthorizedAccessException) { /* same */ }
+            if (!node.IsLink) w.Todo.Push(node.FullPath);
             _work.Add(w);
         }
     }
@@ -499,7 +586,7 @@ internal sealed class FolderSizer : IDisposable
         foreach (var w in _work) { w.Current?.Dispose(); w.Current = null; }
     }
 
-    /// <summary>True when no further progress will be made (done, capped or cancelled).</summary>
+    /// <summary>True when no further progress will be made (done or capped).</summary>
     public bool Settled => _spent >= TotalEntryBudget || _work.All(w => w.Complete);
 
     /// <summary>Advance the walk by up to maxEntries entries (and till the deadline). Returns Settled.</summary>
@@ -528,8 +615,7 @@ internal sealed class FolderSizer : IDisposable
             if (w.Todo.Count == 0) return budget;
             string dir = w.Todo.Pop();
             try { w.Current = new DirectoryInfo(dir).EnumerateFileSystemInfos().GetEnumerator(); }
-            catch (IOException) { return budget; }
-            catch (UnauthorizedAccessException) { return budget; }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return budget; }
         }
         var en = w.Current;
         while (budget > 0 && !ct.IsCancellationRequested)
@@ -540,15 +626,18 @@ internal sealed class FolderSizer : IDisposable
                 if (!en.MoveNext()) { en.Dispose(); w.Current = null; return budget; }
                 e = en.Current;
             }
-            catch (IOException) { en.Dispose(); w.Current = null; return budget; }
-            catch (UnauthorizedAccessException) { en.Dispose(); w.Current = null; return budget; }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                en.Dispose();
+                w.Current = null;
+                return budget;
+            }
             budget--;
             if ((++_spent & 0xFF) == 0 && Environment.TickCount64 > deadlineTickMs) return budget;
             if (e is FileInfo fi)
             {
                 try { w.Partial += fi.Length; }
-                catch (IOException) { /* vanished mid-walk */ }
-                catch (UnauthorizedAccessException) { /* same */ }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* vanished mid-walk */ }
             }
             else if ((e.Attributes & FileAttributes.ReparsePoint) == 0)
                 w.Todo.Push(e.FullName);
@@ -556,7 +645,7 @@ internal sealed class FolderSizer : IDisposable
         return budget;
     }
 
-    /// <summary>Current sizes: exact where Complete, a lower bound elsewhere.</summary>
-    public List<(TreeNode Node, long Size, DateTime WriteUtc, bool Complete)> Snapshot() =>
-        _work.Select(w => (w.Node, w.Partial, w.WriteUtc, w.Complete)).ToList();
+    /// <summary>Current sizes: exact where Complete, a lower bound elsewhere; Generation — the node's when counting began.</summary>
+    public List<(TreeNode Node, long Size, DateTime WriteUtc, bool Complete, int Generation)> Snapshot() =>
+        _work.Select(w => (w.Node, w.Partial, w.WriteUtc, w.Complete, w.Generation)).ToList();
 }

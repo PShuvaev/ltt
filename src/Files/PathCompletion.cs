@@ -1,4 +1,4 @@
-/// <summary>Live path completion for the path prompts (Ctrl+O, Ctrl+N).</summary>
+/// <summary>Live path completion for the path prompts (Ctrl+O, Ctrl+N, Ctrl+L).</summary>
 internal static class PathCompletion
 {
     internal static string ExpandHome(string p)

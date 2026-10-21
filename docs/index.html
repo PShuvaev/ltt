@@ -1,7 +1,13 @@
 #!/bin/sh
+# Runs ltt in the current folder from a clone kept in ~/.cache/ltt, updated
+# on every start. Arguments pass through: curl -sL ltt.is-an.ai | sh -s -- src/
 set -e
-start_dir=$PWD
-cd "$(mktemp -d)"
-git clone -q --depth 1 https://github.com/PShuvaev/ltt .
-if [ "$#" -eq 0 ]; then set -- "$start_dir"; fi
-exec dotnet run -- "$@" </dev/tty
+dir="${XDG_CACHE_HOME:-$HOME/.cache}/ltt"
+if [ -d "$dir/.git" ]; then
+  git -C "$dir" fetch -q --depth 1 origin main && git -C "$dir" reset -q --hard FETCH_HEAD \
+    || echo "ltt: could not update, starting the cached version" >&2
+else
+  mkdir -p "$(dirname "$dir")"
+  git clone -q --depth 1 https://github.com/PShuvaev/ltt "$dir"
+fi
+exec dotnet run --project "$dir" -c Release -- "$@" </dev/tty

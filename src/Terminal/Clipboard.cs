@@ -1,14 +1,14 @@
-using System.Diagnostics;
 using System.Text;
 
 /// <summary>
-/// Putting text on the system clipboard via two routes at once: the system
-/// utility (pbcopy etc. — works in terminals without OSC 52) and OSC 52
-/// (works over SSH, where the local machine's utility is absent).
+/// The system clipboard via two routes at once: the system utility (pbcopy
+/// etc. — works in terminals without OSC 52) and OSC 52 (works over SSH,
+/// where the local machine's utility is absent). Reading goes through the
+/// utility only.
 /// </summary>
 internal static class Clipboard
 {
-    /// <summary>System clipboard utilities for the current OS, in priority order.</summary>
+    /// <summary>System clipboard writers for the current OS, in priority order.</summary>
     internal static List<(string File, string Args)> HelperCandidates()
     {
         if (OperatingSystem.IsMacOS()) return new() { ("pbcopy", "") };
@@ -16,35 +16,7 @@ internal static class Clipboard
         return new() { ("wl-copy", ""), ("xclip", "-selection clipboard"), ("xsel", "--clipboard --input") };
     }
 
-    private static (string File, string Args)? _helper;
-    private static bool _helperResolved;
-
-    private static (string File, string Args)? ResolveHelper()
-    {
-        if (_helperResolved) return _helper;
-        _helperResolved = true;
-        var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "")
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-        foreach (var cand in HelperCandidates())
-        {
-            foreach (string dir in pathDirs)
-            {
-                if (File.Exists(Path.Combine(dir, cand.File))
-                    || (OperatingSystem.IsWindows() && File.Exists(Path.Combine(dir, cand.File + ".exe"))))
-                    return _helper = cand;
-            }
-        }
-        return null;
-    }
-
-    public static void Copy(string text, bool useSystemHelper = true)
-    {
-        if (useSystemHelper) TrySystem(text);
-        string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
-        Console.Write($"\x1b]52;c;{b64}\a");
-    }
-
-    /// <summary>System clipboard *readers* for the current OS, in priority order.</summary>
+    /// <summary>System clipboard readers for the current OS, in priority order.</summary>
     internal static List<(string File, string Args)> PasteCandidates()
     {
         if (OperatingSystem.IsMacOS()) return new() { ("pbpaste", "") };
@@ -54,6 +26,38 @@ internal static class Clipboard
     }
 
     private const int MaxPasteChars = 4_000_000;
+    private static readonly object CopyLock = new();
+    private static Task _copying = Task.CompletedTask; // copies run one after another, off the UI thread
+
+    /// <summary>The first candidate whose program is on PATH.</summary>
+    private static (string File, string Args)? FirstOnPath(List<(string File, string Args)> candidates)
+    {
+        var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
+        foreach (var cand in candidates)
+            foreach (string dir in pathDirs)
+                if (File.Exists(Path.Combine(dir, cand.File))
+                    || (OperatingSystem.IsWindows() && File.Exists(Path.Combine(dir, cand.File + ".exe"))))
+                    return cand;
+        return null;
+    }
+
+    // pbcopy/pbpaste pick the text encoding from the locale: without a UTF-8
+    // one (common in SSH sessions and IDE terminals) non-ASCII text is garbled.
+    private static readonly Dictionary<string, string>? HelperEnv =
+        OperatingSystem.IsMacOS() ? new() { ["LC_ALL"] = "en_US.UTF-8" } : null;
+
+    private static string? RunHelper((string File, string Args) helper, string? input, int timeoutMs) =>
+        Proc.Run(helper.File, helper.Args, stdin: input, timeoutMs: timeoutMs, env: HelperEnv);
+
+    /// <summary>Put text on the clipboard; the system utility runs in the background, never blocking the UI.</summary>
+    public static void Copy(string text)
+    {
+        if (FirstOnPath(HelperCandidates()) is { } helper)
+            lock (CopyLock) _copying = _copying.ContinueWith(_ => RunHelper(helper, text, 3000), TaskScheduler.Default);
+        string b64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+        Console.Write($"\x1b]52;c;{b64}\a");
+    }
 
     /// <summary>
     /// Read the system clipboard via its utility (pbpaste and friends).
@@ -63,72 +67,8 @@ internal static class Clipboard
     /// </summary>
     public static string? TryPaste()
     {
-        var pathDirs = (Environment.GetEnvironmentVariable("PATH") ?? "")
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries);
-        foreach (var cand in PasteCandidates())
-        {
-            bool onPath = false;
-            foreach (string dir in pathDirs)
-            {
-                if (File.Exists(Path.Combine(dir, cand.File))
-                    || (OperatingSystem.IsWindows() && File.Exists(Path.Combine(dir, cand.File + ".exe"))))
-                { onPath = true; break; }
-            }
-            if (!onPath) continue;
-            try
-            {
-                using var proc = Process.Start(new ProcessStartInfo
-                {
-                    FileName = cand.File,
-                    Arguments = cand.Args,
-                    UseShellExecute = false,
-                    RedirectStandardInput = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                });
-                if (proc == null) continue;
-                proc.StandardInput.Close();
-                var read = proc.StandardOutput.ReadToEndAsync();
-                if (!proc.WaitForExit(2000))
-                {
-                    try { proc.Kill(); } catch (InvalidOperationException) { /* already gone */ }
-                    continue;
-                }
-                if (proc.ExitCode != 0) continue;
-                string text = read.GetAwaiter().GetResult();
-                return text.Length > MaxPasteChars ? text[..MaxPasteChars] : text;
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
-            {
-                // try the next candidate
-            }
-        }
-        return null;
-    }
-
-    /// <summary>Feed text to the system clipboard utility, if present. Errors are silently ignored.</summary>
-    private static void TrySystem(string text)
-    {
-        if (ResolveHelper() is not { } helper) return;
-        try
-        {
-            using var proc = Process.Start(new ProcessStartInfo
-            {
-                FileName = helper.File,
-                Arguments = helper.Args,
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-            });
-            if (proc == null) return;
-            proc.StandardInput.Write(text);
-            proc.StandardInput.Close();
-            proc.WaitForExit(2000);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception or IOException)
-        {
-            // Utility unavailable — OSC 52 still applies.
-        }
+        if (FirstOnPath(PasteCandidates()) is not { } reader) return null;
+        string? text = RunHelper(reader, null, 1500);
+        return text != null && text.Length > MaxPasteChars ? text[..MaxPasteChars] : text;
     }
 }

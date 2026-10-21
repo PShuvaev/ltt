@@ -1,106 +1,11 @@
-using System.Text;
-
 /// <summary>Rendering: title, panels, tab bar, results panel, status and help lines.</summary>
 internal sealed partial class App
 {
-    // ============================ Rendering ============================
-
+    private readonly Screen _screen = new();
     private readonly List<Token> _tokens = new(); // reusable token scratch for the visible lines
 
-    private static string Clip(string s, int width) =>
-        width <= 0 ? "" : s.Length <= width ? s : s[..width];
-
-    // Last colours actually sent to the terminal; setting a colour emits an
-    // escape sequence every time, so unchanged colours are not re-sent.
-    private static ConsoleColor _lastFg = (ConsoleColor)(-1), _lastBg = (ConsoleColor)(-1);
-    private static readonly string Spaces = new(' ', 512);
-
-    // ---- Frame output -----------------------------------------------------
-    // On Unix the whole frame is built as one ANSI string and written to
-    // stdout in a single write. A frame used to be hundreds of tiny Console
-    // calls (cursor moves, colour sets, per-token writes) whose cost and
-    // jitter capped the frame rate and made the scroll glide visibly steppy.
-    // On Windows (legacy console) the classic Console API path is kept.
-    private static readonly bool UseAnsiFrame = !OperatingSystem.IsWindows();
-    private static readonly StringBuilder Frame = new(1 << 16);
-    private static readonly Stream Stdout = Console.OpenStandardOutput();
-    private static char[] _frameChars = new char[1 << 16];
-    private static byte[] _frameBytes = new byte[1 << 17];
-
-    // ConsoleColor (enum order) -> ANSI foreground code; background is +10.
-    private static readonly int[] FgAnsi =
-        { 30, 34, 32, 36, 31, 35, 33, 37, 90, 94, 92, 96, 91, 95, 93, 97 };
-
-    private static void BeginFrame()
-    {
-        // DEC 2026 synchronized output: supporting terminals present the
-        // whole frame atomically (no tearing mid-scroll); others ignore it.
-        if (UseAnsiFrame) { Frame.Clear(); Frame.Append("\x1b[?2026h\x1b[?25l"); }
-        else Console.CursorVisible = false;
-    }
-
-    private static void EndFrame()
-    {
-        if (!UseAnsiFrame) return;
-        Frame.Append("\x1b[?2026l");
-        int len = Frame.Length;
-        if (_frameChars.Length < len) _frameChars = new char[len * 2];
-        Frame.CopyTo(0, _frameChars, 0, len);
-        int maxBytes = Encoding.UTF8.GetMaxByteCount(len);
-        if (_frameBytes.Length < maxBytes) _frameBytes = new byte[maxBytes * 2];
-        int n = Encoding.UTF8.GetBytes(_frameChars.AsSpan(0, len), _frameBytes);
-        Stdout.Write(_frameBytes, 0, n);
-        Stdout.Flush();
-    }
-
-    private static void MoveTo(int x, int y)
-    {
-        if (UseAnsiFrame) Frame.Append("\x1b[").Append(y + 1).Append(';').Append(x + 1).Append('H');
-        else Console.SetCursorPosition(x, y);
-    }
-
-    private static void ShowCursor()
-    {
-        if (UseAnsiFrame) Frame.Append("\x1b[?25h");
-        else Console.CursorVisible = true;
-    }
-
-    private static void SetColors(ConsoleColor fg, ConsoleColor bg)
-    {
-        if (UseAnsiFrame)
-        {
-            if (_lastFg == fg && _lastBg == bg) return;
-            _lastFg = fg;
-            _lastBg = bg;
-            Frame.Append("\x1b[").Append(FgAnsi[(int)fg & 15]).Append(';')
-                 .Append(FgAnsi[(int)bg & 15] + 10).Append('m');
-            return;
-        }
-        if (_lastFg != fg) { Console.ForegroundColor = fg; _lastFg = fg; }
-        if (_lastBg != bg) { Console.BackgroundColor = bg; _lastBg = bg; }
-    }
-
-    private static void Out(ReadOnlySpan<char> s)
-    {
-        if (UseAnsiFrame) Frame.Append(s);
-        else Console.Out.Write(s);
-    }
-
-    private static void Out(char c)
-    {
-        if (UseAnsiFrame) Frame.Append(c);
-        else Console.Write(c);
-    }
-
-    private static void WriteSpaces(int count)
-    {
-        while (count > 0)
-        {
-            int n = Math.Min(count, Spaces.Length);
-            Out(Spaces.AsSpan(0, n));
-            count -= n;
-        }
-    }
+    private void WriteAt(int x, int y, string text, ConsoleColor fg, ConsoleColor bg, int width) =>
+        _screen.Put(x, y, text, fg, bg, width);
 
     /// <summary>Compact size at two significant digits: `99`, `510`, `1.5K`, `980K`, `4.2G`;
     /// a leading `≥` marks a lower bound.</summary>
@@ -120,77 +25,110 @@ internal sealed partial class App
         return exact ? core : "≥" + core;
     }
 
-    private static void WriteAt(int x, int y, string text, ConsoleColor fg, ConsoleColor bg, int width)
+    private const int MaxHighlightedLine = 20_000;
+
+    /// <summary>The end of s that fits in `cells` cells, led by … when something was cut.</summary>
+    internal static string FitTail(string s, int cells)
     {
-        if (width <= 0 || x < 0 || y < 0) return;
-        MoveTo(x, y);
-        SetColors(fg, bg);
-        var span = text.AsSpan(0, Math.Min(text.Length, width));
-        Out(span);
-        if (span.Length < width) WriteSpaces(width - span.Length);
+        if (cells <= 0) return "";
+        if (Cells.WidthOf(s) <= cells) return s;
+        int i = s.Length, used = 1; // the … takes one cell
+        while (i > 0)
+        {
+            int p = Cells.PrevBoundary(s, i);
+            int cw = Cells.WidthOf(s.AsSpan(p, i - p));
+            if (used + cw > cells) break;
+            used += cw;
+            i = p;
+        }
+        return "…" + s[i..];
     }
 
     /// <summary>
-    /// An editor line with syntax highlighting, horizontal scrolling and
-    /// selection: the [selFrom, selTo) range in line columns is drawn white
-    /// on dark blue; selEol — the selection continues onto the next line.
+    /// The title line: the path of the active element (the selected node in the
+    /// tree, the open file in the editor, the current hit's file in search).
+    /// A path too long for the line loses its beginning, never the file name.
     /// </summary>
-    private static void WriteHighlighted(int x, int y, ReadOnlySpan<char> line, List<Token> tokens,
+    internal static string BuildTitle(string activeLabel, bool dirty, string tabLabel, int width)
+    {
+        const string prefix = " ltt · ";
+        string tail = (dirty ? " ●" : "") + tabLabel;
+        int room = width - Cells.WidthOf(prefix) - Cells.WidthOf(tail);
+        return prefix + FitTail(activeLabel, Math.Max(1, room)) + tail;
+    }
+
+    private static void WriteEdgeMarker(Screen screen, int x, int y, char marker, bool selected) =>
+        screen.Put(x, y, marker.ToString(), selected ? ConsoleColor.White : ConsoleColor.DarkGray,
+            selected ? ConsoleColor.DarkBlue : ConsoleColor.Black, 1);
+
+    /// <summary>
+    /// An editor line drawn from display column scrollX in `width` cells, with
+    /// syntax colours and the selection [selFrom, selTo) (indexes into the line)
+    /// white on dark blue; selEol — the selected line break shows as one cell.
+    /// Text cut off at an edge is flagged in that edge cell with a dim ‹ or ›.
+    /// </summary>
+    internal static void WriteHighlighted(Screen screen, int x, int y, string line, List<Token> tokens,
         int scrollX, int width, int selFrom = -1, int selTo = -1, bool selEol = false)
     {
         if (width <= 0) return;
-        MoveTo(x, y);
-        int printed = 0, limit = scrollX + width;
-        foreach (var tok in tokens)
+        int end = x + width, sx = x;
+        int i = Cells.IndexAt(line, scrollX), first = i;
+        int col = Cells.ColumnOf(line, i);
+        bool Selected(int at) => selFrom >= 0 && at >= selFrom && at < selTo;
+        bool cut = false, lastSel = false;
+        if (col < scrollX && i < line.Length) // a tab or wide character cut by the left edge
         {
-            int start = tok.Start, end = tok.Start + tok.Length;
-            if (end <= scrollX || start >= limit) continue;
-            int from = Math.Max(start, scrollX), to = Math.Min(end, limit);
-            var fg = Highlighter.ColorFor(tok.Kind);
-            int p = from;
-            while (p < to)
-            {
-                bool inSel = selFrom >= 0 && p >= selFrom && p < selTo;
-                int segEnd = inSel ? Math.Min(to, selTo)
-                    : selFrom > p ? Math.Min(to, selFrom)
-                    : to;
-                if (segEnd <= p) segEnd = to;
-                SetColors(inSel ? ConsoleColor.White : fg,
-                    inSel ? ConsoleColor.DarkBlue : ConsoleColor.Black);
-                Out(line[p..segEnd]);
-                printed += segEnd - p;
-                p = segEnd;
-            }
-            if (printed >= width) break;
+            int w = Cells.WidthAt(line, i, col, out int len);
+            int part = Math.Min(col + w - scrollX, width);
+            bool sel = Selected(i);
+            screen.Put(sx, y, "", ConsoleColor.Gray, sel ? ConsoleColor.DarkBlue : ConsoleColor.Black, part);
+            sx += part;
+            col += w;
+            i += len;
         }
-        if (printed < width)
+        int t = 0;
+        while (t < tokens.Count && tokens[t].Start + tokens[t].Length <= i) t++;
+        while (i < line.Length && sx < end && t < tokens.Count)
         {
-            if (selEol) // a selected line break — one space in the selection colour
-            {
-                SetColors(ConsoleColor.White, ConsoleColor.DarkBlue);
-                Out(' ');
-                printed++;
-            }
-            SetColors(ConsoleColor.Gray, ConsoleColor.Black);
-            if (printed < width) WriteSpaces(width - printed);
+            var tok = tokens[t];
+            int runEnd = tok.Start + tok.Length;
+            bool sel = Selected(i);
+            if (selFrom >= 0) runEnd = sel ? Math.Min(runEnd, selTo) : i < selFrom ? Math.Min(runEnd, selFrom) : runEnd;
+            if (runEnd <= i) { t++; continue; }
+            int used = screen.Put(sx, y, line.AsSpan(i, runEnd - i),
+                sel ? ConsoleColor.White : Highlighter.ColorFor(tok.Kind),
+                sel ? ConsoleColor.DarkBlue : ConsoleColor.Black,
+                end - sx, out int consumed, tabOrigin: col, pad: false);
+            sx += used;
+            col += used;
+            lastSel = sel;
+            if (consumed < runEnd - i) { cut = true; break; } // the edge cut this run
+            i = runEnd;
+            if (i >= tok.Start + tok.Length) t++;
         }
+        if (sx < end && selEol && i >= line.Length) // a selected line break — one cell in the selection colour
+            sx += screen.Put(sx, y, " ", ConsoleColor.White, ConsoleColor.DarkBlue, 1);
+        if (sx < end) screen.Put(sx, y, "", ConsoleColor.Gray, ConsoleColor.Black, end - sx);
+
+        // A marker keeps the selection colours of the cell it covers; a line hidden
+        // entirely to the left has its selected line break drawn in that cell.
+        if (scrollX > 0 && line.Length > 0)
+            WriteEdgeMarker(screen, x, y, '‹', first < line.Length ? Selected(first) : selEol);
+        if (cut || (i < line.Length && sx >= end))
+            WriteEdgeMarker(screen, x + width - 1, y, '›', lastSel);
     }
 
     private void Draw()
     {
-        BeginFrame();
         int w = Console.WindowWidth, h = Console.WindowHeight;
-        if (w != _lastW || h != _lastH)
-        {
-            if (UseAnsiFrame) Frame.Append("\x1b[H\x1b[2J\x1b[3J");
-            else Console.Clear();
-            _lastW = w; _lastH = h;
-        }
+        _lastW = w;
+        _lastH = h;
+        _screen.Begin(w, h);
 
         if (w < 42 || h < 10)
         {
             WriteAt(0, 0, " Terminal too small (need at least 42x10).", ConsoleColor.White, ConsoleColor.DarkRed, w);
-            EndFrame();
+            _screen.Flush();
             return;
         }
 
@@ -211,76 +149,55 @@ internal sealed partial class App
         _resultsRowsTop = _resultsTop + 1;
         _resultsRowCount = Math.Max(0, resultsTotal - 1);
 
-        // Title
-        // The active element of the top panel: the selected node when the tree
-        // is focused, the open file in the editor, the current hit's file in search.
-        string activeLabel;
-        bool activeIsPath;
+        string activeLabel; // see BuildTitle
         bool showDirty = false;
         string activeTabLabel = "";
         if (_mode == UiMode.SearchResults && _hits.Count > 0)
         {
             activeLabel = _hits[Math.Clamp(_hitIndex, 0, _hits.Count - 1)].FilePath;
-            activeIsPath = true;
+            _titlePath = activeLabel;
         }
         else if (_focus == Focus.Tree)
         {
             activeLabel = _tree.Selected?.FullPath ?? _tree.Roots[0].FullPath;
-            activeIsPath = true;
+            _titlePath = activeLabel;
         }
         else if (_editor.HasFile)
         {
             activeLabel = _editor.FilePath!;
-            activeIsPath = true;
+            _titlePath = activeLabel;
             showDirty = _editor.Dirty;
             activeTabLabel = _tabs.Tabs.Count > 1 ? $" [tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}]" : "";
         }
         else
         {
             activeLabel = "no file open";
-            activeIsPath = false;
+            _titlePath = null;
         }
-        var title = BuildTitle(activeLabel, activeIsPath, showDirty, activeTabLabel);
-        _titleText = title.Text;
-        _titlePathSeg = title.Path;
-        if (_titleSelFor != _titleText) { _titleSelFrom = -1; _titleSelTo = -1; }
-        WriteAt(0, 0, _titleText, ConsoleColor.White, ConsoleColor.DarkBlue, w);
-        if (HasTitleSelection)
-        {
-            int from = Math.Clamp(_titleSelFrom, 0, _titleText.Length);
-            int to = Math.Clamp(_titleSelTo, from, Math.Min(_titleText.Length, w));
-            if (to > from)
-                WriteAt(from, 0, _titleText.Substring(from, to - from),
-                    ConsoleColor.DarkBlue, ConsoleColor.White, to - from);
-        }
+        WriteAt(0, 0, BuildTitle(activeLabel, showDirty, activeTabLabel, w), ConsoleColor.White, ConsoleColor.DarkBlue, w);
 
         DrawPanels(w, contentH);
         if (_resultsVisible) DrawResultsPanel(w);
 
         DrawStatusAndHelp(w, helpY);
-        PlaceCursor(w, h);
-        EndFrame();
+        PlaceCursor(w);
+        _screen.Flush();
     }
 
-    private void PlaceCursor(int w, int h)
+    private void PlaceCursor(int w)
     {
         if (_mode is UiMode.SearchInput or UiMode.PathInput)
         {
-            string label = _mode == UiMode.SearchInput ? CurrentSearchPrompt() : CurrentPathPrompt();
-            int typed = _mode == UiMode.SearchInput ? _searchQuery.Length : _pathInput.Length;
-            int x = Math.Min(w - 1, label.Length + typed);
-            MoveTo(Math.Max(0, x), _statusY);
-            ShowCursor();
+            _screen.Cursor = (Math.Min(w - 1, _promptCursorX), _statusY);
         }
         else if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasFile)
         {
-            int x = _editorTextX + (_editor.Cx - _editor.ScrollX);
+            int x = _editorTextX + (_editor.CursorColumn - _editor.ScrollX);
             int y = _contentTop + (_editor.Cy - _editor.ScrollY);
-            if (x >= 0 && x < w && y >= _contentTop && y < _contentTop + _mainContentH)
-            {
-                MoveTo(x, y);
-                ShowCursor();
-            }
+            // Sideways scrolling can leave the cursor out of view on either side.
+            if (x >= _editorTextX && x < _editorTextX + _editor.ViewWidth
+                && y >= _contentTop && y < _contentTop + _mainContentH)
+                _screen.Cursor = (x, y);
         }
     }
 
@@ -302,31 +219,31 @@ internal sealed partial class App
         _leftW = leftW;
         _editorX = editorX;
 
-        _treeTop = 1; // the tree has no header — its first row is right below the title
+        _treeTop = 1;
         _treeContentH = contentH + 1;
         _tree.ViewHeight = _treeContentH;
         _tree.EnsureVisible();
         int gutter = Math.Max(4, _editor.LineCount.ToString().Length + 1);
         _gutter = gutter;
-        _editor.ViewHeight = contentH;
-        _editor.ViewWidth = Math.Max(1, editorW - gutter);
-        // Pull the view to the cursor only on resize, else the wheel cannot scroll away from the cursor.
-        if (_editor.HasFile && (_editor.ViewWidth != _prevEditorViewW || _editor.ViewHeight != _prevEditorViewH))
+        int viewW = Math.Max(1, editorW - gutter);
+        // Pull the view to the cursor only when this tab's view size changed, else
+        // the wheel cannot scroll away from the cursor. The size is per tab, so a
+        // tab that was hidden while the layout changed catches up when shown.
+        if (_editor.HasFile && (_editor.ViewWidth != viewW || _editor.ViewHeight != contentH))
+        {
+            _editor.ViewWidth = viewW;
+            _editor.ViewHeight = contentH;
             _editor.EnsureCursorVisible();
-        _prevEditorViewW = _editor.ViewWidth;
-        _prevEditorViewH = _editor.ViewHeight;
+        }
+        _editor.ViewWidth = viewW;
+        _editor.ViewHeight = contentH;
         _editorTextX = editorX + gutter;
 
-        // Above the editor — the tab bar; the tree has no header.
         DrawTabBar(editorX, editorW);
-
-        // Block-comment state at the window top, from editor checkpoints
-        // (never a re-tokenization of everything above the window).
-        bool inBlock = _editor.HasFile && _editor.BlockCommentStateBefore(_editor.ScrollY);
-        string ext = _editor.Extension;
 
         bool hasSel = _editor.HasSelection;
         var (selSL, selSC, selEL, selEC) = hasSel ? _editor.SelectionRange() : (-1, 0, -1, 0);
+        var syntax = _editor.Syntax;
 
         // The tree also occupies the tab-bar row, so it has one more row than the editor.
         for (int tr = 0; tr < _treeContentH; tr++)
@@ -385,7 +302,17 @@ internal sealed partial class App
                     WriteAt(editorX, y, num, curLine ? ConsoleColor.Yellow : ConsoleColor.DarkGray,
                         ConsoleColor.Black, gutter);
                     string lineText = _editor.LineText(lineNo);
-                    Highlighter.TokenizeInto(_tokens, lineText, ext, ref inBlock);
+                    // Only the visible part is tokenized; the comment state comes from the editor's cache.
+                    // A very long line (minified code, a log) is drawn without colours.
+                    bool inBlock = _editor.BlockCommentStateBefore(lineNo);
+                    if (lineText.Length > MaxHighlightedLine)
+                    {
+                        _tokens.Clear();
+                        _tokens.Add(new Token(0, lineText.Length, TokenKind.Normal));
+                    }
+                    else
+                        Highlighter.TokenizeInto(_tokens, lineText, syntax, ref inBlock,
+                            Cells.IndexAt(lineText, _editor.ScrollX + viewW) + 1);
                     int sFrom = -1, sTo = -1;
                     bool sEol = false;
                     if (hasSel && lineNo >= selSL && lineNo <= selEL)
@@ -394,7 +321,7 @@ internal sealed partial class App
                         sTo = lineNo == selEL ? selEC : lineText.Length;
                         sEol = lineNo < selEL;
                     }
-                    WriteHighlighted(_editorTextX, y, lineText, _tokens, _editor.ScrollX, editorW - gutter, sFrom, sTo, sEol);
+                    WriteHighlighted(_screen, _editorTextX, y, lineText, _tokens, _editor.ScrollX, viewW, sFrom, sTo, sEol);
                 }
                 else WriteAt(editorX, y, " ~", ConsoleColor.DarkGray, ConsoleColor.Black, editorW);
             }
@@ -402,8 +329,21 @@ internal sealed partial class App
     }
 
     /// <summary>
-    /// Tab bar above the editor: ⚑ — pinned (no close cross),
-    /// ● — has edits, × — close. On overflow the window shifts so the
+    /// The tab label: ● — unsaved edits, ⚠ — changed on disk under unsaved
+    /// edits, ✗ — gone from disk, × — close. Tabs whose files share a name
+    /// also show the parent folder.
+    /// </summary>
+    private static string TabLabel(EditorTab t, bool ambiguous)
+    {
+        var ed = t.Editor;
+        string name = t.Name;
+        if (ambiguous && ed.FilePath != null)
+            name += " · " + Path.GetFileName(Path.GetDirectoryName(ed.FilePath) ?? "");
+        return " " + name + (ed.Dirty ? " ●" : "") + (ed.MissingOnDisk ? " ✗" : ed.ChangedOnDisk ? " ⚠" : "") + " × ";
+    }
+
+    /// <summary>
+    /// Tab bar above the editor. On overflow the window shifts so the
     /// active tab stays visible; ‹ › at the edges mean some are hidden.
     /// </summary>
     private void DrawTabBar(int editorX, int editorW)
@@ -419,16 +359,16 @@ internal sealed partial class App
         }
         WriteAt(editorX, 1, "", ConsoleColor.Gray, ConsoleColor.Black, editorW);
 
-        var labels = _tabs.Tabs.Select(t =>
-            " " + (t.Pinned ? "⚑ " : "") + t.Name
-            + (t.Editor.Dirty ? " ●" : "") + (t.Pinned ? "" : " ×") + " ").ToList();
+        var nameCounts = _tabs.Tabs.GroupBy(t => t.Name).ToDictionary(g => g.Key, g => g.Count());
+        var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.Name] > 1)).ToList();
+        var widths = labels.Select(l => Cells.WidthOf(l)).ToList();
 
         int start = _tabs.ActiveIndex;
-        int used = Math.Min(labels[start].Length, editorW);
-        while (start > 0 && used + labels[start - 1].Length <= editorW)
+        int used = Math.Min(widths[start], editorW);
+        while (start > 0 && used + widths[start - 1] <= editorW)
         {
             start--;
-            used += labels[start].Length;
+            used += widths[start];
         }
 
         int x = editorX;
@@ -437,16 +377,16 @@ internal sealed partial class App
         {
             int remaining = editorX + editorW - x;
             if (remaining <= 0) break;
-            int cellW = Math.Min(labels[i].Length, remaining);
+            int cellW = Math.Min(widths[i], remaining);
             bool active = i == _tabs.ActiveIndex;
             var bg = active
                 ? (edFocused ? ConsoleColor.DarkCyan : ConsoleColor.DarkGray)
                 : ConsoleColor.Black;
-            var fg = active ? ConsoleColor.White
-                : _tabs.Tabs[i].Pinned ? ConsoleColor.Cyan : ConsoleColor.Gray;
+            var fg = active ? ConsoleColor.White : ConsoleColor.Gray;
             WriteAt(x, 1, labels[i], fg, bg, cellW);
-            int closeRel = labels[i].IndexOf('×');
-            _tabCells.Add((i, x, x + cellW - 1, closeRel >= 0 && closeRel < cellW ? x + closeRel : -1));
+            int closeAt = labels[i].LastIndexOf('×');
+            int closeRel = closeAt >= 0 ? Cells.ColumnOf(labels[i], closeAt) : -1;
+            _tabCells.Add((_tabs.Tabs[i], x, x + cellW - 1, closeRel >= 0 && closeRel < cellW ? x + closeRel : -1));
             x += cellW;
             lastDrawn = i;
         }
@@ -469,8 +409,10 @@ internal sealed partial class App
             SearchScope.SelectedFolder => $"folder {targetName}",
             _ => "all folders",
         };
+        string count = $"{_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count}{(_hitsTruncated ? "+" : "")}"
+                       + (_hitsSkipped > 0 ? $" ({_hitsSkipped} files over 8 MB skipped)" : "");
         WriteAt(0, _resultsTop,
-            $" Search results ({scopeLabel}) for \"{_searchQuery}\": {_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count} · Enter opens · Ctrl+G next · Esc hides",
+            $" Search results ({scopeLabel}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides",
             focused ? ConsoleColor.White : ConsoleColor.Magenta,
             focused ? ConsoleColor.DarkMagenta : ConsoleColor.Black, w);
 
@@ -492,17 +434,36 @@ internal sealed partial class App
             bool sel = idx == _hitIndex;
             var bg = sel ? ConsoleColor.DarkCyan : ConsoleColor.Black;
             string prefix = $" {hit.RelativePath}:{hit.LineNumber} ";
-            int avail = Math.Max(1, w - prefix.Length);
+            int prefixW = Math.Min(w, _screen.Put(0, y, prefix, sel ? ConsoleColor.White : ConsoleColor.Cyan, bg,
+                w, out _, pad: false));
+            int avail = Math.Max(1, w - prefixW);
+            // The snippet starts a little before the match when the whole line does not fit.
             string snippet = hit.LineText.Trim();
-            if (snippet.Length > avail)
+            int lead = hit.LineText.Length - hit.LineText.TrimStart().Length;
+            if (Cells.WidthOf(snippet) > avail)
             {
-                int lead = hit.LineText.Length - hit.LineText.TrimStart().Length;
-                int start = Math.Clamp(hit.MatchStart - lead - 12, 0, Math.Max(0, snippet.Length - avail));
-                snippet = (start > 0 ? "…" : "") + snippet.Substring(start, Math.Min(avail - (start > 0 ? 1 : 0), snippet.Length - start));
+                int start = Math.Clamp(hit.MatchStart - lead - 12, 0, snippet.Length);
+                start = Cells.FloorBoundary(snippet, start);
+                if (start > 0) snippet = "…" + snippet[start..];
             }
-            WriteAt(0, y, prefix, sel ? ConsoleColor.White : ConsoleColor.Cyan, bg, prefix.Length);
-            WriteAt(prefix.Length, y, snippet, sel ? ConsoleColor.White : ConsoleColor.Gray, bg, avail);
+            WriteAt(prefixW, y, snippet, sel ? ConsoleColor.White : ConsoleColor.Gray, bg, w - prefixW);
         }
+    }
+
+    /// <summary>The input line of a prompt; returns where the cursor goes. The text scrolls to keep its end in view.</summary>
+    private int DrawPrompt(int w, string label, string input, string ghost, string suffix)
+    {
+        int labelW = Cells.WidthOf(label);
+        int room = Math.Max(1, w - labelW - 1 - Cells.WidthOf(suffix)); // one cell for the cursor
+        string shown = FitTail(input, room);
+        int x = _screen.Put(0, _statusY, label + shown, ConsoleColor.White, ConsoleColor.DarkBlue, w, out _, pad: false);
+        int cursorX = x;
+        if (ghost.Length > 0 && x < w)
+            x += _screen.Put(x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w - x, out _, pad: false);
+        if (suffix.Length > 0 && x < w)
+            x += _screen.Put(x, _statusY, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w - x, out _, pad: false);
+        if (x < w) WriteAt(x, _statusY, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - x);
+        return cursorX;
     }
 
     private void DrawStatusAndHelp(int w, int helpY)
@@ -510,16 +471,7 @@ internal sealed partial class App
         if (_mode == UiMode.PathInput)
         {
             // Typed text in white, the ghost suggestion trailing in grey.
-            string left = CurrentPathPrompt() + _pathInput;
-            WriteAt(0, _statusY, left, ConsoleColor.White, ConsoleColor.DarkBlue, Math.Min(w, left.Length));
-            int gx = left.Length;
-            if (_pathGhost.Length > 0 && gx < w)
-            {
-                WriteAt(gx, _statusY, _pathGhost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue,
-                    Math.Min(_pathGhost.Length, w - gx));
-                gx += _pathGhost.Length;
-            }
-            if (gx < w) WriteAt(gx, _statusY, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - gx);
+            _promptCursorX = DrawPrompt(w, CurrentPathPrompt(), _pathInput.ToString(), _pathGhost, "");
 
             // The help line shows live completion candidates (the chosen one highlighted).
             if (_pathPurpose == PathPurpose.Rename)
@@ -534,8 +486,7 @@ internal sealed partial class App
                 void Seg(string text, ConsoleColor fg, ConsoleColor bg)
                 {
                     if (hx >= w) return;
-                    WriteAt(hx, helpY, text, fg, bg, Math.Min(text.Length, w - hx));
-                    hx += text.Length;
+                    hx += _screen.Put(hx, helpY, text, fg, bg, w - hx, out _, pad: false);
                 }
                 Seg(" Tab ▸ ", ConsoleColor.DarkGray, ConsoleColor.Black);
                 for (int i = 0; i < _pathCandidates.Count && hx < w; i++)
@@ -545,8 +496,9 @@ internal sealed partial class App
                     if (cand.EndsWith(Path.DirectorySeparatorChar) || cand.EndsWith(Path.AltDirectorySeparatorChar))
                         name += "/";
                     bool sel = i == _pathCandidateIndex;
-                    Seg(name + "  ", sel ? ConsoleColor.White : ConsoleColor.Gray,
+                    Seg(name, sel ? ConsoleColor.White : ConsoleColor.Gray,
                         sel ? ConsoleColor.DarkBlue : ConsoleColor.Black);
+                    Seg("  ", ConsoleColor.Gray, ConsoleColor.Black);
                 }
             }
             else if (_pathInput.Length > 0)
@@ -560,7 +512,8 @@ internal sealed partial class App
                 {
                     PathPurpose.CreateFile => " Enter creates the file and opens it · Tab/↑↓ completion · a trailing / creates a folder · Esc cancels",
                     PathPurpose.CreateFolder => " Enter creates the folder · Tab/↑↓ completion · Esc cancels",
-                    _ => " Enter adds the folder to the left panel · Tab/↑↓ completion · Esc cancels · a file path opens the file",
+                    PathPurpose.GoTo => " Enter jumps: 120 — a line, file.cs:120 — a file at a line · Esc cancels",
+                    _ => " Enter adds the folder to the left panel · Tab/↑↓ completion · Esc cancels · a file path (file:line too) opens the file",
                 };
                 WriteAt(0, helpY, pathHelp, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             }
@@ -571,9 +524,9 @@ internal sealed partial class App
             string suffix = _pendingSearch is { } ps && !ps.Task.IsCompleted
                 ? "   · searching…"
                 : _searchQuery.ToString().Trim().Length >= 2
-                    ? $"   · found: {_hits.Count}"
+                    ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"
                     : "   · search starts at 2 characters";
-            WriteAt(0, _statusY, CurrentSearchPrompt() + _searchQuery + suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
+            _promptCursorX = DrawPrompt(w, CurrentSearchPrompt(), _searchQuery.ToString(), "", suffix);
             string scopeHelp = _searchScope switch
             {
                 SearchScope.CurrentFile =>
@@ -588,21 +541,14 @@ internal sealed partial class App
         }
         if (_mode == UiMode.Confirm)
         {
-            string confirmText = _pending switch
-            {
-                PendingKind.Quit => $" Unsaved tabs: {_tabs.DirtyCount}!  S saves all · D quits without saving · Esc cancels",
-                PendingKind.CloseTab when _pendingTab != null => $" Tab \"{_pendingTab.Name}\" has changes!  S saves · D closes without saving · Esc cancels",
-                PendingKind.DeleteNode => $" Delete {(_pendingDeleteIsDir ? "folder with all its contents" : "file")} \"{Path.GetFileName(_pendingDeletePath ?? "")}\" from disk forever?  D deletes · Esc cancels",
-                _ => " Confirm: S — yes · D — no · Esc — cancel",
-            };
-            WriteAt(0, _statusY, confirmText, ConsoleColor.White, ConsoleColor.DarkRed, w);
+            WriteAt(0, _statusY, " " + _confirm?.Question, ConsoleColor.White, ConsoleColor.DarkRed, w);
             WriteAt(0, helpY, "", ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
         }
 
         string modeLabel = _mode == UiMode.SearchResults ? "SEARCH" : _focus == Focus.Tree ? "TREE" : "EDITOR";
         string selInfo = _editor.HasSelection ? $" · selected: {_editor.SelectionCharCount()}" : "";
-        string pos = _editor.HasFile ? $" Ln {_editor.Cy + 1}/{_editor.LineCount}, Col {_editor.Cx + 1}{selInfo} " : "";
+        string pos = _editor.HasFile ? $" Ln {_editor.Cy + 1}/{_editor.LineCount}, Col {_editor.CursorColumn + 1}{selInfo} " : "";
         int mainW = Math.Max(0, w - pos.Length);
         WriteAt(0, _statusY, $" [{modeLabel}] {_status}", ConsoleColor.Black, ConsoleColor.Gray, mainW);
         if (pos.Length > 0) WriteAt(mainW, _statusY, pos, ConsoleColor.Black, ConsoleColor.Gray, pos.Length);
@@ -610,8 +556,8 @@ internal sealed partial class App
         string help = _mode == UiMode.SearchResults
             ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
-                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R+R rename · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root"
-                : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+R+R rename · mouse/Shift+arrows select · Option+←→ by words · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W/P tabs";
+                ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
+                : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab";
         if (_mode == UiMode.Normal && _resultsVisible)
             help += " · Ctrl+G — next hit";
         WriteAt(0, helpY, help, ConsoleColor.DarkGray, ConsoleColor.Black, w);

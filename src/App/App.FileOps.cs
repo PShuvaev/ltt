@@ -12,6 +12,34 @@ internal sealed partial class App
         return sel.Parent?.FullPath ?? Path.GetDirectoryName(sel.FullPath) ?? _tree.Roots[0].FullPath;
     }
 
+    /// <summary>A typed path: ~ expanded, relative ones taken from the prompt's base folder.</summary>
+    private string ResolveInputPath(string raw)
+    {
+        string expanded = PathCompletion.ExpandHome(raw);
+        return Path.GetFullPath(Path.IsPathRooted(expanded) ? expanded : Path.Combine(_pathBaseDir, expanded));
+    }
+
+    /// <summary>
+    /// Re-read the loaded folders on the way to `path` (a new entry may sit in any
+    /// of them — "a/b/c.txt" creates folders too), then select `path`.
+    /// </summary>
+    private void ShowInTree(string path)
+    {
+        var dirs = new List<string>();
+        for (string? d = Path.GetDirectoryName(Paths.Normalize(path)); d != null; d = Path.GetDirectoryName(d))
+            dirs.Add(d);
+        _tree.RefreshDirs(dirs);
+        _tree.SelectPath(path);
+        FilesChanged();
+    }
+
+    /// <summary>After our own file operation: search must look again.</summary>
+    private void FilesChanged()
+    {
+        _liveSourceStale = true;
+        FuzzySearch.InvalidateFileLists();
+    }
+
     private void CreateFromInput(bool makeFolderRequested)
     {
         string raw = _pathInput.ToString().Trim();
@@ -21,11 +49,9 @@ internal sealed partial class App
 
         bool makeFolder = makeFolderRequested
             || raw.EndsWith(Path.DirectorySeparatorChar) || raw.EndsWith(Path.AltDirectorySeparatorChar);
-        string expanded = PathCompletion.ExpandHome(raw.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (expanded.Length == 0) { _status = "Creation cancelled."; return; }
-        string p = Path.IsPathRooted(expanded)
-            ? Path.GetFullPath(expanded)
-            : Path.GetFullPath(Path.Combine(_pathBaseDir, expanded));
+        string trimmed = raw.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (trimmed.Length == 0) { _status = "Creation cancelled."; return; }
+        string p = ResolveInputPath(trimmed);
 
         try
         {
@@ -34,9 +60,7 @@ internal sealed partial class App
                 if (File.Exists(p)) { _status = $"A file with this name already exists: {p}"; return; }
                 bool existed = Directory.Exists(p);
                 Directory.CreateDirectory(p);
-                ResetLiveSearch();
-                _tree.Refresh();
-                _tree.SelectPath(p);
+                ShowInTree(p);
                 _status = existed ? $"Folder already exists: {p}" : $"Folder created: {p}";
                 return;
             }
@@ -44,44 +68,35 @@ internal sealed partial class App
             if (Directory.Exists(p)) { _status = $"That is a folder, not a file: {p}"; return; }
             if (File.Exists(p))
             {
-                _tree.Refresh();
+                ShowInTree(p);
                 TryOpen(p, 0);
                 _status = $"The file already existed — opened it: {p}";
                 return;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(p)!);
-            using (File.Create(p)) { }
-            ResetLiveSearch();
-            _tree.Refresh();
-            _tree.SelectPath(p);
+            using (new FileStream(p, FileMode.CreateNew, FileAccess.Write)) { }
+            ShowInTree(p);
             TryOpen(p, 0);
             _status = $"File created and opened: {p}";
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
             _status = "Creation error: " + ex.Message;
         }
     }
 
-    private void StartRename()
-    {
-        var node = _tree.Selected;
-        if (node == null) return;
-        StartRenamePath(node.FullPath, node.IsDir);
-    }
-
-    /// <summary>Ctrl+R+R in either panel: rename a tree node, or the file open in the editor.</summary>
+    /// <summary>Ctrl+R in either panel: rename a tree node, or the file open in the editor.</summary>
     private void StartRenamePath(string fullPath, bool isDir)
     {
-        if (Path.GetDirectoryName(fullPath) == null)
+        if (Path.GetDirectoryName(Paths.Normalize(fullPath)) == null)
         {
             _status = "The filesystem root cannot be renamed.";
             return;
         }
-        _pendingRenamePath = fullPath;
+        _pendingRenamePath = Paths.Normalize(fullPath);
         _pendingRenameIsDir = isDir;
         _renameFromEditor = _focus == Focus.Editor;
-        OpenPathInput(PathPurpose.Rename, Path.GetFileName(fullPath));
+        OpenPathInput(PathPurpose.Rename, Path.GetFileName(_pendingRenamePath));
     }
 
     private void RenameFromInput()
@@ -108,7 +123,7 @@ internal sealed partial class App
             _status = "The name is unchanged.";
             return;
         }
-        bool caseOnly = string.Equals(oldPath, newPath, StringComparison.OrdinalIgnoreCase);
+        bool caseOnly = Paths.Same(oldPath, newPath); // the same entry on this file system, new spelling
         if (!caseOnly && (File.Exists(newPath) || Directory.Exists(newPath)))
         {
             _status = $"Name already taken: {newPath}";
@@ -130,39 +145,32 @@ internal sealed partial class App
         {
             string? fp = tab.Editor.FilePath;
             if (fp == null) continue;
-            if (string.Equals(fp, oldPath, StringComparison.OrdinalIgnoreCase))
-                tab.Editor.RenameTo(newPath);
-            else if (isDir && fp.StartsWith(oldPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                tab.Editor.RenameTo(newPath + fp[oldPath.Length..]);
+            if (Paths.Same(fp, oldPath)) tab.Editor.RenameTo(newPath);
+            else if (isDir && Paths.IsInside(fp, oldPath)) tab.Editor.RenameTo(newPath + fp[oldPath.Length..]);
         }
 
-        ResetLiveSearch();
-        if (!_tree.ReplaceRootPath(oldPath, newPath))
-        {
-            _tree.Refresh();
-            _tree.SelectPath(newPath);
-        }
+        if (_tree.ReplaceRootPath(oldPath, newPath)) FilesChanged();
+        else ShowInTree(newPath);
         SyncWatcher();
         _status = $"Renamed: {Path.GetFileName(oldPath)} → {newName}";
     }
 
     /// <summary>
-    /// Paths that must never be deleted from disk through the UI: panel roots,
-    /// the home folder and everything above it, and filesystem roots.
-    /// Getting rid of a root here is plain Delete (removes it from the panel).
+    /// Paths that must never be deleted from disk through the UI: panel roots
+    /// and the folders above them, the home folder and everything above it,
+    /// and filesystem roots.
     /// </summary>
     internal static bool IsDeleteProtected(string path, IEnumerable<string> rootPaths)
     {
-        static string Norm(string p) => Path.GetFullPath(p)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string full = Norm(path);
-        if (full.Length == 0) return true; // filesystem root
-        string home = Norm(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
-        if (home.Length > 0
-            && (string.Equals(full, home, StringComparison.OrdinalIgnoreCase)
-                || home.StartsWith(full + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)))
-            return true; // home itself or an ancestor of it
-        return rootPaths.Any(r => string.Equals(Norm(r), full, StringComparison.OrdinalIgnoreCase));
+        string full = Paths.Normalize(path);
+        if (Path.GetDirectoryName(full) is not { } parent) return true; // filesystem root
+        // Compared as written and with symlinks resolved (/tmp/x is /private/tmp/x on macOS);
+        // the path's own name is kept, as deleting a symlink removes just the link.
+        string real = Path.Combine(Paths.Real(parent), Path.GetFileName(full));
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var anchors = rootPaths.Append(home).Where(a => a.Length > 0)
+            .SelectMany(a => new[] { Paths.Normalize(a), Paths.Real(a) });
+        return anchors.Any(a => Paths.IsSameOrInside(a, full) || Paths.IsSameOrInside(a, real));
     }
 
     private void RequestDeleteSelected()
@@ -176,18 +184,17 @@ internal sealed partial class App
                 : $"Protected path - never deleted from disk: {node.FullPath}";
             return;
         }
-        _pendingDeletePath = node.FullPath;
-        _pendingDeleteIsDir = node.IsDir;
-        _pending = PendingKind.DeleteNode;
-        _mode = UiMode.Confirm;
+        string path = node.FullPath;
+        bool isDir = node.IsDir;
+        int unsaved = _tabs.Tabs.Count(t => t.Editor.Dirty && t.Editor.FilePath is { } fp && Paths.IsSameOrInside(fp, path));
+        string loss = unsaved > 0 ? $" {unsaved} open tab(s) there have unsaved edits — they go too!" : "";
+        Ask($"Delete {(isDir ? "folder with all its contents" : "file")} \"{node.Name}\" from disk forever?{loss}  D deletes · Esc cancels",
+            ('d', () => ExecuteDelete(path, isDir)),
+            ('y', () => ExecuteDelete(path, isDir)));
     }
 
-    private void ExecuteDeletePending()
+    private void ExecuteDelete(string path, bool isDir)
     {
-        string? path = _pendingDeletePath;
-        bool isDir = _pendingDeleteIsDir;
-        _pendingDeletePath = null;
-        if (path == null) return;
         if (IsDeleteProtected(path, _tree.RootPaths))
         {
             _status = $"Protected path - not deleted: {path}";
@@ -205,24 +212,13 @@ internal sealed partial class App
             return;
         }
 
-        // Tabs of the deleted file (and of files inside a deleted folder) are closed.
-        var doomed = _tabs.Tabs.Where(t =>
-        {
-            string? fp = t.Editor.FilePath;
-            return fp != null
-                && (string.Equals(fp, path, StringComparison.OrdinalIgnoreCase)
-                    || fp.StartsWith(path + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
-        }).ToList();
-        foreach (var t in doomed) _tabs.ForceClose(t);
+        var doomed = _tabs.Tabs.Where(t => t.Editor.FilePath is { } fp && Paths.IsSameOrInside(fp, path)).ToList();
+        foreach (var t in doomed) _tabs.Close(t);
         if (_tabs.Tabs.Count == 0) _focus = Focus.Tree;
 
-        var root = _tree.Roots.FirstOrDefault(
-            r => string.Equals(r.FullPath, path, StringComparison.OrdinalIgnoreCase));
-        if (root != null && _tree.Roots.Count > 1) _tree.RemoveRoot(root);
-        else _tree.Refresh();
-
+        _tree.RefreshDirs(new[] { Path.GetDirectoryName(path)! });
+        FilesChanged();
         SyncWatcher();
-        ResetLiveSearch();
         _status = $"Deleted from disk: {path}" + (doomed.Count > 0 ? $" (tabs closed: {doomed.Count})" : "");
     }
 }

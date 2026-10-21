@@ -1,17 +1,11 @@
-/// <summary>One editor tab: an open file and its pinned flag.</summary>
+/// <summary>One editor tab: an open file.</summary>
 internal sealed class EditorTab
 {
     public required TextEditor Editor { get; init; }
-    public bool Pinned { get; set; }
     public string Name => Editor.DisplayName;
 }
 
-internal enum CloseResult { Closed, IsPinned, IsDirty }
-
-/// <summary>
-/// List of tabs with pinned ones first. A pinned tab cannot be closed
-/// by the usual close command — it has to be unpinned first.
-/// </summary>
+/// <summary>The open tabs, in opening order, and which one is active.</summary>
 internal sealed class TabManager
 {
     public List<EditorTab> Tabs { get; } = new();
@@ -21,10 +15,9 @@ internal sealed class TabManager
     public bool AnyDirty => Tabs.Any(t => t.Editor.Dirty);
     public int DirtyCount => Tabs.Count(t => t.Editor.Dirty);
 
-    public int IndexOfPath(string fullPath) =>
-        Tabs.FindIndex(t => string.Equals(t.Editor.FilePath, fullPath, StringComparison.OrdinalIgnoreCase));
+    public int IndexOfPath(string fullPath) => Tabs.FindIndex(t => Paths.Same(t.Editor.FilePath, fullPath));
 
-    /// <summary>Add a tab at the end (pinned stay on the left) and make it active.</summary>
+    /// <summary>Add a tab at the end and make it active.</summary>
     public EditorTab Add(TextEditor editor)
     {
         var tab = new EditorTab { Editor = editor };
@@ -44,27 +37,12 @@ internal sealed class TabManager
         ActiveIndex = ((ActiveIndex + delta) % Tabs.Count + Tabs.Count) % Tabs.Count;
     }
 
-    /// <summary>Pin/unpin; pinned tabs are always on the left, order within groups is preserved.</summary>
-    public void TogglePin(EditorTab tab)
-    {
-        tab.Pinned = !tab.Pinned;
-        var active = Active;
-        var sorted = Tabs.OrderByDescending(t => t.Pinned).ToList(); // OrderBy is stable
-        Tabs.Clear();
-        Tabs.AddRange(sorted);
-        ActiveIndex = active == null ? -1 : Tabs.IndexOf(active);
-    }
-
-    /// <summary>Close attempt: pinned and dirty tabs are left alone without confirmation.</summary>
-    public CloseResult RequestClose(EditorTab tab)
-    {
-        if (tab.Pinned) return CloseResult.IsPinned;
-        if (tab.Editor.Dirty) return CloseResult.IsDirty;
-        ForceClose(tab);
-        return CloseResult.Closed;
-    }
-
-    public void ForceClose(EditorTab tab)
+    /// <summary>
+    /// Close a tab (unsaved edits are the caller's concern). Closing the active
+    /// tab activates the one that took its place — the right neighbour, or the
+    /// left one when it was the last.
+    /// </summary>
+    public void Close(EditorTab tab)
     {
         int idx = Tabs.IndexOf(tab);
         if (idx < 0) return;

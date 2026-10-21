@@ -1,261 +1,433 @@
+using System.Globalization;
 using System.Text;
 
 /// <summary>
-/// Read/edit panel for a single file.
-/// Tabs are expanded to 4 spaces on open — for simple cursor arithmetic.
+/// Read/edit panel for a single file. Lines are kept without their breaks
+/// and saved back in the file's own format (see TextFile). Tabs stay tabs:
+/// they are expanded only on screen. Cx is an index into the cursor line
+/// that always sits on a character boundary; ScrollX and the remembered
+/// column for up/down movement are display columns (screen cells, see Cells).
 /// </summary>
 public sealed class TextEditor
 {
     public string? FilePath { get; private set; }
 
-    /// <summary>
-    /// Lines as immutable strings: an edit allocates only the touched line,
-    /// and undo snapshots / saved-state comparisons share unchanged lines
-    /// by reference instead of copying the whole text.
-    /// </summary>
-    public List<string> Lines { get; private set; } = new() { "" };
-    public int Cx { get; private set; }          // cursor column in the current line
+    /// <summary>Immutable lines: edits, the undo history and the saved state share untouched ones.</summary>
+    private List<string> _lines = new() { "" };
+    public IReadOnlyList<string> Lines => _lines;
+
+    // Held while an edit, undo, redo or reload changes _lines, so a copy taken
+    // from another thread (a signal handler backing the buffer up) sees whole
+    // edits only. A waiting copy goes first: no new edit starts meanwhile.
+    private readonly object _changeLock = new();
+    private int _copiesWaiting;
+
+    private void BeginChange()
+    {
+        while (Volatile.Read(ref _copiesWaiting) > 0) Thread.Yield();
+        Monitor.Enter(_changeLock);
+    }
+
+    private void EndChange()
+    {
+        if (Monitor.IsEntered(_changeLock)) Monitor.Exit(_changeLock);
+    }
+    public int Cx { get; private set; }          // cursor index in the current line
     public int Cy { get; private set; }          // cursor line
-    public int ScrollX { get; private set; }
+    public int ScrollX { get; private set; }     // first visible display column
     public int ScrollY { get; private set; }
     public bool Dirty { get; private set; }
+    public TextFormat Format { get; private set; } = TextFormat.Default;
+    public Syntax Syntax { get; private set; } = Syntax.Plain;
+
+    /// <summary>Tab inserts a tab character (tab-indented files, Makefiles, Go) instead of spaces.</summary>
+    public bool IndentWithTabs { get; private set; }
 
     /// <summary>Selection anchor; the selection spans anchor..cursor. null — no selection.</summary>
     public (int Line, int Col)? SelAnchor { get; private set; }
 
-    // Edit history: snapshots of the state before a group of changes.
-    private sealed record Snapshot(string[] Lines, int Cx, int Cy, (int Line, int Col)? Anchor);
-    private readonly List<Snapshot> _undo = new();
-    private readonly List<Snapshot> _redo = new();
+    /// <summary>The disk version the buffer was loaded from or last saved as (null — no file on disk).</summary>
+    public (DateTime WriteUtc, long Length)? DiskStamp { get; private set; }
+
+    /// <summary>The file changed on disk while this buffer had unsaved edits (they are kept).</summary>
+    public bool ChangedOnDisk { get; set; }
+
+    /// <summary>The file is gone from disk (deleted, or renamed by someone else).</summary>
+    public bool MissingOnDisk { get; set; }
+
+    // ---- Edit history ----
+    // Every change to _lines is a splice: Old lines at At were replaced by New.
+    // An undo step holds the splices of one edit group and the cursor around
+    // them, so the history keeps only the lines that were actually touched.
+    private sealed record Change(int At, string[] Old, string[] New);
+
+    private sealed class Step
+    {
+        public readonly List<Change> Splices = new();
+        public required string Kind;
+        public (int Line, int Col) Before, After;
+        public (int Line, int Col)? AnchorBefore;
+    }
+
+    private readonly List<Step> _undo = new();
+    private readonly List<Step> _redo = new();
+    private Step? _open; // the step that consecutive typing / Backspace / Delete keep extending
     private const int MaxUndo = 200;
-    private string _lastEditKind = "";
-    private int _lastEditCx = -1, _lastEditCy = -1;
     private string[] _savedContent = { "" }; // state as of open/save
 
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
     /// <summary>Lower scroll bound: the last line sits at the bottom edge; the view is never empty.</summary>
-    public int MaxScrollY => Math.Max(0, Lines.Count - Math.Max(1, ViewHeight));
+    public int MaxScrollY => Math.Max(0, _lines.Count - Math.Max(1, ViewHeight));
 
     /// <summary>Viewport size (excluding the line-number gutter), set by rendering.</summary>
     public int ViewWidth { get; set; } = 80;
     public int ViewHeight { get; set; } = 20;
 
-    private int _desiredCx; // column remembered while moving up/down
+    private int _desiredCol; // display column remembered while moving up/down
 
-    // Wheel scrolling, deliberately plain: each notch is 6/5 of a line,
-    // applied instantly (the remainder accumulates in _wheelNumerator, the
-    // same scheme as the tree wheel). No animation, no acceleration, no
-    // dependence on timing or file size — the view moves exactly as far as
-    // the wheel was turned, every time, in every terminal.
-    private int _wheelNumerator; // accumulated fifths of a line
+    private int _wheelNumerator; // accumulated fifths of a line (see WheelScroll)
 
-    // Block-comment state checkpoints: _commentCheckpoints[k] is the
-    // in-block-comment state before line (k+1)*CheckpointInterval, so rendering
-    // a deep window never re-tokenizes the whole file from the top.
-    private const int CheckpointInterval = 256;
-    private readonly List<bool> _commentCheckpoints = new();
-    private readonly List<Token> _tokenScratch = new();
+    // _blockState[i]: whether line i starts inside a /* */ comment. Filled
+    // lazily front to back and cut back to the first changed line by edits,
+    // so rendering a deep window never re-tokenizes the file from the top.
+    private readonly List<bool> _blockState = new() { false };
 
-    private void InvalidateCommentCheckpointsFrom(int line)
+    private void InvalidateHighlightFrom(int line)
     {
-        int kept = Math.Max(0, line) / CheckpointInterval;
-        if (_commentCheckpoints.Count > kept)
-            _commentCheckpoints.RemoveRange(kept, _commentCheckpoints.Count - kept);
+        int keep = Math.Max(1, line + 1); // a line's own start state does not depend on it
+        if (_blockState.Count > keep) _blockState.RemoveRange(keep, _blockState.Count - keep);
     }
 
-    /// <summary>Whether `line` starts inside a /* */ block comment (checkpoint-accelerated).</summary>
+    /// <summary>Whether `line` starts inside a /* */ block comment.</summary>
     public bool BlockCommentStateBefore(int line)
     {
-        if (line <= 0) return false;
-        string ext = Extension;
-        int covered = line / CheckpointInterval * CheckpointInterval;
-        bool state = false;
-        int from = 0;
-        int have = Math.Min(_commentCheckpoints.Count, covered / CheckpointInterval);
-        if (have > 0) { state = _commentCheckpoints[have - 1]; from = have * CheckpointInterval; }
-
-        while (from < covered && from < Lines.Count)
+        if (line <= 0 || !Syntax.SlashComments) return false;
+        line = Math.Min(line, _lines.Count);
+        while (_blockState.Count <= line)
         {
-            int next = Math.Min(from + CheckpointInterval, Lines.Count);
-            for (int i = from; i < next; i++)
-                Highlighter.TokenizeInto(_tokenScratch, Lines[i], ext, ref state);
-            from = next;
-            if (from % CheckpointInterval == 0 && _commentCheckpoints.Count == from / CheckpointInterval - 1)
-                _commentCheckpoints.Add(state);
+            int i = _blockState.Count - 1;
+            _blockState.Add(Highlighter.EndState(_lines[i], Syntax, _blockState[i]));
         }
-        for (int i = from; i < line && i < Lines.Count; i++)
-            Highlighter.TokenizeInto(_tokenScratch, Lines[i], ext, ref state);
-        return state;
+        return _blockState[line];
     }
 
     public bool HasFile => FilePath != null;
     public string DisplayName => FilePath == null ? "(no file)" : Path.GetFileName(FilePath);
-
-    private string _extension = "";
-    /// <summary>File extension, cached (read on every rendered frame).</summary>
-    public string Extension => _extension;
-
-    private bool _hasBom; // the file started with a UTF-8 BOM — preserve it, never invent one
-    public int LineCount => Lines.Count;
-    public string LineText(int i) => Lines[i];
+    public int LineCount => _lines.Count;
+    public string LineText(int i) => _lines[i];
 
     public void Open(string path, int goToLine = 0)
     {
-        // Streamed line-by-line read: no single whole-file string in memory.
-        var lines = new List<string>();
-        bool endsWithBreak = false;
-        using (var fs = File.OpenRead(path))
-        {
-            _hasBom = false;
-            if (fs.Length >= 3)
-            {
-                Span<byte> head = stackalloc byte[3];
-                fs.ReadExactly(head);
-                _hasBom = head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF;
-                fs.Position = 0;
-            }
-            if (fs.Length > 0)
-            {
-                fs.Seek(-1, SeekOrigin.End);
-                endsWithBreak = fs.ReadByte() is '\n' or '\r';
-                fs.Position = 0;
-            }
-            using var reader = new StreamReader(fs, Encoding.UTF8);
-            string? line;
-            while ((line = reader.ReadLine()) != null)
-            {
-                if (line.Contains('\0'))
-                    throw new InvalidOperationException("The file looks binary; editing is disabled.");
-                lines.Add(line.Contains('\t') ? line.Replace("\t", "    ") : line);
-            }
-        }
-        // A trailing line break ends the last line; keep the empty line after it.
-        if (lines.Count == 0 || endsWithBreak) lines.Add("");
-        Lines = lines;
-        _commentCheckpoints.Clear();
-
-        FilePath = Path.GetFullPath(path);
-        _extension = Path.GetExtension(FilePath);
-        SelAnchor = null;
-        _savedContent = ContentCopy();
-        _undo.Clear();
-        _redo.Clear();
-        _lastEditKind = "";
-        Cx = 0;
-        Cy = Math.Clamp(goToLine, 0, Lines.Count - 1);
-        _desiredCx = 0;
-        ScrollX = 0;
-        ScrollY = 0;
-        _wheelNumerator = 0;
-        Dirty = false;
+        string full = Path.GetFullPath(path);
+        var (lines, format) = TextFile.Read(full);
+        Load(full, lines, format);
+        Cy = Math.Clamp(goToLine, 0, _lines.Count - 1);
         EnsureCursorVisible();
     }
 
-    /// <summary>The tab's file was renamed/moved on disk — update the path; content and history stay intact.</summary>
-    public void RenameTo(string newPath)
-    {
-        FilePath = Path.GetFullPath(newPath);
-        _extension = Path.GetExtension(FilePath);
-        _commentCheckpoints.Clear(); // the extension (language) may have changed
-    }
+    /// <summary>A path whose file is gone (a recovered buffer): empty, marked missing on disk.</summary>
+    public void OpenMissing(string path) => Load(Path.GetFullPath(path), new List<string> { "" }, TextFormat.Default);
 
-    public void Save()
+    private void Load(string full, List<string> lines, TextFormat format)
     {
-        if (FilePath == null) throw new InvalidOperationException("No file is open.");
-        // Encoding.UTF8 would always emit a BOM; write exactly the BOM-ness the file had.
-        using (var writer = new StreamWriter(FilePath, append: false, new UTF8Encoding(_hasBom), bufferSize: 65536) { NewLine = Environment.NewLine })
-            foreach (var line in Lines) writer.WriteLine(line);
-        _savedContent = ContentCopy();
+        BeginChange();
+        _lines = lines;
+        EndChange();
+        _savedContent = _lines.ToArray();
+        FilePath = full;
+        Format = format;
+        SetSyntax(Syntax.For(full));
+        IndentWithTabs = DetectTabIndent(_lines, full);
+        DiskStamp = TextFile.Stamp(full);
+        ChangedOnDisk = false;
+        MissingOnDisk = DiskStamp == null;
+        _undo.Clear();
+        _redo.Clear();
+        _open = null;
+        SelAnchor = null;
+        Cx = Cy = 0;
+        _desiredCol = 0;
+        ScrollX = ScrollY = 0;
+        _wheelNumerator = 0;
         Dirty = false;
     }
 
-    public void GoToLine(int lineZeroBased)
+    /// <summary>Replace the whole text as one undo step (a recovered buffer); the result is unsaved.</summary>
+    public void ReplaceContent(List<string> lines)
+    {
+        if (lines.Count == 0) lines.Add("");
+        BeginEdit("other");
+        Splice(0, _lines.Count, lines.ToArray());
+        Cy = Cx = 0;
+        EndEdit();
+    }
+
+    /// <summary>Pull the cursor, the anchor and the view back inside the text (after an internal error).</summary>
+    public void ClampState()
+    {
+        if (_lines.Count == 0) _lines.Add("");
+        Cy = Math.Clamp(Cy, 0, _lines.Count - 1);
+        Cx = Cells.FloorBoundary(_lines[Cy], Math.Clamp(Cx, 0, _lines[Cy].Length));
+        if (SelAnchor is { } a)
+        {
+            int al = Math.Clamp(a.Line, 0, _lines.Count - 1);
+            SelAnchor = (al, Math.Clamp(a.Col, 0, _lines[al].Length));
+        }
+        ScrollY = Math.Clamp(ScrollY, 0, MaxScrollY);
+        _open = null;
+        _blockState.Clear();
+        _blockState.Add(false);
+        while (Monitor.IsEntered(_changeLock)) Monitor.Exit(_changeLock); // an edit that threw never finished
+    }
+
+    private void SetSyntax(Syntax syntax)
+    {
+        Syntax = syntax;
+        _blockState.Clear();
+        _blockState.Add(false);
+    }
+
+    /// <summary>Tabs for Makefiles and Go, and for files whose indented lines mostly start with a tab.</summary>
+    private static bool DetectTabIndent(List<string> lines, string path)
+    {
+        string name = Path.GetFileName(path);
+        if (name is "Makefile" or "makefile" or "GNUmakefile" || name.EndsWith(".mk") || name.EndsWith(".go"))
+            return true;
+        int tabs = 0, spaces = 0;
+        for (int i = 0; i < lines.Count && i < 10_000; i++)
+        {
+            string l = lines[i];
+            if (l.StartsWith('\t')) tabs++;
+            else if (l.StartsWith("  ")) spaces++;
+        }
+        return tabs > spaces;
+    }
+
+    /// <summary>
+    /// The file was moved: only the path changes. The known disk version stays —
+    /// a move keeps time and size, so an edit made after it still shows.
+    /// </summary>
+    public void RenameTo(string newPath)
+    {
+        FilePath = Path.GetFullPath(newPath);
+        var syntax = Syntax.For(FilePath);
+        if (!ReferenceEquals(syntax, Syntax)) SetSyntax(syntax); // the language may have changed
+        MissingOnDisk = TextFile.Stamp(FilePath) == null;
+    }
+
+    /// <summary>Write the buffer back in the file's own format (atomically, see TextFile.Write).</summary>
+    public void Save()
+    {
+        if (FilePath == null) throw new InvalidOperationException("No file is open.");
+        TextFile.Write(FilePath, _lines, Format);
+        Format = Format with { MixedNewLines = false };
+        _savedContent = _lines.ToArray();
+        DiskStamp = TextFile.Stamp(FilePath);
+        ChangedOnDisk = MissingOnDisk = false;
+        _open = null; // the next edit starts a new undo step, so undo can stop at the saved text
+        Dirty = false;
+    }
+
+    /// <summary>What the file on disk is, compared with the version this buffer knows.</summary>
+    public enum DiskState { Same, Changed, Missing }
+
+    public DiskState CheckDisk()
+    {
+        if (FilePath == null) return DiskState.Same;
+        var stamp = TextFile.Stamp(FilePath);
+        if (stamp == null) return DiskState.Missing;
+        return stamp == DiskStamp ? DiskState.Same : DiskState.Changed;
+    }
+
+    /// <summary>
+    /// Take the file's content from disk: the lines that differ are replaced as
+    /// one undo step; the cursor and the view stay where they were.
+    /// </summary>
+    public void Reload()
+    {
+        if (FilePath == null) return;
+        var (lines, format) = TextFile.Read(FilePath);
+        int pre = 0;
+        while (pre < lines.Count && pre < _lines.Count && lines[pre] == _lines[pre]) pre++;
+        int suf = 0;
+        while (suf < lines.Count - pre && suf < _lines.Count - pre
+               && lines[lines.Count - 1 - suf] == _lines[_lines.Count - 1 - suf]) suf++;
+        int oldEnd = _lines.Count - suf, delta = lines.Count - _lines.Count;
+        var (cy, cx, sy) = (Cy, Cx, ScrollY);
+        SelAnchor = null;
+        Step? step = null;
+        if (pre < oldEnd || pre < lines.Count - suf)
+        {
+            BeginEdit("reload");
+            Splice(pre, oldEnd - pre, lines.GetRange(pre, lines.Count - suf - pre).ToArray());
+            step = _open;
+            EndChange();
+        }
+        _open = null;
+        Format = format;
+        _savedContent = _lines.ToArray();
+        DiskStamp = TextFile.Stamp(FilePath);
+        ChangedOnDisk = MissingOnDisk = false;
+        Dirty = false;
+        // Lines below the changed block keep their place on screen.
+        Cy = Math.Clamp(cy >= oldEnd ? cy + delta : cy, 0, _lines.Count - 1);
+        Cx = Cells.FloorBoundary(_lines[Cy], cx);
+        if (step != null) step.After = (Cy, Cx); // redo puts the cursor back here
+        ScrollY = Math.Clamp(sy >= oldEnd ? sy + delta : sy, 0, MaxScrollY);
+        _desiredCol = CursorColumn;
+        EnsureCursorVisible();
+    }
+
+    /// <summary>
+    /// Jump to a line; with a column (a search hit — an index into the line) the
+    /// cursor goes there too, mid-view when it is past the first screen.
+    /// </summary>
+    public void GoToLine(int lineZeroBased, int column = -1)
     {
         SelAnchor = null;
-        Cy = Math.Clamp(lineZeroBased, 0, Lines.Count - 1);
-        UseDesiredColumn();
+        Cy = Math.Clamp(lineZeroBased, 0, _lines.Count - 1);
+        if (column < 0) UseDesiredColumn();
+        else
+        {
+            Cx = Cells.FloorBoundary(_lines[Cy], Math.Min(column, _lines[Cy].Length));
+            _desiredCol = CursorColumn;
+            ScrollX = _desiredCol <= CursorRightCol ? 0 : _desiredCol - ViewWidth / 2;
+        }
         EnsureCursorVisible();
     }
 
     // ---------- Undo / Redo ----------
 
-    /// <summary>Reference copy only: lines are immutable, unchanged ones are shared.</summary>
-    private string[] ContentCopy() => Lines.ToArray();
-
-    private Snapshot Snap() => new(ContentCopy(), Cx, Cy, SelAnchor);
-
-    private void PushUndo()
+    /// <summary>Replace `count` lines at `at` with `lines`, recording it in the open undo step.</summary>
+    private void Splice(int at, int count, params string[] lines)
     {
-        _undo.Add(Snap());
-        if (_undo.Count > MaxUndo) _undo.RemoveAt(0);
+        var old = count == 0 ? Array.Empty<string>() : _lines.GetRange(at, count).ToArray();
+        Apply(at, count, lines);
+        var steps = _open!.Splices;
+        // Typing along one line: keep only that line's text from before the step.
+        if (old.Length == 1 && lines.Length == 1 && steps.Count > 0
+            && steps[^1] is { Old.Length: 1, New.Length: 1 } last && last.At == at)
+            steps[^1] = last with { New = lines };
+        else
+            steps.Add(new Change(at, old, lines));
+    }
+
+    private void SetLine(int i, string text) => Splice(i, 1, text);
+
+    private void Apply(int at, int count, string[] lines)
+    {
+        if (count == lines.Length)
+            for (int i = 0; i < count; i++) _lines[at + i] = lines[i];
+        else
+        {
+            _lines.RemoveRange(at, count);
+            _lines.InsertRange(at, lines);
+        }
+        InvalidateHighlightFrom(at);
+    }
+
+    /// <summary>A copy of the lines from any thread, between two edits; null — one is stuck midway.</summary>
+    public string[]? SnapshotLines()
+    {
+        Interlocked.Increment(ref _copiesWaiting);
+        try
+        {
+            if (!Monitor.TryEnter(_changeLock, 500)) return null;
+            try { return _lines.ToArray(); }
+            finally { Monitor.Exit(_changeLock); }
+        }
+        finally { Interlocked.Decrement(ref _copiesWaiting); }
     }
 
     /// <summary>
-    /// Start of an edit. Consecutive typing, Backspace and Delete are grouped
-    /// into one undo step while the cursor moves continuously;
-    /// every other edit is its own step.
+    /// Start of an edit. Consecutive typing, Backspace and Delete with the cursor
+    /// moving along make one undo step; any other edit, or one that replaces a
+    /// selection, is its own step.
     /// </summary>
     private void BeginEdit(string kind)
     {
-        int affected = HasSelection ? SelectionRange().SL : Cy;
-        InvalidateCommentCheckpointsFrom(Math.Max(0, affected - 1));
-        bool coalesce = kind == _lastEditKind && kind != "other"
-                        && Cx == _lastEditCx && Cy == _lastEditCy;
-        if (!coalesce) PushUndo();
+        BeginChange();
+        if (!HasSelection) SelAnchor = null; // an empty selection never outlives an edit
+        bool coalesce = _open != null && kind != "other" && kind == _open.Kind
+                        && !HasSelection && _open.After == (Cy, Cx)
+                        && _undo.Count > 0 && ReferenceEquals(_undo[^1], _open);
+        if (!coalesce)
+        {
+            _open = new Step { Kind = kind, Before = (Cy, Cx), AnchorBefore = SelAnchor };
+            _undo.Add(_open);
+            if (_undo.Count > MaxUndo) _undo.RemoveAt(0);
+        }
         _redo.Clear();
-        _lastEditKind = kind;
     }
 
     private void EndEdit()
     {
-        _lastEditCx = Cx;
-        _lastEditCy = Cy;
+        EndChange();
+        if (_open != null)
+        {
+            _open.After = (Cy, Cx);
+            if (_open.Splices.Count == 0 && _undo.Count > 0 && ReferenceEquals(_undo[^1], _open))
+            {
+                _undo.RemoveAt(_undo.Count - 1); // nothing changed — nothing to undo
+                _open = null;
+            }
+        }
+        _desiredCol = CursorColumn;
+        EnsureCursorVisible();
         RefreshDirty();
     }
 
     /// <summary>Dirty — an honest comparison with the saved state (undoing back to it is clean again).</summary>
     private void RefreshDirty()
     {
-        if (Lines.Count != _savedContent.Length) { Dirty = true; return; }
-        for (int i = 0; i < Lines.Count; i++)
-            if (!string.Equals(Lines[i], _savedContent[i], StringComparison.Ordinal)) { Dirty = true; return; }
+        if (_lines.Count != _savedContent.Length) { Dirty = true; return; }
+        for (int i = 0; i < _lines.Count; i++)
+            if (!string.Equals(_lines[i], _savedContent[i], StringComparison.Ordinal)) { Dirty = true; return; }
         Dirty = false;
-    }
-
-    private void Restore(Snapshot s)
-    {
-        Lines = new List<string>(s.Lines);
-        if (Lines.Count == 0) Lines.Add("");
-        _commentCheckpoints.Clear(); // content was replaced wholesale
-        Cy = Math.Clamp(s.Cy, 0, Lines.Count - 1);
-        Cx = Math.Clamp(s.Cx, 0, Lines[Cy].Length);
-        _desiredCx = Cx;
-        SelAnchor = s.Anchor is { } a && a.Line < Lines.Count
-            ? (a.Line, Math.Clamp(a.Col, 0, Lines[a.Line].Length))
-            : null;
-        _lastEditKind = "";
-        EnsureCursorVisible();
-        RefreshDirty();
     }
 
     public void Undo()
     {
         if (_undo.Count == 0) return;
-        _redo.Add(Snap());
-        var s = _undo[^1];
+        var step = _undo[^1];
         _undo.RemoveAt(_undo.Count - 1);
-        Restore(s);
+        BeginChange();
+        for (int i = step.Splices.Count - 1; i >= 0; i--)
+        {
+            var s = step.Splices[i];
+            Apply(s.At, s.New.Length, s.Old);
+        }
+        EndChange();
+        _redo.Add(step);
+        PlaceAfterHistory(step.Before, step.AnchorBefore);
     }
 
     public void Redo()
     {
         if (_redo.Count == 0) return;
-        PushUndo();
-        var s = _redo[^1];
+        var step = _redo[^1];
         _redo.RemoveAt(_redo.Count - 1);
-        Restore(s);
+        BeginChange();
+        foreach (var s in step.Splices) Apply(s.At, s.Old.Length, s.New);
+        EndChange();
+        _undo.Add(step);
+        if (_undo.Count > MaxUndo) _undo.RemoveAt(0);
+        PlaceAfterHistory(step.After, null);
+    }
+
+    private void PlaceAfterHistory((int Line, int Col) at, (int Line, int Col)? anchor)
+    {
+        _open = null;
+        Cy = Math.Clamp(at.Line, 0, _lines.Count - 1);
+        Cx = Cells.FloorBoundary(_lines[Cy], at.Col);
+        SelAnchor = anchor is { } a && a.Line < _lines.Count
+            ? (a.Line, Cells.FloorBoundary(_lines[a.Line], a.Col))
+            : null;
+        _desiredCol = CursorColumn;
+        EnsureCursorVisible();
+        RefreshDirty();
     }
 
     // ---------- Editing ----------
@@ -263,104 +435,84 @@ public sealed class TextEditor
     public void InsertChar(char c)
     {
         BeginEdit("insert");
-        if (HasSelection) DeleteSelectionCore();
-        string line = Lines[Cy];
-        Lines[Cy] = string.Create(line.Length + 1, (line, Cx, c), static (dst, s) =>
+        DeleteSelectionCore();
+        string line = _lines[Cy];
+        SetLine(Cy, string.Create(line.Length + 1, (line, Cx, c), static (dst, s) =>
         {
             s.line.AsSpan(0, s.Cx).CopyTo(dst);
             dst[s.Cx] = s.c;
             s.line.AsSpan(s.Cx).CopyTo(dst[(s.Cx + 1)..]);
-        });
+        }));
         Cx++;
-        _desiredCx = Cx;
-        EnsureCursorVisible();
         EndEdit();
     }
 
+    /// <summary>Tab: a tab character in tab-indented files, else spaces to the next tab stop.</summary>
     public void InsertTab()
     {
         BeginEdit("other");
-        if (HasSelection) DeleteSelectionCore();
-        int spaces = 4 - (Cx % 4);
-        string line = Lines[Cy];
-        Lines[Cy] = string.Create(line.Length + spaces, (line, Cx, spaces), static (dst, s) =>
-        {
-            s.line.AsSpan(0, s.Cx).CopyTo(dst);
-            dst.Slice(s.Cx, s.spaces).Fill(' ');
-            s.line.AsSpan(s.Cx).CopyTo(dst[(s.Cx + s.spaces)..]);
-        });
-        Cx += spaces;
-        _desiredCx = Cx;
-        EnsureCursorVisible();
+        DeleteSelectionCore();
+        string ins = IndentWithTabs ? "\t" : new string(' ', Cells.TabWidth - CursorColumn % Cells.TabWidth);
+        SetLine(Cy, _lines[Cy].Insert(Cx, ins));
+        Cx += ins.Length;
         EndEdit();
     }
 
     public void InsertNewline()
     {
         BeginEdit("other");
-        if (HasSelection) DeleteSelectionCore();
-        string cur = Lines[Cy];
-        string head = cur[..Cx];
-        // auto-indent: repeat the leading spaces of the current line
-        int indentLen = 0;
-        while (indentLen < head.Length && head[indentLen] == ' ') indentLen++;
-        Lines[Cy] = head;
-        Lines.Insert(Cy + 1, string.Concat(head.AsSpan(0, indentLen), cur.AsSpan(Cx)));
+        DeleteSelectionCore();
+        string cur = _lines[Cy];
+        // auto-indent: repeat the leading whitespace (spaces and tabs) of the current line
+        int indent = 0;
+        while (indent < Cx && cur[indent] is ' ' or '\t') indent++;
+        Splice(Cy, 1, cur[..Cx], string.Concat(cur.AsSpan(0, indent), cur.AsSpan(Cx)));
         Cy++;
-        Cx = indentLen;
-        _desiredCx = Cx;
-        EnsureCursorVisible();
+        Cx = indent;
         EndEdit();
     }
 
     public void Backspace()
     {
         if (HasSelection) { DeleteSelection(); return; }
-        if (Cx == 0 && Cy == 0) return; // nothing to delete — and nothing for the history
+        if (Cx == 0 && Cy == 0) { SelAnchor = null; return; } // nothing to delete — and nothing for the history
         BeginEdit("backspace");
         if (Cx > 0)
         {
-            Lines[Cy] = Lines[Cy].Remove(Cx - 1, 1);
-            Cx--;
+            int from = Cells.PrevBoundary(_lines[Cy], Cx); // a whole character: never half a surrogate pair
+            SetLine(Cy, _lines[Cy].Remove(from, Cx - from));
+            Cx = from;
         }
         else
         {
-            Cx = Lines[Cy - 1].Length;
-            Lines[Cy - 1] = string.Concat(Lines[Cy - 1], Lines[Cy]);
-            Lines.RemoveAt(Cy);
+            int joinAt = _lines[Cy - 1].Length;
+            Splice(Cy - 1, 2, string.Concat(_lines[Cy - 1], _lines[Cy]));
             Cy--;
+            Cx = joinAt;
         }
-        _desiredCx = Cx;
-        EnsureCursorVisible();
         EndEdit();
     }
+
+    private static bool IsBlankChar(char c) => c is ' ' or '\t';
 
     /// <summary>Option/Ctrl+Backspace: delete spaces + the word run before the cursor (same scan as WordLeft).</summary>
     public void DeleteWordBackward()
     {
         if (HasSelection) { DeleteSelection(); return; }
         if (Cx == 0) { Backspace(); return; } // at a line start — join lines, like a regular Backspace
-        string s = Lines[Cy];
-        int i = Cx;
-        while (i > 0 && s[i - 1] == ' ') i--;
-        if (i > 0)
-        {
-            int cls = CharClass(s[i - 1]);
-            while (i > 0 && CharClass(s[i - 1]) == cls) i--;
-        }
+        string s = _lines[Cy];
+        int i = Cells.FloorBoundary(s, WordStartBefore(s, Cx));
         if (i == Cx) return;
         BeginEdit("backspace"); // a run of word-deletions/backspaces is one undo step
-        Lines[Cy] = s.Remove(i, Cx - i);
+        SetLine(Cy, s.Remove(i, Cx - i));
         Cx = i;
-        _desiredCx = Cx;
-        EnsureCursorVisible();
         EndEdit();
     }
 
     /// <summary>
     /// Insert pasted text (possibly multi-line) at the cursor as one undo step,
-    /// replacing any selection. Normalized like file opening: CRLF/CR become LF,
-    /// tabs become 4 spaces, other control characters are dropped.
+    /// replacing any selection; no auto-indent. CRLF/CR become line breaks,
+    /// tabs stay, other control characters are dropped.
     /// Returns the number of inserted (normalized) characters.
     /// </summary>
     public int InsertText(string text)
@@ -374,33 +526,20 @@ public sealed class TextEditor
                 clean.Append('\n');
                 if (i + 1 < text.Length && text[i + 1] == '\n') i++;
             }
-            else if (c == '\t') clean.Append("    ");
-            else if (c == '\n' || !char.IsControl(c)) clean.Append(c);
+            else if (c is '\n' or '\t' || !char.IsControl(c)) clean.Append(c);
         }
         if (clean.Length == 0) return 0;
 
-        BeginEdit("other");
-        if (HasSelection) DeleteSelectionCore();
-        string cur = Lines[Cy];
-        string head = cur[..Cx], tail = cur[Cx..];
         string[] parts = clean.ToString().Split('\n');
-        if (parts.Length == 1)
-        {
-            Lines[Cy] = string.Concat(head, parts[0], tail);
-            Cx += parts[0].Length;
-        }
-        else
-        {
-            Lines[Cy] = string.Concat(head, parts[0]);
-            var extra = new string[parts.Length - 1];
-            for (int i = 1; i < parts.Length - 1; i++) extra[i - 1] = parts[i];
-            extra[^1] = string.Concat(parts[^1], tail);
-            Lines.InsertRange(Cy + 1, extra);
-            Cy += parts.Length - 1;
-            Cx = parts[^1].Length;
-        }
-        _desiredCx = Cx;
-        EnsureCursorVisible();
+        BeginEdit("other");
+        DeleteSelectionCore();
+        string cur = _lines[Cy];
+        int endCx = (parts.Length == 1 ? Cx : 0) + parts[^1].Length;
+        parts[0] = string.Concat(cur.AsSpan(0, Cx), parts[0]);
+        parts[^1] = string.Concat(parts[^1], cur.AsSpan(Cx));
+        Splice(Cy, 1, parts);
+        Cy += parts.Length - 1;
+        Cx = endCx;
         EndEdit();
         return clean.Length;
     }
@@ -408,94 +547,137 @@ public sealed class TextEditor
     public void Delete()
     {
         if (HasSelection) { DeleteSelection(); return; }
-        if (Cx >= Lines[Cy].Length && Cy >= Lines.Count - 1) return;
+        if (Cx >= _lines[Cy].Length && Cy >= _lines.Count - 1) { SelAnchor = null; return; }
         BeginEdit("delete");
-        if (Cx < Lines[Cy].Length)
-            Lines[Cy] = Lines[Cy].Remove(Cx, 1);
-        else
+        if (Cx < _lines[Cy].Length)
         {
-            Lines[Cy] = string.Concat(Lines[Cy], Lines[Cy + 1]);
-            Lines.RemoveAt(Cy + 1);
+            int to = Cells.NextBoundary(_lines[Cy], Cx);
+            SetLine(Cy, _lines[Cy].Remove(Cx, to - Cx));
         }
-        EnsureCursorVisible();
+        else Splice(Cy, 2, string.Concat(_lines[Cy], _lines[Cy + 1]));
         EndEdit();
     }
 
     // ---------- Cursor movement ----------
 
+    private (string? Line, int Index, int Col) _column; // the last answer: a long line is scanned once per change
+
+    /// <summary>Display column (screen cells from the line start) of the cursor.</summary>
+    public int CursorColumn
+    {
+        get
+        {
+            string line = _lines[Cy];
+            if (!ReferenceEquals(_column.Line, line) || _column.Index != Cx) _column = (line, Cx, Cells.ColumnOf(line, Cx));
+            return _column.Col;
+        }
+    }
+
     public void MoveLeft()
     {
-        if (Cx > 0) Cx--;
-        else if (Cy > 0) { Cy--; Cx = Lines[Cy].Length; }
-        _desiredCx = Cx;
+        if (Cx > 0) Cx = Cells.PrevBoundary(_lines[Cy], Cx);
+        else if (Cy > 0) { Cy--; Cx = _lines[Cy].Length; }
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
     public void MoveRight()
     {
-        if (Cx < Lines[Cy].Length) Cx++;
-        else if (Cy < Lines.Count - 1) { Cy++; Cx = 0; }
-        _desiredCx = Cx;
+        if (Cx < _lines[Cy].Length) Cx = Cells.NextBoundary(_lines[Cy], Cx);
+        else if (Cy < _lines.Count - 1) { Cy++; Cx = 0; }
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
-    private void UseDesiredColumn() => Cx = Math.Min(_desiredCx, Lines[Cy].Length);
+    private void UseDesiredColumn() =>
+        Cx = Cells.FloorBoundary(_lines[Cy], Cells.IndexAt(_lines[Cy], _desiredCol));
 
     public void MoveUp() { if (Cy > 0) { Cy--; UseDesiredColumn(); } EnsureCursorVisible(); }
-    public void MoveDown() { if (Cy < Lines.Count - 1) { Cy++; UseDesiredColumn(); } EnsureCursorVisible(); }
+    public void MoveDown() { if (Cy < _lines.Count - 1) { Cy++; UseDesiredColumn(); } EnsureCursorVisible(); }
     public void PageUp() { Cy = Math.Max(0, Cy - ViewHeight); UseDesiredColumn(); EnsureCursorVisible(); }
-    public void PageDown() { Cy = Math.Min(Lines.Count - 1, Cy + ViewHeight); UseDesiredColumn(); EnsureCursorVisible(); }
+    public void PageDown() { Cy = Math.Min(_lines.Count - 1, Cy + ViewHeight); UseDesiredColumn(); EnsureCursorVisible(); }
 
     public void Home()
     {
-        string s = Lines[Cy];
-        int firstNonSpace = 0;
-        while (firstNonSpace < s.Length && s[firstNonSpace] == ' ') firstNonSpace++;
-        Cx = Cx == firstNonSpace ? 0 : firstNonSpace; // smart Home, like in IDEs
-        _desiredCx = Cx;
+        string s = _lines[Cy];
+        int firstNonBlank = 0;
+        while (firstNonBlank < s.Length && IsBlankChar(s[firstNonBlank])) firstNonBlank++;
+        Cx = Cx == firstNonBlank ? 0 : firstNonBlank; // smart Home, like in IDEs
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
-    public void End() { Cx = Lines[Cy].Length; _desiredCx = Cx; EnsureCursorVisible(); }
-    public void DocHome() { Cy = 0; Cx = 0; _desiredCx = 0; EnsureCursorVisible(); }
-    public void DocEnd() { Cy = Lines.Count - 1; Cx = Lines[Cy].Length; _desiredCx = Cx; EnsureCursorVisible(); }
+    public void End() { Cx = _lines[Cy].Length; _desiredCol = CursorColumn; EnsureCursorVisible(); }
+    public void DocHome() { Cy = 0; Cx = 0; _desiredCol = 0; EnsureCursorVisible(); }
+    public void DocEnd() { Cy = _lines.Count - 1; Cx = _lines[Cy].Length; _desiredCol = CursorColumn; EnsureCursorVisible(); }
 
-    // Character class for word jumps and word selection: 1 — word, 2 — space, 3 — punctuation.
-    private static int CharClass(char c) => char.IsLetterOrDigit(c) || c == '_' ? 1 : c == ' ' ? 2 : 3;
+    /// <summary>
+    /// Character class for word jumps and word selection: 1 — word, 2 — space,
+    /// 3 — punctuation, 0 — a combining mark, joiner or variation selector (or
+    /// the second half of a surrogate pair), which goes with the character before it.
+    /// </summary>
+    private static int CharClass(string s, int i)
+    {
+        char c = s[i];
+        if (char.IsLowSurrogate(c) || c == '\u200D') return 0;
+        if (CharUnicodeInfo.GetUnicodeCategory(s, i) is UnicodeCategory.NonSpacingMark
+            or UnicodeCategory.SpacingCombiningMark or UnicodeCategory.EnclosingMark) return 0;
+        return char.IsLetterOrDigit(s, i) || c == '_' ? 1 : IsBlankChar(c) ? 2 : 3;
+    }
+
+    /// <summary>End of the run of characters of the class of the one at i.</summary>
+    private static int RunEnd(string s, int i)
+    {
+        int cls = CharClass(s, i);
+        do i++; while (i < s.Length && CharClass(s, i) is var k && (k == cls || k == 0));
+        return i;
+    }
+
+    /// <summary>Start of the run of characters of the class of the one before i.</summary>
+    private static int RunStart(string s, int i)
+    {
+        int cls = -1;
+        while (i > 0)
+        {
+            int j = i - 1;
+            while (j > 0 && CharClass(s, j) == 0) j--; // a mark is judged by its base
+            int k = CharClass(s, j);
+            if (cls >= 0 && k != cls) break;
+            cls = k;
+            i = j;
+        }
+        return i;
+    }
+
+    /// <summary>Start of the blank run + word run (or punctuation run) before index i.</summary>
+    private static int WordStartBefore(string s, int i)
+    {
+        while (i > 0 && IsBlankChar(s[i - 1])) i--;
+        return RunStart(s, i);
+    }
 
     public void WordLeft()
     {
         if (Cx == 0) { MoveLeft(); return; }
-        string s = Lines[Cy];
-        int i = Cx;
-        while (i > 0 && s[i - 1] == ' ') i--;
-        if (i > 0)
-        {
-            int cls = CharClass(s[i - 1]);
-            while (i > 0 && CharClass(s[i - 1]) == cls) i--;
-        }
-        Cx = i;
-        _desiredCx = Cx;
+        Cx = Cells.FloorBoundary(_lines[Cy], WordStartBefore(_lines[Cy], Cx));
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
     public void WordRight()
     {
-        string s = Lines[Cy];
+        string s = _lines[Cy];
         if (Cx >= s.Length) { MoveRight(); return; }
         int i = Cx;
-        while (i < s.Length && s[i] == ' ') i++;
-        if (i < s.Length)
-        {
-            int cls = CharClass(s[i]);
-            while (i < s.Length && CharClass(s[i]) == cls) i++;
-        }
-        Cx = i;
-        _desiredCx = Cx;
+        while (i < s.Length && IsBlankChar(s[i])) i++;
+        if (i < s.Length) i = RunEnd(s, i);
+        int b = Cells.FloorBoundary(s, i);
+        Cx = b < i ? Cells.NextBoundary(s, b) : i; // never back into the character just passed
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
-    private bool IsBlank(int line) => Lines[line].AsSpan().Trim().Length == 0;
+    private bool IsBlank(int line) => _lines[line].AsSpan().Trim().Length == 0;
 
     /// <summary>Option+↑: to the start of the current or previous paragraph.</summary>
     public void ParagraphUp()
@@ -512,7 +694,7 @@ public sealed class TextEditor
     /// <summary>Option+↓: to the start of the next paragraph.</summary>
     public void ParagraphDown()
     {
-        int y = Cy, last = Lines.Count - 1;
+        int y = Cy, last = _lines.Count - 1;
         while (y < last && !IsBlank(y)) y++;
         while (y < last && IsBlank(y)) y++;
         Cy = y;
@@ -524,25 +706,36 @@ public sealed class TextEditor
 
     public bool HasSelection => SelAnchor is { } a && (a.Line != Cy || a.Col != Cx);
 
-    /// <summary>Normalized selection range: the start is no later than the end.</summary>
+    /// <summary>Normalized selection range (the start is no later than the end), clamped to the text.</summary>
     public (int SL, int SC, int EL, int EC) SelectionRange()
     {
         var a = SelAnchor ?? (Cy, Cx);
-        return a.Line < Cy || (a.Line == Cy && a.Col <= Cx)
-            ? (a.Line, a.Col, Cy, Cx)
-            : (Cy, Cx, a.Line, a.Col);
+        int al = Math.Clamp(a.Line, 0, _lines.Count - 1);
+        int ac = Math.Clamp(a.Col, 0, _lines[al].Length);
+        return al < Cy || (al == Cy && ac <= Cx)
+            ? (al, ac, Cy, Cx)
+            : (Cy, Cx, al, ac);
     }
 
     public void SetAnchorHere() => SelAnchor = (Cy, Cx);
     public void EnsureAnchor() => SelAnchor ??= (Cy, Cx);
     public void ClearSelection() => SelAnchor = null;
 
+    public void SelectAll()
+    {
+        SelAnchor = (0, 0);
+        Cy = _lines.Count - 1;
+        Cx = _lines[Cy].Length;
+        _desiredCol = CursorColumn;
+        EnsureCursorVisible();
+    }
+
     /// <summary>Collapse the selection to its start or end (arrows without Shift).</summary>
     public void CollapseSelection(bool toStart)
     {
         var (sl, sc, el, ec) = SelectionRange();
         (Cy, Cx) = toStart ? (sl, sc) : (el, ec);
-        _desiredCx = Cx;
+        _desiredCol = CursorColumn;
         SelAnchor = null;
         EnsureCursorVisible();
     }
@@ -552,26 +745,26 @@ public sealed class TextEditor
         if (!HasSelection) return 0;
         var (sl, sc, el, ec) = SelectionRange();
         if (sl == el) return ec - sc;
-        int n = Lines[sl].Length - sc + 1 + ec; // +1 for the line break
-        for (int i = sl + 1; i < el; i++) n += Lines[i].Length + 1;
-        return n;
+        long n = _lines[sl].Length - sc + 1 + ec; // +1 for the line break
+        for (int i = sl + 1; i < el; i++) n += _lines[i].Length + 1;
+        return (int)Math.Min(n, int.MaxValue);
     }
 
     public string SelectedText()
     {
         if (!HasSelection) return "";
         var (sl, sc, el, ec) = SelectionRange();
-        if (sl == el) return Lines[sl][sc..ec];
+        if (sl == el) return _lines[sl][sc..ec];
         var sb = new StringBuilder();
-        sb.Append(Lines[sl].AsSpan(sc));
-        for (int i = sl + 1; i < el; i++) sb.Append('\n').Append(Lines[i]);
-        sb.Append('\n').Append(Lines[el].AsSpan(0, ec));
+        sb.Append(_lines[sl].AsSpan(sc));
+        for (int i = sl + 1; i < el; i++) sb.Append('\n').Append(_lines[i]);
+        sb.Append('\n').Append(_lines[el].AsSpan(0, ec));
         return sb.ToString();
     }
 
     public void DeleteSelection()
     {
-        if (!HasSelection) return;
+        if (!HasSelection) { SelAnchor = null; return; }
         BeginEdit("other");
         DeleteSelectionCore();
         EndEdit();
@@ -580,54 +773,35 @@ public sealed class TextEditor
     /// <summary>Deletion without its own history step — for compound edits (replace-by-typing).</summary>
     private void DeleteSelectionCore()
     {
-        if (!HasSelection) return;
+        if (!HasSelection) { SelAnchor = null; return; }
         var (sl, sc, el, ec) = SelectionRange();
-        if (sl == el)
-        {
-            Lines[sl] = Lines[sl].Remove(sc, ec - sc);
-        }
-        else
-        {
-            Lines[sl] = string.Concat(Lines[sl].AsSpan(0, sc), Lines[el].AsSpan(ec));
-            Lines.RemoveRange(sl + 1, el - sl);
-        }
+        Splice(sl, el - sl + 1, string.Concat(_lines[sl].AsSpan(0, sc), _lines[el].AsSpan(ec)));
         Cy = sl;
         Cx = sc;
-        _desiredCx = sc;
         SelAnchor = null;
-        EnsureCursorVisible();
     }
 
     /// <summary>Select the word (or run of spaces/punctuation) under the cursor — double-click.</summary>
     public void SelectWord()
     {
-        string s = Lines[Cy];
+        string s = _lines[Cy];
         if (s.Length == 0) return;
-        int i = Math.Min(Cx, s.Length - 1);
-        int cls = CharClass(s[i]);
-        int a = i, b = i + 1;
-        while (a > 0 && CharClass(s[a - 1]) == cls) a--;
-        while (b < s.Length && CharClass(s[b]) == cls) b++;
-        SelAnchor = (Cy, a);
-        Cx = b;
-        _desiredCx = Cx;
+        int i = Cells.FloorBoundary(s, Math.Min(Cx, s.Length - 1));
+        int b = RunEnd(s, i);
+        SelAnchor = (Cy, Cells.FloorBoundary(s, RunStart(s, Cells.NextBoundary(s, i))));
+        Cx = Cells.FloorBoundary(s, b) is var e && e < b ? Cells.NextBoundary(s, e) : b;
+        _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }
 
-    /// <summary>
-    /// Scroll the view instantly — the cursor does not move. At the bottom it
-    /// stops with the last line at the bottom edge, never an empty view.
-    /// </summary>
+    /// <summary>Scroll the view; the cursor does not move.</summary>
     public void ScrollView(int deltaLines)
     {
         ScrollY = Math.Clamp(ScrollY + deltaLines, 0, MaxScrollY);
         _wheelNumerator = 0;
     }
 
-    /// <summary>
-    /// One mouse-wheel notch: 6/5 of a line, applied instantly; the remainder
-    /// accumulates (5 notches = exactly 6 lines). No animation, no acceleration.
-    /// </summary>
+    /// <summary>One wheel notch: 6/5 of a line at once, the remainder accumulating (5 notches = 6 lines).</summary>
     public void WheelScroll(bool down)
     {
         _wheelNumerator += down ? 6 : -6;
@@ -639,13 +813,42 @@ public sealed class TextEditor
             _wheelNumerator = 0;
     }
 
-    /// <summary>Place the cursor with a mouse click (coordinates are already in file characters).</summary>
+    /// <summary>
+    /// One sideways notch (a swipe, a tilt wheel, Shift+wheel): 3 columns, the
+    /// cursor stays. Right stops once the longest line in view ends at the edge.
+    /// </summary>
+    public void WheelSideways(bool right)
+    {
+        const int step = 3;
+        int longest = 0;
+        int end = Math.Min(_lines.Count, ScrollY + Math.Max(1, ViewHeight));
+        for (int i = ScrollY; i < end; i++) longest = Math.Max(longest, Cells.WidthOf(_lines[i]));
+        int max = Math.Max(0, longest - ViewWidth);
+        ScrollX = right
+            ? Math.Min(ScrollX + step, Math.Max(ScrollX, max))
+            : Math.Max(0, Math.Min(ScrollX, max) - step);
+    }
+
+    /// <summary>Place the cursor at a line and an index into it (clamped to a character boundary).</summary>
     public void SetCursor(int line, int col)
     {
-        Cy = Math.Clamp(line, 0, Lines.Count - 1);
-        Cx = Math.Clamp(col, 0, Lines[Cy].Length);
-        _desiredCx = Cx;
+        Cy = Math.Clamp(line, 0, _lines.Count - 1);
+        Cx = Cells.FloorBoundary(_lines[Cy], Math.Clamp(col, 0, _lines[Cy].Length));
+        _desiredCol = CursorColumn;
         _wheelNumerator = 0;
+    }
+
+    /// <summary>Place the cursor with a mouse click: the character drawn at a display column.</summary>
+    public void SetCursorAtCell(int line, int cellCol)
+    {
+        int y = Math.Clamp(line, 0, _lines.Count - 1);
+        string s = _lines[y];
+        // A scrolled view starts with the ‹ marker: the text begins after it,
+        // and a character cut by that edge is not on screen.
+        int first = ScrollX > 0 ? ScrollX + 1 : 0;
+        int i = Cells.FloorBoundary(s, Cells.IndexAt(s, Math.Max(cellCol, first)));
+        if (i < s.Length && Cells.ColumnOf(s, i) < first) i = Cells.NextBoundary(s, i);
+        SetCursor(y, i);
     }
 
     public void EnsureCursorVisible()
@@ -657,11 +860,18 @@ public sealed class TextEditor
         }
         if (ViewWidth > 0)
         {
-            if (Cx < ScrollX) ScrollX = Cx;
-            if (Cx >= ScrollX + ViewWidth) ScrollX = Cx - ViewWidth + 1;
+            // The edge cells hold the ‹ › cut markers, so the cursor keeps off them.
+            // Once it is off screen, the view returns to column 0 if the cursor fits
+            // on the first screen, else puts it at the right edge with the text before it in view.
+            int col = CursorColumn;
+            bool onScreen = col >= (ScrollX > 0 ? ScrollX + 1 : 0) && col <= ScrollX + CursorRightCol;
+            if (!onScreen) ScrollX = Math.Max(0, col - CursorRightCol);
         }
         ScrollY = Math.Clamp(ScrollY, 0, MaxScrollY);
         ScrollX = Math.Max(0, ScrollX);
         _wheelNumerator = 0; // cursor-driven scrolling drops any leftover wheel fraction
     }
+
+    /// <summary>The rightmost view column the cursor takes: the last one is for the › marker.</summary>
+    private int CursorRightCol => Math.Max(0, ViewWidth - 2);
 }

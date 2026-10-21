@@ -1,20 +1,30 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-/// <summary>Input event: a key or the mouse.</summary>
+/// <summary>Input event: a key, the mouse, a terminal paste, or the terminal going away.</summary>
 internal abstract record InputEvent;
 
 internal sealed record KeyInput(ConsoleKeyInfo Key) : InputEvent;
 
+/// <summary>Text pasted through the terminal (bracketed paste): inserted as-is, as one edit.</summary>
+internal sealed record PasteInput(string Text) : InputEvent;
+
+/// <summary>The terminal is gone (hangup / end of input): unsaved work must be secured now.</summary>
+internal sealed record HangupInput : InputEvent;
+
 /// <summary>
 /// Mouse in the SGR protocol (ESC [&lt; b ; x ; y M/m). Coordinates are already 0-based.
-/// Button: 0/1/2 — left/middle/right, 64 — wheel up, 65 — wheel down
-/// (upper bits may carry modifiers, hence IsWheel/CleanButton).
+/// Button: 0/1/2 — left/middle/right, 64 — wheel up, 65 — wheel down,
+/// 66/67 — wheel left/right (upper bits may carry modifiers, hence IsWheel/CleanButton).
 /// </summary>
 internal sealed record MouseInput(int Button, int X, int Y, bool Pressed) : InputEvent
 {
     public bool IsWheel => (Button & 64) != 0;
     public bool WheelDown => IsWheel && (Button & 1) != 0;
+    /// <summary>Wheel left/right — a trackpad swipe or tilt wheel; WheelDown then means right.</summary>
+    public bool IsHorizontalWheel => IsWheel && (Button & 2) != 0;
+    /// <summary>Shift held (bit 4): Shift+wheel scrolls sideways.</summary>
+    public bool HasShift => (Button & 4) != 0;
     /// <summary>Motion with a button held (bit 32) — drag selection.</summary>
     public bool IsMotion => (Button & 32) != 0;
     public bool IsLeftDrag => IsMotion && (Button & 3) == 0;
@@ -25,8 +35,6 @@ internal sealed record MouseInput(int Button, int X, int Y, bool Pressed) : Inpu
 
 internal interface ITerminalInput : IDisposable
 {
-    InputEvent Read();
-
     /// <summary>Read an event but wait no longer than timeoutMs: false — nothing arrived in time.</summary>
     bool TryRead(int timeoutMs, out InputEvent? ev);
 }
@@ -34,7 +42,16 @@ internal interface ITerminalInput : IDisposable
 /// <summary>Fallback without the mouse (Windows, or when raw mode is unavailable).</summary>
 internal sealed class ConsoleInput : ITerminalInput
 {
-    public InputEvent Read() => new KeyInput(Console.ReadKey(intercept: true));
+    private static InputEvent Read()
+    {
+        var k = Console.ReadKey(intercept: true);
+        // Windows reports AltGr as Ctrl+Alt: a character typed with it is text, not a shortcut
+        // (Polish AltGr+S is ś, German AltGr+Q is @ — neither may save or quit).
+        if (k.Modifiers.HasFlag(ConsoleModifiers.Control) && k.Modifiers.HasFlag(ConsoleModifiers.Alt)
+            && k.KeyChar >= ' ' && k.KeyChar != '\x7F')
+            k = new ConsoleKeyInfo(k.KeyChar, (ConsoleKey)0, k.Modifiers.HasFlag(ConsoleModifiers.Shift), false, false);
+        return new KeyInput(k);
+    }
 
     public bool TryRead(int timeoutMs, out InputEvent? ev)
     {
@@ -56,8 +73,7 @@ internal sealed class ConsoleInput : ITerminalInput
 /// <summary>
 /// Custom parsing of a Unix terminal input stream: raw mode via termios
 /// (which also stops the XOFF/XON driver from swallowing Ctrl+S/Ctrl+Q),
-/// key escape sequences, the kitty keyboard protocol (physical base-layout
-/// keys, so shortcuts work on any keyboard layout) and SGR mouse.
+/// key escape sequences, the kitty keyboard protocol, bracketed paste and SGR mouse.
 /// </summary>
 internal sealed class RawTerminalInput : ITerminalInput
 {
@@ -67,10 +83,13 @@ internal sealed class RawTerminalInput : ITerminalInput
 
     private readonly IntPtr _termios = Marshal.AllocHGlobal(TermiosSize);
     private readonly byte[] _savedTermios = new byte[TermiosSize];
-    private readonly byte[] _one = new byte[1];
+    private readonly byte[] _buf = new byte[4096]; // bytes read but not yet parsed: _buf[_bufPos.._bufLen)
+    private int _bufPos, _bufLen;
     private readonly Queue<InputEvent> _pending = new();
+    private readonly Stack<int> _unread = new(); // bytes read ahead and handed back
     private readonly int _savedStdinDup = -1; // original stdin when /dev/tty was substituted
-    private bool _disposed;
+    private readonly bool _noTerminal; // parsing given bytes (tests)
+    private int _disposed;
 
     [DllImport("libc", SetLastError = true)] private static extern int tcgetattr(int fd, IntPtr termios);
     [DllImport("libc", SetLastError = true)] private static extern int tcsetattr(int fd, int act, IntPtr termios);
@@ -110,21 +129,20 @@ internal sealed class RawTerminalInput : ITerminalInput
         Marshal.Copy(_termios, _savedTermios, 0, TermiosSize);
         cfmakeraw(_termios);
         tcsetattr(StdinFd, TcsaNow, _termios);
-
-        // Mouse reports: 1000 — clicks and wheel, 1002 — motion with a button held, 1006 — SGR.
-        Console.Write("\x1b[?1000h\x1b[?1002h\x1b[?1006h");
-        // Kitty keyboard protocol, flags 1|4|8|16: disambiguate, report alternate
-        // (shifted/base-layout) keys, report all keys as CSI u, report associated
-        // text. The base-layout codepoint identifies the physical PC key on any
-        // keyboard layout. Terminals without the protocol simply ignore this.
-        Console.Write("\x1b[>29u");
     }
 
+    /// <summary>Parse the given bytes instead of a terminal (self-test).</summary>
+    internal RawTerminalInput(byte[] bytes)
+    {
+        _noTerminal = true;
+        bytes.CopyTo(_buf, 0);
+        _bufLen = bytes.Length;
+    }
+
+    /// <summary>Restore the terminal. Also called from a signal handler, so only the first call acts.</summary>
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        Console.Write("\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1000l");
+        if (Interlocked.Exchange(ref _disposed, 1) != 0 || _noTerminal) return;
         Marshal.Copy(_savedTermios, 0, _termios, TermiosSize);
         tcsetattr(StdinFd, TcsaNow, _termios);
         if (_savedStdinDup >= 0) { dup2(_savedStdinDup, StdinFd); close(_savedStdinDup); }
@@ -134,6 +152,9 @@ internal sealed class RawTerminalInput : ITerminalInput
     // -2 = EOF, -1 = timeout, otherwise a byte
     private int ReadByte(int timeoutMs)
     {
+        if (_unread.Count > 0) return _unread.Pop();
+        if (_bufPos < _bufLen) return _buf[_bufPos++];
+        if (_noTerminal) return -1;
         var pfd = new[] { new PollFd { Fd = StdinFd, Events = 1 /* POLLIN */ } };
         long deadline = timeoutMs < 0 ? long.MaxValue : Environment.TickCount64 + timeoutMs;
         while (true)
@@ -147,8 +168,13 @@ internal sealed class RawTerminalInput : ITerminalInput
             }
             if (ready > 0)
             {
-                nint n = read(StdinFd, _one, 1);
-                if (n > 0) return _one[0];
+                nint n = read(StdinFd, _buf, (nuint)_buf.Length); // whatever has arrived: a paste comes in one go
+                if (n > 0)
+                {
+                    _bufLen = (int)n;
+                    _bufPos = 1;
+                    return _buf[0];
+                }
                 if (n == 0 && (pfd[0].Revents & 0x18) != 0) return -2; // POLLHUP | POLLERR — the terminal is gone
                 // Spurious wakeup or EAGAIN (see the ctor note): fall through to the deadline check.
             }
@@ -157,31 +183,29 @@ internal sealed class RawTerminalInput : ITerminalInput
         }
     }
 
-    private static KeyInput QuitKey() => new(new ConsoleKeyInfo('\u0011', ConsoleKey.Q, false, false, true));
-
     private static ConsoleKeyInfo MakeKey(char ch, ConsoleKey key, bool shift = false, bool alt = false, bool ctrl = false) =>
         new(ch, key, shift, alt, ctrl);
 
-    public InputEvent Read()
-    {
-        if (_pending.Count > 0) return _pending.Dequeue();
-
-        int b = ReadByte(-1);
-        if (b < 0) return QuitKey(); // EOF: the terminal is gone — quit
-        return DispatchFirstByte(b);
-    }
-
+    /// <summary>
+    /// The next event within timeoutMs. Bytes that mean nothing (a stray
+    /// control byte, an unknown sequence) are skipped without blocking past
+    /// the deadline, so the main loop keeps redrawing and watching.
+    /// </summary>
     public bool TryRead(int timeoutMs, out InputEvent? ev)
     {
-        if (_pending.Count > 0) { ev = _pending.Dequeue(); return true; }
-        int b = ReadByte(timeoutMs);
-        if (b == -1) { ev = null; return false; } // timeout — the main loop has other things to do
-        if (b == -2) { ev = QuitKey(); return true; } // EOF
-        ev = DispatchFirstByte(b);
-        return true;
+        long deadline = Environment.TickCount64 + timeoutMs;
+        while (true)
+        {
+            if (_pending.Count > 0) { ev = _pending.Dequeue(); return true; }
+            int b = ReadByte((int)Math.Max(0, deadline - Environment.TickCount64));
+            if (b == -1) { ev = null; return false; } // timeout — the main loop has other things to do
+            if (b == -2) { ev = new HangupInput(); return true; }
+            ev = DispatchFirstByte(b);
+            if (ev != null) return true;
+        }
     }
 
-    private InputEvent DispatchFirstByte(int b)
+    private InputEvent? DispatchFirstByte(int b)
     {
         switch (b)
         {
@@ -192,7 +216,7 @@ internal sealed class RawTerminalInput : ITerminalInput
         }
         if (b is >= 0x01 and <= 0x1A) // Ctrl+A..Z (Enter/Tab already handled above)
             return new KeyInput(MakeKey((char)b, ConsoleKey.A + b - 1, ctrl: true));
-        if (b < 0x20) return Read(); // ignore other control bytes
+        if (b < 0x20) return null; // other control bytes (Ctrl+Space, Ctrl+\ …) mean nothing here
         if (b < 0x80) return new KeyInput(CharKey((char)b));
         return ReadUtf8(b);
     }
@@ -206,67 +230,105 @@ internal sealed class RawTerminalInput : ITerminalInput
         return MakeKey(c, (ConsoleKey)0);
     }
 
-    private InputEvent ReadUtf8(int lead)
+    private static readonly Encoding StrictUtf8 = new UTF8Encoding(false, throwOnInvalidBytes: true);
+
+    /// <summary>
+    /// A character from its UTF-8 lead byte. A broken sequence is dropped;
+    /// a byte that cannot continue it is left for the next event (a key
+    /// typed right after), never swallowed.
+    /// </summary>
+    private InputEvent? ReadUtf8(int lead, bool alt = false)
     {
-        int len = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : 2;
+        int len = lead switch { >= 0xC2 and <= 0xDF => 2, >= 0xE0 and <= 0xEF => 3, >= 0xF0 and <= 0xF4 => 4, _ => 0 };
+        if (len == 0) return null; // a stray continuation byte, or never valid in UTF-8
         var bytes = new byte[len];
         bytes[0] = (byte)lead;
         for (int i = 1; i < len; i++)
         {
             int cont = ReadByte(50);
-            if (cont < 0) return Read();
+            if (cont is < 0x80 or > 0xBF)
+            {
+                if (cont >= 0) _unread.Push(cont);
+                return null;
+            }
             bytes[i] = (byte)cont;
         }
-        string s = Encoding.UTF8.GetString(bytes);
-        if (s.Length == 0) return Read();
+        string s;
+        try { s = StrictUtf8.GetString(bytes); }
+        catch (DecoderFallbackException) { return null; } // overlong, or an encoded surrogate
         for (int i = 1; i < s.Length; i++) // surrogate pair: the second char becomes the next event
-            _pending.Enqueue(new KeyInput(MakeKey(s[i], (ConsoleKey)0)));
+            _pending.Enqueue(new KeyInput(MakeKey(s[i], (ConsoleKey)0, alt: alt)));
         char c = s[0];
         // Uppercase non-Latin letters report Shift, like Latin capitals.
-        return new KeyInput(MakeKey(c, (ConsoleKey)0, shift: char.IsUpper(c)));
+        return new KeyInput(MakeKey(c, (ConsoleKey)0, shift: char.IsUpper(c), alt: alt));
     }
 
-    private InputEvent ReadEscape()
+    private InputEvent? ReadEscape()
     {
         int b2 = ReadByte(40);
         if (b2 < 0) return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape)); // a lone Esc
 
+        if (b2 == 0x1B)
+        {
+            // Esc Esc: either Alt + an escape sequence (how meta-mode terminals send
+            // Option+arrows), or Esc pressed twice — never stray text.
+            int b3 = ReadByte(40);
+            if (b3 is '[' or 'O')
+            {
+                _unread.Push(b3);
+                var inner = ReadEscapeAfterEsc();
+                return inner is KeyInput { Key: var k }
+                    ? new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift),
+                        alt: true, k.Modifiers.HasFlag(ConsoleModifiers.Control)))
+                    : inner;
+            }
+            if (b3 >= 0) _unread.Push(b3);
+            _unread.Push(0x1B);
+            return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape));
+        }
+        _unread.Push(b2);
+        return ReadEscapeAfterEsc();
+    }
+
+    /// <summary>The rest of an escape sequence after its ESC.</summary>
+    private InputEvent? ReadEscapeAfterEsc()
+    {
+        int b2 = ReadByte(40);
+        if (b2 < 0) return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape));
         if (b2 == '[')
         {
             var p = new StringBuilder();
             while (true)
             {
                 int c = ReadByte(40);
-                if (c < 0) return Read(); // truncated sequence
+                if (c < 0) return null; // truncated sequence
+                if (c is < 0x20 or > 0x7E)
+                {
+                    _unread.Push(c); // not part of a sequence: a key typed after a cut-off one
+                    return null;
+                }
                 if (c is >= 0x40 and <= 0x7E)
                 {
+                    if (p.Length > 256) return null; // overlong: dropped whole, never typed
                     string ps = p.ToString();
+                    if (c == '~' && ps == "200") return ReadPaste();
                     if (c == 'u' && !ps.StartsWith('<'))
                     {
                         var events = ParseCsiU(ps);
-                        if (events.Count == 0) return Read();
+                        if (events.Count == 0) return null;
                         for (int i = 1; i < events.Count; i++) _pending.Enqueue(events[i]);
                         return events[0];
                     }
-                    return ParseCsi(ps, (char)c) ?? Read();
+                    return ParseCsi(ps, (char)c);
                 }
-                p.Append((char)c);
-                if (p.Length > 32) return Read();
+                if (p.Length <= 256) p.Append((char)c);
             }
         }
-        if (b2 == 'O') // SS3: F1-F4, arrows, Home/End
+        if (b2 == 'O') // SS3: F1-F4, arrows, Home/End, and the keypad in application mode
         {
             int c = ReadByte(40);
-            if (c < 0) return Read();
-            var key = (char)c switch
-            {
-                'P' => ConsoleKey.F1, 'Q' => ConsoleKey.F2, 'R' => ConsoleKey.F3, 'S' => ConsoleKey.F4,
-                'A' => ConsoleKey.UpArrow, 'B' => ConsoleKey.DownArrow,
-                'C' => ConsoleKey.RightArrow, 'D' => ConsoleKey.LeftArrow,
-                'H' => ConsoleKey.Home, 'F' => ConsoleKey.End,
-                _ => (ConsoleKey)0,
-            };
-            return key == (ConsoleKey)0 ? Read() : new KeyInput(MakeKey('\0', key));
+            if (c < 0) return null;
+            return ParseSs3((char)c);
         }
         // Alt+Backspace (Esc then DEL) — delete-word in the editor.
         if (b2 is 0x7F or 0x08)
@@ -278,7 +340,51 @@ internal sealed class RawTerminalInput : ITerminalInput
             var k = CharKey((char)b2);
             return new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift), alt: true));
         }
-        return Read();
+        if (b2 >= 0x80) return ReadUtf8(b2, alt: true); // Alt+ö, Alt+ф: the whole character
+        return null;
+    }
+
+    /// <summary>SS3 sequences: F1-F4, arrows, Home/End and the application-mode keypad.</summary>
+    internal static InputEvent? ParseSs3(char c)
+    {
+        ConsoleKey key = c switch
+        {
+            'P' => ConsoleKey.F1, 'Q' => ConsoleKey.F2, 'R' => ConsoleKey.F3, 'S' => ConsoleKey.F4,
+            'A' => ConsoleKey.UpArrow, 'B' => ConsoleKey.DownArrow,
+            'C' => ConsoleKey.RightArrow, 'D' => ConsoleKey.LeftArrow,
+            'H' => ConsoleKey.Home, 'F' => ConsoleKey.End,
+            'M' => ConsoleKey.Enter,
+            _ => (ConsoleKey)0,
+        };
+        if (key != (ConsoleKey)0) return new KeyInput(MakeKey(key == ConsoleKey.Enter ? '\r' : '\0', key));
+        // Keypad digits and operators: ESC O p..y → 0..9, j k m n o X → * + - . / =
+        char typed = c switch
+        {
+            >= 'p' and <= 'y' => (char)('0' + (c - 'p')),
+            'j' => '*', 'k' => '+', 'm' => '-', 'n' => '.', 'o' => '/', 'X' => '=',
+            _ => '\0',
+        };
+        return typed == '\0' ? null : new KeyInput(CharKey(typed));
+    }
+
+    /// <summary>Bracketed paste: everything up to ESC [201~ is the pasted text.</summary>
+    private InputEvent? ReadPaste()
+    {
+        var bytes = new List<byte>(256);
+        ReadOnlySpan<byte> end = "\x1b[201~"u8;
+        while (true)
+        {
+            int b = ReadByte(2000);
+            if (b < 0) break; // the terminal stopped mid-paste: keep what arrived
+            bytes.Add((byte)b);
+            if (bytes.Count >= end.Length && CollectionsMarshal.AsSpan(bytes)[^end.Length..].SequenceEqual(end))
+            {
+                bytes.RemoveRange(bytes.Count - end.Length, end.Length);
+                break;
+            }
+        }
+        string text = Encoding.UTF8.GetString(CollectionsMarshal.AsSpan(bytes));
+        return text.Length == 0 ? null : new PasteInput(text);
     }
 
     /// <summary>The index-th `sep`-separated field of a CSI parameter string (empty when absent).</summary>
@@ -307,14 +413,14 @@ internal sealed class RawTerminalInput : ITerminalInput
             if (int.TryParse(Field(body, 0), out int btn)
                 && int.TryParse(Field(body, 1), out int mx)
                 && int.TryParse(Field(body, 2), out int my)
-                && final is 'M' or 'm')
+                && final is 'M' or 'm'
+                && btn < 128) // buttons 8+ (back/forward…) are not clicks
                 return new MouseInput(btn, Math.Max(0, mx - 1), Math.Max(0, my - 1), final == 'M');
             return null;
         }
 
         int Arg(int i, int def) => int.TryParse(Field(p, i), out int v) ? v : def;
-        int modCode = SubInt(Field(p, 1), 0);
-        var (shift, alt, ctrl) = DecodeModifiers(modCode);
+        var (shift, alt, ctrl, super) = DecodeModifiers(SubInt(Field(p, 1), 0));
 
         // CSI u (kitty keyboard protocol) has its own field grammar.
         if (final == 'u')
@@ -354,16 +460,29 @@ internal sealed class RawTerminalInput : ITerminalInput
             };
             if (final == 'Z') shift = true;
         }
-
-        return key == (ConsoleKey)0 ? null
-            : new KeyInput(MakeKey(key == ConsoleKey.Tab ? '\t' : '\0', key, shift, alt, ctrl));
+        if (key == (ConsoleKey)0) return null;
+        // Cmd/Super+arrows move like on a Mac: to the line start/end, the document start/end.
+        if (super)
+        {
+            (key, ctrl) = key switch
+            {
+                ConsoleKey.LeftArrow => (ConsoleKey.Home, false),
+                ConsoleKey.RightArrow => (ConsoleKey.End, false),
+                ConsoleKey.UpArrow => (ConsoleKey.Home, true),
+                ConsoleKey.DownArrow => (ConsoleKey.End, true),
+                _ => (key, ctrl),
+            };
+        }
+        return new KeyInput(MakeKey(key == ConsoleKey.Tab ? '\t' : '\0', key, shift, alt, ctrl));
     }
 
     /// <summary>
     /// CSI u (kitty): `cp[:shifted[:base]] ; mods[:event] ; text... u`.
-    /// The physical key identity comes from the base-layout codepoint when the
-    /// terminal reports it, so shortcuts like Ctrl+F work on any keyboard
-    /// layout; the typed character comes from the associated text, or from the
+    /// A shortcut is the letter the layout produces when that is Latin
+    /// (QWERTY, AZERTY, QWERTZ, Dvorak…); only for other scripts does the
+    /// base-layout key — the physical US position — stand in, so Ctrl+F
+    /// still works with a Cyrillic layout. Cmd/Super acts as Ctrl.
+    /// The typed character comes from the associated text, or from the
     /// (shifted) key codepoint itself.
     /// </summary>
     private static List<InputEvent> ParseCsiU(string p)
@@ -378,12 +497,14 @@ internal sealed class RawTerminalInput : ITerminalInput
         int modCode = SubInt(modField, 0);
         int eventType = SubInt(modField, 1);
         if (eventType == 3) return none; // key release (not requested, tolerated)
-        var (sh, al, ct) = DecodeModifiers(modCode == 0 ? 1 : modCode);
-        int id = baseCp > 0 ? baseCp : cp;
+        var (sh, al, ct, su) = DecodeModifiers(modCode == 0 ? 1 : modCode);
+        if (su) ct = true;
+        bool latin = cp is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
+        int id = latin || baseCp <= 0 ? cp : baseCp;
 
         string text = "";
         var textField = Field(p, 2);
-        if (!textField.IsEmpty)
+        if (!textField.IsEmpty && !ct && !su)
         {
             var sb = new StringBuilder();
             var rest = textField;
@@ -411,6 +532,11 @@ internal sealed class RawTerminalInput : ITerminalInput
             >= 'A' and <= 'Z' => ConsoleKey.A + (id - 'A'),
             >= '0' and <= '9' => ConsoleKey.D0 + (id - '0'),
             >= 57399 and <= 57408 => ConsoleKey.D0 + (id - 57399), // keypad digits
+            57417 => ConsoleKey.LeftArrow, 57418 => ConsoleKey.RightArrow, // keypad navigation (NumLock off)
+            57419 => ConsoleKey.UpArrow, 57420 => ConsoleKey.DownArrow,
+            57421 => ConsoleKey.PageUp, 57422 => ConsoleKey.PageDown,
+            57423 => ConsoleKey.Home, 57424 => ConsoleKey.End,
+            57425 => ConsoleKey.Insert, 57426 => ConsoleKey.Delete,
             >= 57376 and <= 57387 => ConsoleKey.F13 + (id - 57376),
             _ => (ConsoleKey)0,
         };
@@ -423,7 +549,8 @@ internal sealed class RawTerminalInput : ITerminalInput
             return evs;
         }
 
-        char TypedChar() => (sh && shiftedCp > 0 ? shiftedCp : cp) is int tcp and > 0 and <= 0xFFFF ? (char)tcp : '\0';
+        char TypedChar() => (sh && shiftedCp > 0 ? shiftedCp : cp) is int tcp and > 0 and <= 0xFFFF
+            and not (>= 0xD800 and <= 0xDFFF) ? (char)tcp : '\0';
 
         if (key != (ConsoleKey)0)
         {
@@ -434,21 +561,22 @@ internal sealed class RawTerminalInput : ITerminalInput
                 ConsoleKey.Tab => '\t',
                 ConsoleKey.Backspace => '\b',
                 ConsoleKey.Spacebar => ' ',
+                _ when id >= 57376 => '\0',
                 _ => TypedChar(),
             };
             return new List<InputEvent> { new KeyInput(MakeKey(ch, key, sh, al, ct)) };
         }
 
         // Unmapped key in all-keys mode: a printable character can still be typed.
-        if (!ct && !al && cp >= 0x20 && cp <= 0xFFFF && cp is not (>= 57344 and <= 63743))
+        if (!ct && !al && cp >= 0x20 && cp <= 0xFFFF && cp is not (>= 0xD800 and <= 0xDFFF or >= 57344 and <= 63743))
             return new List<InputEvent> { new KeyInput(MakeKey(TypedChar(), (ConsoleKey)0, sh, al, ct)) };
         return none;
     }
 
-    /// <summary>CSI modifier code (1 + bitmask: 1=Shift, 2=Alt, 4=Ctrl, 8=Super...) as three flags.</summary>
-    private static (bool Shift, bool Alt, bool Ctrl) DecodeModifiers(int modCode)
+    /// <summary>CSI modifier code (1 + bitmask: 1=Shift, 2=Alt, 4=Ctrl, 8=Super…) as flags.</summary>
+    private static (bool Shift, bool Alt, bool Ctrl, bool Super) DecodeModifiers(int modCode)
     {
         int m = Math.Max(0, modCode - 1);
-        return ((m & 1) != 0, (m & 2) != 0, (m & 4) != 0);
+        return ((m & 1) != 0, (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
     }
 }

@@ -1,18 +1,29 @@
+using System.Buffers;
+
 public enum TokenKind { Normal, Keyword, Str, Comment, Number, Preproc }
 
 /// <summary>A highlighted range of the source line (no text is copied).</summary>
 public readonly record struct Token(int Start, int Length, TokenKind Kind);
 
 /// <summary>
-/// Simple line-based syntax highlighting with no external dependencies:
-/// keywords, strings, comments (//, /* */, #), numbers, preprocessor.
-/// Multi-line /* */ is supported via inBlockComment carried between lines.
-/// Works on spans and returns ranges, so tokenizing allocates nothing
-/// per token — important because it runs on every rendered frame.
+/// What a language looks like to the highlighter, chosen once per file by
+/// its name. Files of unknown kinds (Markdown, plain text, logs…) are Plain:
+/// no highlighting at all, so prose apostrophes or URLs are never mistaken
+/// for strings and comments.
 /// </summary>
-public static class Highlighter
+public sealed class Syntax
 {
-    private static readonly HashSet<string> CSharp = new(StringComparer.Ordinal)
+    public required string Name { get; init; }
+    public HashSet<string>? Keywords { get; init; }
+    public bool SlashComments { get; init; }   // // and /* */
+    public bool HashComments { get; init; }    // # to the end of the line
+    public bool Preprocessor { get; init; }    // a line starting with # is a directive
+    public bool Strings { get; init; }         // "…", '…', `…` with \ escapes
+    public bool VerbatimStrings { get; init; } // C#: @"…" — "" is a quote, \ is literal
+    public bool Numbers { get; init; }
+    public bool IsPlain => Keywords == null && !SlashComments && !HashComments && !Strings && !Numbers;
+
+    private static readonly HashSet<string> CSharpWords = new(StringComparer.Ordinal)
     {
         "abstract","as","base","bool","break","byte","case","catch","char","checked",
         "class","const","continue","decimal","default","delegate","do","double","else",
@@ -26,7 +37,7 @@ public static class Highlighter
         "await","get","set","init","when","where","yield","nint","nuint","global",
     };
 
-    private static readonly HashSet<string> CLike = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> CLikeWords = new(StringComparer.Ordinal)
     {
         "auto","bool","break","case","catch","char","class","const","constexpr",
         "continue","default","delete","do","double","else","enum","explicit","export",
@@ -40,10 +51,10 @@ public static class Highlighter
         "import","instanceof","interface","let","package","super","throws","var",
         "func","go","defer","chan","map","range","select","type","fallthrough",
         "fn","impl","match","mut","pub","trait","where","loop","mod","crate","move",
-        "const","of","from","typeof","undefined","null","None","True","False",
+        "of","from","typeof","undefined","null","None","True","False",
     };
 
-    private static readonly HashSet<string> Python = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> PythonWords = new(StringComparer.Ordinal)
     {
         "and","as","assert","async","await","break","class","continue","def","del",
         "elif","else","except","False","finally","for","from","global","if","import",
@@ -51,6 +62,89 @@ public static class Highlighter
         "True","try","while","with","yield","match","case","print","self",
     };
 
+    private static readonly HashSet<string> ShellWords = new(StringComparer.Ordinal)
+    {
+        "if","then","else","elif","fi","for","while","until","do","done","case","esac",
+        "function","in","return","local","export","readonly","declare","unset","shift",
+        "break","continue","exit","source","alias","select","time","true","false",
+    };
+
+    private static readonly HashSet<string> RubyWords = new(StringComparer.Ordinal)
+    {
+        "alias","and","begin","break","case","class","def","defined?","do","else","elsif",
+        "end","ensure","false","for","if","in","module","next","nil","not","or","redo",
+        "rescue","retry","return","self","super","then","true","undef","unless","until",
+        "when","while","yield","require","attr_accessor","attr_reader","lambda","puts",
+    };
+
+    public static readonly Syntax Plain = new() { Name = "text" };
+    private static readonly Syntax CSharp = new()
+    {
+        Name = "C#", Keywords = CSharpWords, SlashComments = true, Preprocessor = true,
+        Strings = true, VerbatimStrings = true, Numbers = true,
+    };
+    private static readonly Syntax CLike = new()
+    {
+        Name = "C-like", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
+        Strings = true, Numbers = true,
+    };
+    private static readonly Syntax Css = new() { Name = "CSS", SlashComments = true, Strings = true, Numbers = true };
+    private static readonly Syntax Python = new()
+        { Name = "Python", Keywords = PythonWords, HashComments = true, Strings = true, Numbers = true };
+    private static readonly Syntax Shell = new()
+        { Name = "shell", Keywords = ShellWords, HashComments = true, Strings = true, Numbers = true };
+    private static readonly Syntax Ruby = new()
+        { Name = "Ruby", Keywords = RubyWords, HashComments = true, Strings = true, Numbers = true };
+    private static readonly Syntax Config = new() { Name = "config", HashComments = true, Strings = true, Numbers = true };
+    private static readonly Syntax HashOnly = new() { Name = "hash comments", HashComments = true };
+
+    /// <summary>The syntax for a file, by extension or well-known name.</summary>
+    public static Syntax For(string path)
+    {
+        string name = Path.GetFileName(path);
+        switch (name)
+        {
+            case "Makefile" or "makefile" or "GNUmakefile" or "Dockerfile" or "Containerfile"
+                or ".gitignore" or ".gitattributes" or ".dockerignore" or ".npmignore" or ".gitmodules":
+                return HashOnly;
+            case "Gemfile" or "Rakefile" or "Vagrantfile" or "Brewfile" or "Podfile" or "Fastfile":
+                return Ruby;
+            case ".bashrc" or ".bash_profile" or ".zshrc" or ".zprofile" or ".profile" or ".envrc":
+                return Shell;
+            case "CMakeLists.txt" or ".env":
+                return Config;
+        }
+        if (name.StartsWith("Dockerfile.", StringComparison.Ordinal)) return HashOnly;
+        if (name.StartsWith(".env.", StringComparison.Ordinal)) return Config;
+        return Path.GetExtension(name).ToLowerInvariant() switch
+        {
+            ".cs" or ".csx" => CSharp,
+            ".c" or ".h" or ".cpp" or ".hpp" or ".cc" or ".cxx" or ".hh" or ".hxx" or ".ino"
+                or ".m" or ".mm" or ".java" or ".js" or ".mjs" or ".cjs" or ".ts" or ".mts" or ".cts"
+                or ".tsx" or ".jsx" or ".go" or ".rs" or ".swift" or ".kt" or ".kts" or ".php"
+                or ".scala" or ".dart" or ".groovy" or ".gradle" or ".proto" or ".zig" or ".sol"
+                or ".json" or ".jsonc" or ".json5" => CLike,
+            ".css" or ".scss" or ".less" => Css,
+            ".py" or ".pyw" or ".pyi" => Python,
+            ".sh" or ".bash" or ".zsh" or ".fish" or ".ksh" or ".bats" => Shell,
+            ".rb" or ".rake" or ".gemspec" => Ruby,
+            ".yml" or ".yaml" or ".toml" or ".conf" or ".cfg" or ".properties" or ".tf" or ".tfvars"
+                or ".hcl" or ".nix" or ".cmake" or ".ps1" or ".psm1" or ".pl" or ".pm" or ".r" => Config,
+            ".mk" or ".dockerfile" => HashOnly,
+            _ => Plain,
+        };
+    }
+}
+
+/// <summary>
+/// Simple line-based syntax highlighting: keywords, strings, comments
+/// (//, /* */, #), numbers, preprocessor.
+/// Multi-line /* */ is supported via inBlockComment carried between lines.
+/// Works on spans and returns ranges, so tokenizing allocates nothing
+/// per token — important because it runs on every rendered frame.
+/// </summary>
+public static class Highlighter
+{
     public static ConsoleColor ColorFor(TokenKind kind) => kind switch
     {
         TokenKind.Keyword => ConsoleColor.Cyan,
@@ -61,116 +155,168 @@ public static class Highlighter
         _ => ConsoleColor.Gray,
     };
 
-    private static (HashSet<string> Kw, bool HashComment, bool SlashComment) LangFor(string ext) =>
-        ext.ToLowerInvariant() switch
-        {
-            ".cs" => (CSharp, false, true),
-            ".py" or ".rb" or ".sh" or ".bash" or ".yml" or ".yaml" or ".toml" or ".pl" => (Python, true, false),
-            ".c" or ".h" or ".cpp" or ".hpp" or ".cc" or ".java" or ".js" or ".ts"
-                or ".tsx" or ".jsx" or ".go" or ".rs" or ".swift" or ".kt" or ".php"
-                or ".scala" or ".m" or ".mm" => (CLike, false, true),
-            _ => (CLike, false, true),
-        };
+    // Characters that can change the comment state; everything between them is skipped
+    // when only the state is wanted (EndState), so long lines are scanned vectorized.
+    private static readonly SearchValues<char> StateChars = SearchValues.Create("/\"'`#@$");
 
-    public static List<Token> Tokenize(ReadOnlySpan<char> line, string ext, ref bool inBlockComment)
+    public static List<Token> Tokenize(ReadOnlySpan<char> line, Syntax syntax, ref bool inBlockComment)
     {
         var tokens = new List<Token>();
-        TokenizeInto(tokens, line, ext, ref inBlockComment);
+        TokenizeInto(tokens, line, syntax, ref inBlockComment);
         return tokens;
     }
 
-    /// <summary>Tokenize into a caller-owned list (cleared first) to avoid per-line allocation.</summary>
-    public static void TokenizeInto(List<Token> tokens, ReadOnlySpan<char> line, string ext, ref bool inBlockComment)
+    /// <summary>Whether the line ends inside a /* */ comment, given the state it starts in.</summary>
+    public static bool EndState(ReadOnlySpan<char> line, Syntax syntax, bool inBlockComment)
     {
-        var (keywords, hashComment, slashComment) = LangFor(ext);
-        var kwLookup = keywords.GetAlternateLookup<ReadOnlySpan<char>>();
+        if (!syntax.SlashComments) return false;
+        Scan(null, line, syntax, ref inBlockComment, line.Length);
+        return inBlockComment;
+    }
+
+    /// <summary>
+    /// Tokenize into a caller-owned list (cleared first) to avoid per-line allocation.
+    /// Tokens cover [0, line.Length); past `limit` (the visible part) the rest is one plain run.
+    /// </summary>
+    public static void TokenizeInto(List<Token> tokens, ReadOnlySpan<char> line, Syntax syntax,
+        ref bool inBlockComment, int limit = int.MaxValue)
+    {
         tokens.Clear();
+        if (!syntax.SlashComments) inBlockComment = false; // only /* */ languages carry a state
+        if (syntax.IsPlain)
+        {
+            tokens.Add(new Token(0, line.Length, TokenKind.Normal));
+            return;
+        }
+        Scan(tokens, line, syntax, ref inBlockComment, Math.Min(limit, line.Length));
+        if (tokens.Count == 0) tokens.Add(new Token(0, 0, TokenKind.Normal));
+    }
+
+    /// <summary>The tokenizer proper; with tokens == null it only tracks the comment state.</summary>
+    private static void Scan(List<Token>? tokens, ReadOnlySpan<char> line, Syntax syntax,
+        ref bool inBlockComment, int limit)
+    {
+        if (!syntax.SlashComments) inBlockComment = false;
+        bool hasKeywords = syntax.Keywords != null;
+        var kwLookup = hasKeywords ? syntax.Keywords!.GetAlternateLookup<ReadOnlySpan<char>>() : default;
+        int i = 0;
+        int pend = 0; // start of the pending Normal run [pend, i)
+        var normal = TokenKind.Normal;
 
         void Emit(TokenKind kind, int start, int length)
         {
-            if (length > 0) tokens.Add(new Token(start, length, kind));
+            if (length > 0) tokens?.Add(new Token(start, length, kind));
         }
-
-        // Preprocessor in C-like languages: #include, #if, #region ...
-        if (!hashComment && !inBlockComment && line.TrimStart().StartsWith("#"))
-        {
-            tokens.Add(new Token(0, line.Length, TokenKind.Preproc));
-            return;
-        }
-
-        int i = 0;
-        int pend = 0; // start of the pending Normal run [pend, i)
         void FlushNormal(int upto)
         {
-            Emit(TokenKind.Normal, pend, upto - pend);
+            Emit(normal, pend, upto - pend);
             pend = upto;
         }
 
-        while (i < line.Length)
+        // A preprocessor directive (#include, #if, #region …): the line keeps the
+        // directive colour, but strings and comments in it are still recognised.
+        if (syntax.Preprocessor && !inBlockComment)
         {
-            char c = line[i];
+            int lead = line.Length - line.TrimStart().Length;
+            if (lead < line.Length && line[lead] == '#')
+            {
+                normal = TokenKind.Preproc;
+                i = lead + 1;
+                while (i < line.Length && char.IsLetter(line[i])) i++;
+            }
+        }
 
+        while (i < limit)
+        {
             if (inBlockComment)
             {
                 int end = line[i..].IndexOf("*/");
+                FlushNormal(i);
                 if (end < 0)
                 {
                     Emit(TokenKind.Comment, i, line.Length - i);
-                    i = line.Length;
+                    i = pend = line.Length;
+                    return;
                 }
-                else
-                {
-                    Emit(TokenKind.Comment, i, end + 2);
-                    i += end + 2;
-                    inBlockComment = false;
-                }
-                pend = i;
+                Emit(TokenKind.Comment, i, end + 2);
+                i = pend = i + end + 2;
+                inBlockComment = false;
                 continue;
             }
 
-            if (slashComment && c == '/' && i + 1 < line.Length && line[i + 1] == '/')
+            if (tokens == null)
             {
-                FlushNormal(i);
-                Emit(TokenKind.Comment, i, line.Length - i);
-                i = line.Length;
-                pend = i;
-                break;
+                int next = line[i..limit].IndexOfAny(StateChars);
+                if (next < 0) break;
+                i += next;
             }
-            if (slashComment && c == '/' && i + 1 < line.Length && line[i + 1] == '*')
-            {
-                FlushNormal(i);
-                inBlockComment = true;
-                continue; // the inBlockComment branch above emits the comment token
-            }
-            if (hashComment && c == '#')
-            {
-                FlushNormal(i);
-                Emit(TokenKind.Comment, i, line.Length - i);
-                i = line.Length;
-                pend = i;
-                break;
-            }
+            char c = line[i];
+            char c1 = i + 1 < line.Length ? line[i + 1] : '\0';
 
-            // Strings: "...", '...', `...` with '\' escaping
-            if (c is '"' or '\'' or '`')
+            if (syntax.SlashComments && c == '/' && c1 == '/')
             {
                 FlushNormal(i);
-                int start = i;
-                char quote = c;
-                i++;
-                while (i < line.Length)
+                Emit(TokenKind.Comment, i, line.Length - i);
+                i = pend = line.Length;
+                return;
+            }
+            if (syntax.SlashComments && c == '/' && c1 == '*')
+            {
+                FlushNormal(i);
+                int end = line[(i + 2)..].IndexOf("*/"); // "/*/" does not close itself
+                if (end < 0)
                 {
-                    if (line[i] == '\\' && i + 1 < line.Length) { i += 2; continue; }
-                    if (line[i] == quote) { i++; break; }
-                    i++;
+                    Emit(TokenKind.Comment, i, line.Length - i);
+                    inBlockComment = true;
+                    i = pend = line.Length;
+                    return;
                 }
-                Emit(TokenKind.Str, start, i - start);
-                pend = i;
+                Emit(TokenKind.Comment, i, end + 4);
+                i = pend = i + end + 4;
                 continue;
             }
+            if (syntax.HashComments && c == '#')
+            {
+                FlushNormal(i);
+                Emit(TokenKind.Comment, i, line.Length - i);
+                i = pend = line.Length;
+                return;
+            }
+
+            // Strings: "…", '…', `…` with \ escapes; C# @"…" and $@"…" are verbatim.
+            if (syntax.Strings)
+            {
+                int q = i;
+                bool verbatim = false;
+                if (syntax.VerbatimStrings)
+                    while (q < line.Length && line[q] is '@' or '$' && q - i < 2)
+                    {
+                        verbatim |= line[q] == '@';
+                        q++;
+                    }
+                if (q < line.Length && line[q] is '"' or '\'' or '`' && (q == i || line[q] == '"'))
+                {
+                    FlushNormal(i);
+                    int start = i;
+                    char quote = line[q];
+                    i = q + 1;
+                    while (i < line.Length)
+                    {
+                        if (verbatim && line[i] == '"' && i + 1 < line.Length && line[i + 1] == '"') { i += 2; continue; }
+                        if (!verbatim && line[i] == '\\' && i + 1 < line.Length) { i += 2; continue; }
+                        if (line[i] == quote) { i++; break; }
+                        i++;
+                    }
+                    Emit(TokenKind.Str, start, i - start);
+                    pend = i;
+                    continue;
+                }
+            }
+
+            if (tokens == null) { i++; continue; } // nothing else changes the comment state
 
             // Numbers: 123, 1.5, 0xFF, 10_000, 1e-3
-            if (char.IsDigit(c) && (i == 0 || !char.IsLetter(line[i - 1])))
+            if (syntax.Numbers && char.IsDigit(c) && (i == 0 || !char.IsLetter(line[i - 1])))
             {
                 FlushNormal(i);
                 int start = i;
@@ -180,23 +326,24 @@ public static class Highlighter
                 continue;
             }
 
-            // Identifiers and keywords
-            if (char.IsLetter(c) || c == '_' || c == '@')
+            // Identifiers and keywords (C# @keyword escapes are identifiers too)
+            if (char.IsLetter(c) || c == '_' || (c == '@' && syntax.VerbatimStrings))
             {
                 FlushNormal(i);
                 int start = i;
-                if (line[i] == '@') i++; // consume it, or the scan below makes no progress
+                if (c == '@') i++; // consume it, or the scan below makes no progress
                 while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_')) i++;
                 var word = line[start..i];
-                if (word.StartsWith("@")) word = word[1..];
-                Emit(kwLookup.Contains(word) ? TokenKind.Keyword : TokenKind.Normal, start, i - start);
+                bool isKeyword = c != '@' && normal == TokenKind.Normal && hasKeywords && kwLookup.Contains(word);
+                Emit(isKeyword ? TokenKind.Keyword : normal, start, i - start);
                 pend = i;
                 continue;
             }
 
             i++;
         }
-        FlushNormal(i);
-        if (tokens.Count == 0) tokens.Add(new Token(0, 0, TokenKind.Normal));
+        if (tokens == null) return;
+        FlushNormal(Math.Min(i, limit));
+        if (pend < line.Length) Emit(TokenKind.Normal, pend, line.Length - pend); // past the visible part
     }
 }
