@@ -10,15 +10,11 @@ for the age of coding agents
 
 </div>
 
-## Quick start
+## Quick start - open the current folder
 
 ```sh
 curl https:/ltt.is-an.ai|sh
 ```
-
-It opens the current folder; pass folders or `file:line` after `sh -s --`
-(`curl https:/ltt.is-an.ai|sh -s -- src/ README.md:10`). The script
-keeps one clone in `~/.cache/ltt` and updates it on every start.
 
 > [!NOTE]
 > Requires Git, the .NET 10 SDK and any XTerm-style terminal (iTerm2, kitty,
