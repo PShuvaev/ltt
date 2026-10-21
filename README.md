@@ -1,6 +1,6 @@
 <div align="center">
 
-# look-touch-toss editor
+# look-touch-toss
 
 ### <ins>l</ins>ightweight <ins>t</ins>erminal <ins>t</ins>ext editor
 for the age of coding agents
