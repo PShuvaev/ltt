@@ -53,6 +53,22 @@ repository ignored files are dimmed and left out of search.
  Esc to tree · Ctrl+F find · Ctrl+L go to line · Ctrl+S save
 ```
 
+## Why a terminal
+
+With AI, most of a rich interface has nothing left to do. Menus, toolbars,
+wizards and settings panels exist to make operations findable; now you say
+what you want — by voice or in text — and an agent finds the operation. The
+agent works in text anyway: files, commands, diffs, logs. Text is the one
+medium you both read and write, and it can be searched, diffed, versioned
+and sent over SSH.
+
+What stays is looking. Your part of the work moves from doing to checking,
+and checking needs a fast, honest view of what the agent wrote, plus a
+precise tool for the line it got wrong: words are good for asking for a
+change and poor for fixing a single character. Voice and text to say it, a
+terminal to look and touch — that is the whole interface. ltt is the
+terminal part.
+
 ## Why it feels fast
 
 - ⚡ **Instant on** — nothing is indexed or scanned at startup; the tree
