@@ -133,6 +133,13 @@ def test_esc_without_hits_cancels_the_search(ltt, ws):
     assert (s.mode, s.status, s.results_top) == ("EDITOR", "Search cancelled.", None)
 
 
+def test_ctrl_c_in_the_results_hides_them(ltt, ws):
+    app, s = search_file(ltt, ws, needles(2), 2)
+    assert app.press("esc").mode == "SEARCH"
+    s = app.press("ctrl+c")
+    assert (s.mode, s.status, s.results_top) == ("EDITOR", "Cancelled (Ctrl+C).", None)
+
+
 @pytest.mark.parametrize("start", ["tree", "editor"])
 def test_a_second_esc_hides_the_panel(ltt, ws, start):
     ws.write("proj/a.txt", needles(2))

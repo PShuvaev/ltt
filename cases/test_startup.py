@@ -189,8 +189,6 @@ def test_unknown_option_prints_the_usage(ltt, ws, args):
     assert ENTER not in app.output and app.frames == 0
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: an argument error leaves the shell in application cursor-key and keypad "
-                                       "mode (the runtime's ESC[?1h ESC= is never undone; V14 on the early exit)")
 @pytest.mark.parametrize("arg", ["nope.txt", "-x"])
 def test_argument_error_leaves_cursor_keys_and_keypad_normal(ltt, ws, arg):
     app = ltt(arg, ready=False)

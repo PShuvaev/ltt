@@ -200,20 +200,21 @@ def test_save_through_a_chain_of_symlinks_writes_the_final_target(ltt, ws):  # V
     assert ws.read("target.txt") == "Xdata\n"
 
 
-def test_save_through_a_dangling_symlink_recreates_its_target(ltt, ws):
+def test_save_through_a_dangling_symlink_asks_then_recreates_its_target(ltt, ws):
     ws.write("target.txt", "data\n")
     os.symlink("target.txt", ws.path("link.txt"))
     app = ltt(ws.path("link.txt"))
     os.remove(ws.path("target.txt"))
-    app.wait_tree("target.txt", present=False)  # the watcher's own status comes and goes first
+    app.wait(lambda s: s.tabs[0].missing, what="the link's target shows as gone")  # A2, as for any file
     app.type("X")
-    save(app, "link.txt")
+    app.press("ctrl+s")
+    assert app.wait_mode("CONFIRM").question.startswith("link.txt was deleted on disk")
+    app.press("s")
+    app.wait_status("Saved: link.txt")
     assert os.readlink(ws.path("link.txt")) == "target.txt"
     assert ws.read("target.txt") == "Xdata\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a tab opened through a symlink never sees its target change on disk; "
-                                       "Ctrl+S overwrites the outside edit without asking")
 def test_save_through_a_symlink_asks_when_the_target_changed_on_disk(ltt, ws):
     ws.write("target.txt", "mine\n")
     os.symlink("target.txt", ws.path("link.txt"))

@@ -51,6 +51,14 @@ def test_click_places_the_cursor(ltt, ws):
     assert s.pos[:3] == (2, 3, 7) and s.cursor == at(s, 2, 6)
 
 
+def test_x10_click_places_the_cursor_like_an_sgr_one(ltt, ws):
+    # terminals without SGR reports (mode 1006) send ESC [ M and three bytes: button, x, y
+    app = edit(ltt, ws, "one two\nthree four\n")
+    x, y = at(app.snap(), 2, 6)
+    s = app.press(b"\x1b[M" + bytes([32, 33 + x, 33 + y]) + b"\x1b[M" + bytes([32 + 3, 33 + x, 33 + y]))
+    assert s.pos[:3] == (2, 3, 7) and s.editor_lines[:2] == ["one two", "three four"]
+
+
 def test_click_after_wide_characters_lands_on_the_character_there(ltt, ws):  # U1
     app = edit(ltt, ws, "日本語abc\n")
     app.click(*at(app.snap(), 1, 6))  # 日本語 take six cells: the seventh is the a

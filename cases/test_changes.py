@@ -210,6 +210,15 @@ def test_git_marks_clear_after_an_outside_commit(ltt, ws):
     assert s.tree_row("new.txt").fg == "Gray"
 
 
+def test_git_marks_go_when_the_repository_is_removed(ltt, ws):
+    ws.repo("p", {"a.txt": "one\n"})
+    ws.write("p/a.txt", "ONE\n")  # changed against the commit, before ltt started
+    app = ltt(ws.path("p"))
+    row(app, "a.txt", "Yellow")
+    ws.remove("p/.git")
+    row(app, "a.txt", "Gray")  # outside git: a change made before the start is not marked
+
+
 def test_git_commit_of_one_file_clears_only_its_mark(ltt, ws):
     ws.repo("r", {"a.txt": "one\n", "b.txt": "two\n"})
     ws.write("r/a.txt", "ONE\n")
@@ -311,8 +320,6 @@ def test_git_root_inside_a_repository_marks_its_files(ltt, ws):
     assert s.tree_row("src").fg == "White"  # the root itself, though git sees a changed folder
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: with a root inside a repository (ltt repo/src) an outside git commit "
-                                        "never clears the marks — the commit touches only .git, outside the watched root")
 def test_git_root_inside_a_repository_clears_marks_after_an_outside_commit(ltt, ws):
     ws.repo("r", {"src/a.txt": "one\n", "src/b.txt": "two\n"})
     ws.write("r/src/a.txt", "ONE\n")
@@ -335,8 +342,6 @@ def test_git_repository_inside_a_plain_folder_marks_its_files(ltt, ws):
     assert s.tree_row("notes.txt").fg == "Gray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the folder of a repository inside a plain root is never marked, "
-                                        "though it holds changed files (Changes.Mark stops below the repository's top)")
 def test_git_repository_folder_inside_a_plain_folder_is_marked_by_what_it_holds(ltt, ws):
     ws.write("plain/notes.txt", "n\n")
     ws.repo("plain/repo", {"a.txt": "one\n", "b.txt": "two\n"})
@@ -364,9 +369,6 @@ def test_git_init_in_a_subfolder_while_running_marks_against_its_commit(ltt, ws)
     assert s.tree_row("b.txt").fg == "Gray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a root that becomes a repository while ltt runs (git init in it) keeps "
-                                        "the outside-git marks until a restart — Changes looks each folder up for a "
-                                        "repository only once (Changes.Discover, _asked)")
 def test_git_init_in_a_shown_root_switches_its_marks_to_git(ltt, ws):
     ws.write("p/a.txt", "one\n")
     app = ltt(ws.path("p"))
@@ -643,9 +645,6 @@ def test_plain_file_changed_after_start_is_yellow(ltt, ws):
     assert s.tree_row("b.txt").fg == "Gray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: outside git, a file right in a root folder changed by another program "
-                                        "keeps its old colour and size until the next key — a change that renames "
-                                        "nothing asks for no redraw (no folder size to recount, no git status)")
 def test_plain_file_in_a_root_changed_after_start_is_redrawn_yellow(ltt, ws):
     ws.write("p/a.txt", "one\n")
     ws.write("p/b.txt", "two\n")

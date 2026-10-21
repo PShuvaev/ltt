@@ -64,9 +64,7 @@ def test_overlong_csi_is_dropped_whole(ltt, ws, pairs):  # T8
     pytest.param(b"\x1b[57441;2u", id="kitty lone Shift"),
     pytest.param(b"\x1b[97;1:3u", id="kitty key release"),
     pytest.param(b"\x1b[57344u", id="kitty private-use key"),
-    pytest.param(b"\x1b[M +&", id="X10 mouse report", marks=pytest.mark.xfail(
-        strict=True, reason="BUG: an X10 mouse report (ESC [ M + three bytes, from terminals without SGR "
-                            "mouse 1006, e.g. GNU screen) types its three bytes into the file")),
+    pytest.param(b"\x1b[M +&", id="X10 mouse report"),
 ])
 def test_unknown_sequences_are_ignored(ltt, ws, seq):
     app = open_file(ltt, ws)
@@ -74,18 +72,14 @@ def test_unknown_sequences_are_ignored(ltt, ws, seq):
     assert s.editor_lines[:2] == ["|START", "second"] and s.pos == (1, 4, 2, 0) and s.mode == "EDITOR"
 
 
-_REPLY_BUG = pytest.mark.xfail(strict=True, reason="BUG: an OSC or DCS string arriving as input (a terminal's "
-                                                   "reply) is read as Alt+] / Alt+P and its text typed")
-
-
 @pytest.mark.parametrize("reply", [
     pytest.param(b"\x1b[12;40R", id="cursor position report"),
     pytest.param(b"\x1b[?62;22c", id="device attributes"),
     pytest.param(b"\x1b[?29u", id="kitty flags"),
     pytest.param(b"\x1b[?2026;2$y", id="mode report"),
-    pytest.param(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07", id="OSC 11 colour, BEL", marks=_REPLY_BUG),
-    pytest.param(b"\x1b]11;rgb:0000/0000/0000\x1b\\", id="OSC 11 colour, ST", marks=_REPLY_BUG),
-    pytest.param(b"\x1bP>|kitty(0.30)\x1b\\", id="DCS version", marks=_REPLY_BUG),
+    pytest.param(b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07", id="OSC 11 colour, BEL"),
+    pytest.param(b"\x1b]11;rgb:0000/0000/0000\x1b\\", id="OSC 11 colour, ST"),
+    pytest.param(b"\x1bP>|kitty(0.30)\x1b\\", id="DCS version"),
 ])
 def test_terminal_replies_are_not_typed(ltt, ws, reply):  # D12
     app = open_file(ltt, ws)

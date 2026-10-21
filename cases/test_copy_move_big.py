@@ -136,8 +136,6 @@ def test_selection_moved_during_a_copy_stays_where_it_was_moved(ltt, ws):
     assert s.tree_selected.name == moved_to.name and s.tree_selected.depth == moved_to.depth
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder moved to another disk fails with 'Move error: Unknown error: 203' "
-                                       "(.NET 10 on macOS gives Directory.Move errors HResult 203, not EXDEV 18)")
 def test_stopped_move_across_disks_keeps_the_original(ws, other_disk, ltt):
     src = ws.path("proj/big")
     for d in range(50):  # 10,000 files of its own: a move changes the source

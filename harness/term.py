@@ -287,13 +287,14 @@ class Ltt:
         n = self.frames if after is None else after
         return self.wait(lambda s: s.frame_no > n, timeout, f"a frame after #{n}")
 
-    def settle(self, timeout=10.0, quiet=0.04, frame=True):
+    def settle(self, timeout=10.0, quiet=0.04, frame=True, not_before=None):
         """After input: wait until ltt read all of it, drew a frame after it and went quiet.
 
         frame=False is for input ltt ignores (it draws nothing then): read and quiet is enough.
+        not_before: the answering frame cannot come earlier (a lone Esc is taken 40 ms after it arrives).
         """
         deadline = time.monotonic() + _scaled(timeout)
-        t_in = self._last_input
+        t_in = max(self._last_input, not_before or 0)
         if not frame:
             quiet = max(quiet, 0.15)
         while True:
@@ -392,10 +393,12 @@ class Ltt:
         for key in keys:
             data = K.encode(key, mode)
             self.write(data)
-            if K.is_lone_esc(data) and not settle:
+            lone_esc = K.is_lone_esc(data)
+            if lone_esc and not settle:
                 time.sleep(0.1)  # ltt waits 40 ms to tell a lone Esc from a sequence
             if settle:
-                snap = self.settle(frame=draws)
+                # a background frame within those 40 ms must not pass for the answer
+                snap = self.settle(frame=draws, not_before=self._last_input + 0.04 if lone_esc else None)
         return snap
 
     def type(self, text, settle=True, each=False, draws=True):

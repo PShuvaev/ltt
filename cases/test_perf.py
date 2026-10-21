@@ -289,8 +289,6 @@ def test_typing_after_edits_all_over_a_million_lines(ltt):
     assert t < secs(0.1), f"best key answered after {t:.3f} s"  # ~5 ms
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: in a big file whose lines repeat, every key re-diffs all the text between "
-                                       "the first and the last edited place: ~2.4 ms more per place (100 → 0.24 s a key)")
 def test_typing_after_edits_all_over_a_million_repeating_lines(ltt):
     # a log of three repeating lines: the hard case for the diff behind the change marks
     app = ltt(million_log(), env=PLAIN)
@@ -355,8 +353,6 @@ def test_folder_search_of_a_small_project(ltt, ws):
     assert t < secs(1.0), f"found after {t:.3f} s"  # ~0.21 s
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder search done in ~20 ms is shown only at the main loop's next "
-                                       "200 ms tick (README: ~40 ms across this repo)")
 def test_folder_search_of_a_small_project_shows_its_results_at_once(ltt, ws):
     app = ltt(small_project(ws))
     app.press("ctrl+f")

@@ -637,8 +637,6 @@ def test_file_turned_binary_is_reported_once(ltt, ws):
     assert app.snap().status.startswith("File panel.")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a tab opened through a symlink compares the link's own time and "
-                                       "size, never the target's: it never reloads (test_save.py has the save side)")
 def test_symlinked_tab_reloads_when_the_target_changes(ltt, ws):
     ws.write("proj/real.txt", "original\n")
     os.symlink(ws.path("proj/real.txt"), ws.path("proj/link.txt"))  # as CLAUDE.md -> AGENTS.md
@@ -748,7 +746,7 @@ def test_shown_results_stay_after_an_outside_change(ltt, ws):
     app.wait(lambda s: "found: 1" in s.status_line, what="the search finished")
     app.press("esc")  # to the results
     ws.write("proj/new.txt", "x\n")
-    s = app.wait_status("External change: created new.txt — left panel refreshed.")
+    s = app.wait_status("External change: created new.txt")  # a write may count as a second change
     assert [h.location for h in s.results] == ["needle.txt:1"]
     s = app.press("enter")
     assert s.tab_names == ["needle.txt"] and s.editor_lines[0] == "the zqxneedle is here"

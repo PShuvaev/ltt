@@ -144,14 +144,7 @@ def test_kitty_key_release_types_nothing(ltt, ws):
 RELEASES = {"enter": release(13), "backspace": release(127), "tab": release(9), "esc": release(27),
             "delete": b"\x1b[3;1:3~", "ctrl+z": release(122, K.CTRL), "ctrl+w": release(119, K.CTRL),
             "left": b"\x1b[1;1:3D"}
-RELEASE_BUG = pytest.mark.xfail(strict=True, reason="BUG: a kitty release event in the legacy-key form "
-                                                    "(CSI 1;1:3D, CSI 3;1:3~) acts as a press — only CSI u releases "
-                                                    "are dropped (ltt does not ask for them, so only a terminal "
-                                                    "sending them unasked is affected)")
-
-
-@pytest.mark.parametrize("data", [pytest.param(v, id=k, marks=[RELEASE_BUG] if k in ("delete", "left") else [])
-                                  for k, v in RELEASES.items()])
+@pytest.mark.parametrize("data", [pytest.param(v, id=k) for k, v in RELEASES.items()])
 def test_kitty_key_release_does_nothing(ltt, ws, data):
     app = edit(ltt, ws, "abc\n", keyboard="kitty")
     app.press("end", ktext("d"))

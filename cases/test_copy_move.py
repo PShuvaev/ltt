@@ -1058,8 +1058,6 @@ def test_failed_folder_move_leaves_everything_in_place(ltt, ws):
 
 
 @needs_unix_permissions
-@pytest.mark.xfail(strict=True, reason="BUG: a file move that fails (read-only source folder) still leaves "
-                                       "a hard link of the file at the target")
 def test_failed_file_move_leaves_nothing_at_the_target(ltt, ws):
     ws.write("proj/ro/notes.txt", "n\n")
     ws.mkdir("proj/b")
@@ -1132,8 +1130,6 @@ def test_dirty_tab_of_a_file_moved_to_another_disk_saves_without_asking(ws, othe
     assert app.quit() == 0
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder moved to another disk fails with 'Move error: Unknown error: 203' "
-                                       "(.NET 10 on macOS gives Directory.Move errors HResult 203, not EXDEV 18)")
 def test_folder_moved_to_another_disk(ws, other_disk, ltt):
     ws.write("proj/a/docs/one.txt", "one\n")
     ws.write("proj/a/docs/sub/two.txt", "two\n")
@@ -1150,8 +1146,6 @@ def test_folder_moved_to_another_disk(ws, other_disk, ltt):
 
 
 @needs_unix_permissions
-@pytest.mark.xfail(strict=True, reason="BUG: a folder moved to another disk fails with 'Move error: Unknown error: 203' "
-                                       "(.NET 10 on macOS gives Directory.Move errors HResult 203, not EXDEV 18)")
 def test_folder_moved_across_disks_with_an_unreadable_file_stays(ws, other_disk, ltt):
     ws.write("proj/a/docs/one.txt", "one\n")
     secret = ws.write("proj/a/docs/secret.txt", "s\n", mode=0o000)

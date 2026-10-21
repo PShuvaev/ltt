@@ -656,8 +656,6 @@ def test_an_open_latin1_file_is_searched_as_the_editor_shows_it(ltt, ws):
     assert [(h.location, h.snippet) for h in s.results] == [("latin1.txt:1", "summer été here")]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: searches read files from disk as UTF-8 only: a Latin-1 file, "
-                                       "which the editor opens as Latin-1, is never found by its accented text")
 def test_a_folder_search_reads_a_latin1_file_as_the_editor_does(ltt, ws):
     ws.write("proj/latin1.txt", SUMMER.encode("latin-1"))
     ws.write("proj/utf8.txt", "plain été too\n")
@@ -668,8 +666,6 @@ def test_a_folder_search_reads_a_latin1_file_as_the_editor_does(ltt, ws):
     assert sorted(locations(s)) == ["latin1.txt:1", "utf8.txt:1"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a Latin-1 file selected in the tree is searched as UTF-8: "
-                                       "its accented text is never found")
 def test_a_latin1_file_selected_in_the_tree_is_searched_as_the_editor_reads_it(ltt, ws):
     ws.write("proj/latin1.txt", SUMMER.encode("latin-1"))
     app = ltt(ws.path("proj"))
@@ -680,8 +676,6 @@ def test_a_latin1_file_selected_in_the_tree_is_searched_as_the_editor_reads_it(l
     assert found(s) == "1" and locations(s) == ["latin1.txt:1"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a hit in a Latin-1 file shows its accented letters as U+FFFD "
-                                       "(summer �t� here) while the editor shows summer été here")
 def test_a_hit_in_a_latin1_file_shows_its_line_as_the_editor_does(ltt, ws):
     ws.write("proj/latin1.txt", SUMMER.encode("latin-1"))
     app = ltt(ws.path("proj"))
@@ -794,8 +788,6 @@ def test_esc_stops_a_running_scan(ltt, ws, git_gate):
     assert (s.mode, s.status, s.results_top) == ("TREE", "Search cancelled.", None)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+C in the search input leaves the scan running; "
-                                       "its panel pops up after 'Cancelled (Ctrl+C).'")
 def test_ctrl_c_stops_a_running_scan(ltt, ws, git_gate):
     ws.repo("proj", files={"a.txt": "zqxneedle\n"})
     gate = git_gate()
@@ -811,8 +803,6 @@ def test_ctrl_c_stops_a_running_scan(ltt, ws, git_gate):
     assert (s.mode, s.status, s.results_top) == ("TREE", "Cancelled (Ctrl+C).", None)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a scan that ends while a frame is being drawn shows a stale "
-                                       "count (found: 0, no panel) until the next tick, ~200 ms later")
 def test_the_count_is_never_stale_after_a_fast_scan(ltt, ws):
     # The input reads "searching…" only while the scan task runs; one that has just ended but
     # is not applied yet shows the old count. A big frame (wide editor full of code) makes the

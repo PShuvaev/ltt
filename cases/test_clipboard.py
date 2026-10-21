@@ -45,6 +45,26 @@ def test_ctrl_c_copies_the_selection(ltt, ws):
     assert osc52("hello world") in app.output_since(mark)
 
 
+def test_a_big_copy_still_goes_to_the_terminal_clipboard(ltt, ws):
+    text = "x" * 100_000
+    app = ltt(ws.write("big.txt", text))
+    mark = app.output_mark()
+    app.press("ctrl+a", "ctrl+c")
+    app.wait_status("Copied to the clipboard: 100000 chars")
+    assert osc52(text) in app.output_since(mark)
+
+
+def test_a_copy_over_a_million_chars_skips_the_terminal_clipboard(ltt, ws):
+    # one OSC 52 sequence of tens of MB would flood the terminal; the system tool still gets it all
+    text = "x" * 1_000_001
+    app = ltt(ws.write("big.txt", text))
+    mark = app.output_mark()
+    app.press("ctrl+a", "ctrl+c")
+    app.wait_status("Copied to the clipboard: 1000001 chars")
+    app.wait(lambda s: ws.clipboard_log, timeout=10, what="the copy tool ran")
+    assert ws.clipboard == text and b"\x1b]52;" not in app.output_since(mark)
+
+
 def test_ctrl_c_joins_lines_with_lf_even_in_a_crlf_file(ltt, ws):
     app = ltt(ws.write("a.txt", b"one\r\ntwo\r\nthree\r\n"))
     app.press("shift+down", "shift+down", "ctrl+c")
