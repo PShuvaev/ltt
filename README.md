@@ -1,11 +1,9 @@
 <div align="center">
 
-# look-touch-toss
+# <ins>l</ins>ightweight <ins>t</ins>erminal <ins>t</ins>ext editor
 
-### <ins>l</ins>ightweight <ins>t</ins>erminal <ins>t</ins>ext editor
+### 👀 look at what the agent wrote · ✏️ touch a line or two · 🪃 toss it back
 for the age of coding agents
-
-👀 look at what the agent wrote · ✏️ touch a line or two · 🪃 toss it back
 
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet/10.0)
 [![dependencies: 0](https://img.shields.io/badge/dependencies-0-2ea44f?style=flat-square)](ltt.csproj)
