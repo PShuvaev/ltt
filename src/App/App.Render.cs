@@ -51,10 +51,20 @@ internal sealed partial class App
     /// </summary>
     internal static string BuildTitle(string activeLabel, bool dirty, string tabLabel, int width)
     {
+        activeLabel = Tilde(activeLabel);
         const string prefix = " ltt · ";
         string tail = (dirty ? " ●" : "") + tabLabel;
         int room = width - Cells.WidthOf(prefix) - Cells.WidthOf(tail);
         return prefix + FitTail(activeLabel, Math.Max(1, room)) + tail;
+    }
+
+    /// <summary>A path inside the home folder written from ~, as shells show it (not on Windows).</summary>
+    internal static string Tilde(string path)
+    {
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return !OperatingSystem.IsWindows() && home.Length > 1 && Paths.IsSameOrInside(path, home)
+            ? "~" + path[Path.TrimEndingDirectorySeparator(home).Length..]
+            : path;
     }
 
     private static void WriteEdgeMarker(Screen screen, int x, int y, char marker, bool selected) =>
@@ -260,9 +270,14 @@ internal sealed partial class App
                 bool sel = idx == _tree.SelectedIndex;
                 var bg = sel ? (_focus == Focus.Tree ? ConsoleColor.DarkCyan : ConsoleColor.DarkGray) : ConsoleColor.Black;
                 var fg = sel ? ConsoleColor.White
-                    : _picked is { } picked && Paths.Same(picked.Path, node.FullPath) ? ConsoleColor.DarkYellow // Ctrl+C / Ctrl+X
-                    : node.Ignored ? ConsoleColor.DarkGray // git-ignored entries stay in the background
-                    : node.IsDir ? ConsoleColor.White : ConsoleColor.Gray;
+                    : _picked is { } picked && Paths.Same(picked.Path, node.FullPath) ? ConsoleColor.Magenta // Ctrl+C / Ctrl+X
+                    : _changes.Of(node) switch
+                    {
+                        Changes.Kind.Added => ConsoleColor.Green,
+                        Changes.Kind.Modified => ConsoleColor.Yellow,
+                        _ => node.Ignored ? ConsoleColor.DarkGray // git-ignored entries stay in the background
+                            : node.IsDir ? ConsoleColor.White : ConsoleColor.Gray,
+                    };
                 // Size hugs the right edge in a dim colour; roots have no size of their own.
                 const int sizeColW = 8;
                 if (leftW >= 20)
@@ -302,6 +317,13 @@ internal sealed partial class App
                     string num = (lineNo + 1).ToString().PadLeft(gutter - 1) + " ";
                     WriteAt(editorX, y, num, curLine ? ConsoleColor.Yellow : ConsoleColor.DarkGray,
                         ConsoleColor.Black, gutter);
+                    // The gutter's last cell marks a change against the last commit (or the file as opened).
+                    byte mark = _editor.ChangeMark(lineNo);
+                    if (mark != 0)
+                        WriteAt(editorX + gutter - 1, y,
+                            (mark & (LineDiff.Added | LineDiff.Modified)) != 0 ? "▎" : (mark & LineDiff.RemovedBelow) != 0 ? "▁" : "▔",
+                            (mark & LineDiff.Added) != 0 ? ConsoleColor.Green : (mark & LineDiff.Modified) != 0 ? ConsoleColor.Yellow : ConsoleColor.Red,
+                            ConsoleColor.Black, 1);
                     string lineText = _editor.LineText(lineNo);
                     // Only the visible part is tokenized; the comment state comes from the editor's cache.
                     // A very long line (minified code, a log) is drawn without colours.

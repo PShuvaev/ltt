@@ -273,6 +273,10 @@ internal sealed partial class App
     // Watching the left panel's folders for external changes.
     private const int WatchTickMs = 200; // how often the main loop wakes up without input
     private FolderWatcher? _watcher;
+
+    // What changed (git status, or since start): the tree's colours and the editor's line marks.
+    private readonly Changes _changes = new();
+    private int _repoScan = -1; // the tree generation last searched for repositories
     private readonly HashSet<string> _warnedUnwatchable = new(Paths.Comparer);
 
     // A kill signal or a hangup asks the UI thread to secure unsaved edits and stop.
@@ -333,6 +337,7 @@ internal sealed partial class App
                 if (PollSearch()) dirty = true;
                 if (PollSizing()) dirty = true;
                 if (PollPaste()) dirty = true;
+                if (PollChanges()) dirty = true;
                 StartSizingIfIdle();
                 if (Environment.TickCount64 - _diskCheckAt >= DiskCheckIntervalMs)
                 {
@@ -488,6 +493,8 @@ internal sealed partial class App
         _diskCheckAt = 0; // compare open tabs with the disk right away
         _liveSourceStale = true; // results can no longer be refined: lines may have changed
         bool redraw = FollowRenames(batch.Renames);
+        _changes.Changed(batch.Dirs, _tree.RootPaths);
+        if (batch.Overflow) _changes.RefreshAll();
         if (batch.Dirs.Count == 0 && !batch.Overflow) return redraw;
 
         FuzzySearch.InvalidateFileLists();
@@ -522,6 +529,7 @@ internal sealed partial class App
                 // Moved over a file open in another tab: that tab sees the change, this one its file gone.
                 if (_tabs.IndexOfPath(moved) >= 0) continue;
                 tab.Editor.RenameTo(moved);
+                tab.Editor.SetBaseline(Baseline(moved));
                 _status = $"{Path.GetFileName(fp)} was moved to {moved} — its tab follows.";
                 any = true;
             }
@@ -575,6 +583,27 @@ internal sealed partial class App
         }
         return changed;
     }
+
+    /// <summary>
+    /// Look for repositories in newly read folders and apply what git answered:
+    /// each tab's lines are then marked against its file's committed text.
+    /// True when the screen needs a redraw.
+    /// </summary>
+    private bool PollChanges()
+    {
+        if (_tree.Generation != _repoScan)
+        {
+            _repoScan = _tree.Generation;
+            _changes.Discover(_tree.RootPaths.Concat(_tree.RepoFolders()));
+        }
+        if (!_changes.Poll()) return false;
+        foreach (var t in _tabs.Tabs)
+            if (t.Editor.FilePath is { } fp) t.Editor.SetBaseline(Baseline(fp));
+        return true;
+    }
+
+    /// <summary>What a file's lines are marked against: its committed text, or nothing for a new file.</summary>
+    private string[]? Baseline(string path) => _changes.Committed(path, isNew: _tree.Find(path)?.IsNew == true);
 
     /// <summary>Start counting folder sizes in the background when a load left them approximate.</summary>
     private void StartSizingIfIdle()
@@ -643,6 +672,7 @@ internal sealed partial class App
         {
             ed.Open(full, lineZeroBased);
             if (column >= 0) ed.GoToLine(lineZeroBased, column);
+            ed.SetBaseline(Baseline(full));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
                                        or ArgumentException or NotSupportedException)

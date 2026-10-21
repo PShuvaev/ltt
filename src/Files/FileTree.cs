@@ -22,6 +22,9 @@ public sealed class TreeNode
     /// <summary>Modification time when listed: a folder's size stays cached while it stands.</summary>
     public DateTime WriteUtc { get; set; }
 
+    /// <summary>Appeared after its folder was first read (outside git: a new entry).</summary>
+    public bool IsNew { get; init; }
+
     /// <summary>Bumped by every new count of this folder: a count started earlier no longer applies.</summary>
     internal int SizeGeneration;
 
@@ -57,6 +60,23 @@ public sealed class FileTree
 
     /// <summary>Viewport height, updated on each redraw.</summary>
     public int ViewHeight { get; set; } = 20;
+
+    /// <summary>Bumped whenever folders are read: new ones may hold a repository.</summary>
+    public int Generation { get; private set; }
+
+    /// <summary>Read folders that hold a .git: repositories, for the change marks.</summary>
+    public IEnumerable<string> RepoFolders()
+    {
+        var stack = new Stack<TreeNode>(Roots);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            if (!node.ChildrenLoaded) continue;
+            foreach (var c in node.Children)
+                if (c.Name == ".git") yield return node.FullPath;
+                else if (c.IsDir && !c.IsLink) stack.Push(c);
+        }
+    }
 
     public FileTree(string rootPath) : this(new[] { rootPath }) { }
 
@@ -96,6 +116,7 @@ public sealed class FileTree
     {
         if (!node.IsDir || node.ChildrenLoaded) return;
         node.ChildrenLoaded = true;
+        Generation++;
         node.Children.Clear();
         node.Children.AddRange(ReadEntries(node));
         MarkIgnored(node);
@@ -417,6 +438,26 @@ public sealed class FileTree
         return true;
     }
 
+    /// <summary>The node of a path among the folders read so far (nothing is read or expanded); null — not there.</summary>
+    public TreeNode? Find(string fullPath)
+    {
+        string full = Paths.Normalize(fullPath);
+        foreach (var root in Roots.Where(r => Paths.IsSameOrInside(full, r.FullPath)).OrderByDescending(r => r.FullPath.Length))
+        {
+            var node = root;
+            while (!Paths.Same(node.FullPath, full))
+            {
+                var next = node.ChildrenLoaded
+                    ? node.Children.FirstOrDefault(c => Paths.IsSameOrInside(full, c.FullPath))
+                    : null;
+                if (next == null) break;
+                node = next;
+            }
+            if (Paths.Same(node.FullPath, full)) return node;
+        }
+        return null;
+    }
+
     /// <summary>Select a node by full path in any root, expanding its parents.</summary>
     public void SelectPath(string fullPath)
     {
@@ -495,6 +536,7 @@ public sealed class FileTree
         foreach (var parent in recount.Where(p => !targets.Contains(p))) StartSizing(parent, sync: false);
         if (targets.Count == 0) return false;
 
+        Generation++;
         var selected = Selected;
         var order = targets.ToList();
         var probes = new TreeNode[order.Count];
@@ -530,7 +572,7 @@ public sealed class FileTree
                     {
                         Name = f.Name, FullPath = f.FullPath, IsDir = f.IsDir, IsLink = f.IsLink,
                         Depth = node.Depth + 1, Parent = node, Ignored = f.Ignored,
-                        Size = f.Size, SizeExact = f.SizeExact, WriteUtc = f.WriteUtc,
+                        Size = f.Size, SizeExact = f.SizeExact, WriteUtc = f.WriteUtc, IsNew = true,
                     });
             }
             StartSizing(node, sync: false);

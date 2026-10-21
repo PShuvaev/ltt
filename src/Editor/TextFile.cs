@@ -47,6 +47,18 @@ internal static class TextFile
 
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read,
             FileShare.ReadWrite | FileShare.Delete, 1 << 16);
+        return Decode(fs);
+    }
+
+    /// <summary>Lines from bytes, decoded the way a file is read (a committed version of one, say).</summary>
+    public static List<string> Lines(byte[] bytes)
+    {
+        using var ms = new MemoryStream(bytes);
+        return Decode(ms).Lines;
+    }
+
+    private static (List<string> Lines, TextFormat Format) Decode(Stream fs)
+    {
         Span<byte> head = stackalloc byte[3];
         int n = fs.ReadAtLeast(head, 3, throwOnEndOfStream: false);
         var (enc, bomLen) =
@@ -92,7 +104,7 @@ internal static class TextFile
     };
 
     /// <summary>Decode and split on \n, \r\n and \r, counting each kind of break.</summary>
-    private static (List<string>, TextFormat) ReadAs(FileStream fs, TextEncoding enc, int bomLen)
+    private static (List<string>, TextFormat) ReadAs(Stream fs, TextEncoding enc, int bomLen)
     {
         fs.Position = bomLen;
         using var reader = new StreamReader(fs, DecoderFor(enc), detectEncodingFromByteOrderMarks: false,

@@ -75,6 +75,32 @@ public sealed class TextEditor
     private const int MaxUndo = 200;
     private string[] _savedContent = { "" }; // state as of open/save
 
+    // ---- Change marks: the text against the last commit, or against the file as first opened ----
+    private string[] _opened = { "" };
+    private string[]? _committed;  // from git; null — compare with _opened
+    private int _version;          // bumped by every change of _lines
+    private byte[]? _marks;
+    private int _marksVersion;
+
+    /// <summary>The committed text to mark changed lines against (empty — a file git does not have yet); null — the file as first opened.</summary>
+    public void SetBaseline(string[]? committed)
+    {
+        if (ReferenceEquals(committed, _committed)) return;
+        _committed = committed;
+        _marks = null;
+    }
+
+    /// <summary>The line's change mark (LineDiff: added, modified, lines removed next to it), computed once per edit.</summary>
+    public byte ChangeMark(int line)
+    {
+        if (_marks == null || _marksVersion != _version)
+        {
+            _marks = LineDiff.Marks(_committed ?? _opened, _lines);
+            _marksVersion = _version;
+        }
+        return line < _marks.Length ? _marks[line] : (byte)0;
+    }
+
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
@@ -134,8 +160,10 @@ public sealed class TextEditor
     {
         BeginChange();
         _lines = lines;
+        _version++;
         EndChange();
         _savedContent = _lines.ToArray();
+        _opened = _savedContent;
         FilePath = full;
         Format = format;
         SetSyntax(Syntax.For(full));
@@ -168,6 +196,7 @@ public sealed class TextEditor
     public void ClampState()
     {
         if (_lines.Count == 0) _lines.Add("");
+        _version++;
         Cy = Math.Clamp(Cy, 0, _lines.Count - 1);
         Cx = Cells.FloorBoundary(_lines[Cy], Math.Clamp(Cx, 0, _lines[Cy].Length));
         if (SelAnchor is { } a)
@@ -329,6 +358,7 @@ public sealed class TextEditor
             _lines.RemoveRange(at, count);
             _lines.InsertRange(at, lines);
         }
+        _version++;
         InvalidateHighlightFrom(at);
     }
 

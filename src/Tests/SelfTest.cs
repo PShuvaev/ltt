@@ -26,7 +26,7 @@ internal static class SelfTest
             ("save", TestSaveSafety), ("editing", TestEditing), ("undo", TestUndo),
             ("disk", TestDiskChanges), ("scrolling", TestScrolling), ("search", TestSearch), ("refine", TestSearchRefine),
             ("git search", TestGitSearch), ("tree", TestTree), ("git tree", TestGitTree), ("sizes", TestSizes),
-            ("copy/move", TestCopyMove), ("watcher", TestWatcher), ("misc", TestMisc),
+            ("copy/move", TestCopyMove), ("changes", TestChanges), ("watcher", TestWatcher), ("misc", TestMisc),
         };
         try
         {
@@ -332,6 +332,11 @@ internal static class SelfTest
         Check(App.FitTail("/very/long/path/to/file.cs", 12) == "…/to/file.cs"
               && App.BuildTitle("/a/very/long/path/to/the/file.cs", false, "", 30).EndsWith("file.cs"),
             "title: a long path loses its beginning, never the file name");
+        string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!OperatingSystem.IsWindows())
+            Check(App.Tilde(Path.Combine(home, "src", "a.cs")) == "~/src/a.cs" && App.Tilde(home) == "~"
+                  && App.Tilde(home + "x/a.cs") == home + "x/a.cs" && App.Tilde("/etc/hosts") == "/etc/hosts",
+                "title: a path in the home folder starts with ~");
     }
 
     private static void TestRoundTrip()
@@ -1081,6 +1086,72 @@ internal static class SelfTest
         Check(!Path.Exists(dst) && File.ReadAllText(Path.Combine(tmp, "moved", "deep", "er", "leaf.txt")) == "leaf"
               && !Path.Exists(Path.Combine(tmp, "a.txt")) && File.ReadAllText(Path.Combine(tmp, "moved", "a.txt")) == "a",
             "move: a folder and a file go to another folder");
+    }
+
+    private static void TestChanges()
+    {
+        static string Marks(string was, string now) =>
+            string.Concat(LineDiff.Marks(was.Split(' '), now.Split(' ')).Select(m => (char)('0' + m)));
+        Check(Marks("a b c", "a b c") == "000" && Marks("a b c", "a x b c") == "0100" && Marks("a b c", "a B c") == "020"
+              && Marks("a b c", "a c") == "40" && Marks("a b", "b") == "8" && Marks("a", "a b") == "01"
+              && Marks("a b c d e", "a X c e f") == "02401",
+            "line marks: added, modified and removed lines against the earlier text");
+        var many = Enumerable.Range(0, 10).Select(i => "w" + i).ToArray();
+        Check(LineDiff.Marks(many, Enumerable.Range(0, 10).Select(i => "n" + i).ToList(), maxEdits: 3).All(m => m == LineDiff.Modified),
+            "line marks: a change too big to diff is marked as a whole");
+
+        string sep = Path.DirectorySeparatorChar.ToString();
+        var (head, entries, newDirs) = Changes.Parse("/r",
+            "# branch.oid abc123\0# branch.head main\01 .M N... 100644 100644 100644 h1 h2 src/a b.py\0? new/\0? notes.txt\0"
+            + "1 A. N... 000000 100644 100644 0 h2 src/b.py\02 R. N... 100644 100644 100644 h1 h1 R100 src/c.py\0src/old.py\0"
+            + "1 .D N... 100644 100644 000000 h1 h1 lib/gone.py\0");
+        Changes.Kind K(string rel) => entries.GetValueOrDefault("/r" + sep + rel.Replace("/", sep));
+        Check(head == "abc123" && K("src/a b.py") == Changes.Kind.Modified && K("src") == Changes.Kind.Modified
+              && K("new") == Changes.Kind.Added && newDirs.Count == 1 && K("notes.txt") == Changes.Kind.Added
+              && K("src/b.py") == Changes.Kind.Added && K("src/c.py") == Changes.Kind.Modified
+              && K("lib") == Changes.Kind.Modified && K("lib/gone.py") == Changes.Kind.None,
+            "git status: changed files and the folders above them");
+
+        if (GitRepo("changes") is { } repo)
+        {
+            Put(repo, "src/app.py", "one\ntwo\nthree\n");
+            Run(repo, "git", "add -A");
+            Run(repo, "git", "-c user.email=t@t -c user.name=t commit -q -m app");
+            Put(repo, "src/app.py", "one\nTWO\nthree\nfour\n");
+            Put(repo, "src/new.py", "x\n");
+            var changes = new Changes();
+            changes.Discover(new[] { Path.Combine(repo, "src") });
+            for (int i = 0; i < 200 && !changes.Poll(); i++) Thread.Sleep(25);
+            var tree = new FileTree(repo);
+            tree.SelectPath(Path.Combine(repo, "src", "new.py"));
+            TreeNode Node(string name) => tree.Visible.First(v => v.Name == name);
+            var ed = Open(Path.Combine(repo, "src", "app.py"));
+            ed.SetBaseline(changes.Committed(Path.Combine(repo, "src", "app.py"), isNew: false));
+            Check(changes.Of(Node("app.py")) == Changes.Kind.Modified && changes.Of(Node("new.py")) == Changes.Kind.Added
+                  && changes.Of(Node("src")) == Changes.Kind.Modified
+                  && changes.Committed(Path.Combine(repo, "src", "new.py"), isNew: false)?.Length == 0
+                  && ed.ChangeMark(0) == 0 && ed.ChangeMark(1) == LineDiff.Modified && ed.ChangeMark(3) == LineDiff.Added,
+                "git changes: the tree marks changed and new files, the editor the lines changed since the commit");
+        }
+        else Check(true, "git changes: skipped (git unavailable)");
+
+        string plain = TempDir("changes-plain");
+        Put(plain, "old.txt", "old\n");
+        Put(plain, "quiet/same.txt", "same\n");
+        var since = new Changes();
+        var plainTree = new FileTree(plain);
+        Thread.Sleep(50);
+        Put(plain, "old.txt", "edited\n"); // an atomic save makes a new file under the old name: still modified
+        Put(plain, "fresh.txt", "new\n");
+        plainTree.RefreshDirs(new[] { plain });
+        since.Changed(new[] { Path.Combine(plain, "quiet") }, new[] { plain });
+        TreeNode P(string name) => plainTree.Roots[0].Children.First(c => c.Name == name);
+        Check(since.Of(P("old.txt")) == Changes.Kind.Modified && since.Of(P("fresh.txt")) == Changes.Kind.Added
+              && since.Of(P("quiet")) == Changes.Kind.Modified
+              && since.Committed(Path.Combine(plain, "old.txt"), isNew: false) == null
+              && since.Committed(Path.Combine(plain, "fresh.txt"), isNew: true)?.Length == 0
+              && plainTree.Find(Path.Combine(plain, "fresh.txt")) is { IsNew: true } && plainTree.Find(Path.Combine(plain, "old.txt")) is { IsNew: false },
+            "changes outside git: what changed or appeared since the start, new files against nothing");
     }
 
     private static void TestWatcher()

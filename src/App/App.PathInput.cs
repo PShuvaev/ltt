@@ -19,7 +19,7 @@ internal sealed partial class App
         _pathBaseDir = TargetDirectory();
         _pathInput.Append(initial.Length > 0 || purpose is not (PathPurpose.CreateFile or PathPurpose.CreateFolder)
             ? initial
-            : _pathBaseDir + Path.DirectorySeparatorChar);
+            : Tilde(_pathBaseDir) + Path.DirectorySeparatorChar);
         _mode = UiMode.PathInput;
         if (purpose == PathPurpose.GoTo) _screen.Invalidate(); // Ctrl+L also repaints a garbled screen
         UpdatePathCompletions();

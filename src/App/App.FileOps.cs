@@ -40,6 +40,7 @@ internal sealed partial class App
     {
         _liveSourceStale = true;
         FuzzySearch.InvalidateFileLists();
+        _changes.RefreshAll();
     }
 
     private void CreateFromInput(bool makeFolderRequested)
@@ -62,8 +63,9 @@ internal sealed partial class App
                 if (File.Exists(p)) { _status = $"A file with this name already exists: {p}"; return; }
                 bool existed = Directory.Exists(p);
                 Directory.CreateDirectory(p);
+                if (!existed) _changes.Created(p);
                 ShowInTree(p);
-                _status = existed ? $"Folder already exists: {p}" : $"Folder created: {p}";
+                _status = existed ? $"Folder already exists: {Tilde(p)}" : $"Folder created: {Tilde(p)}";
                 return;
             }
 
@@ -72,14 +74,15 @@ internal sealed partial class App
             {
                 ShowInTree(p);
                 TryOpen(p, 0);
-                _status = $"The file already existed — opened it: {p}";
+                _status = $"The file already existed — opened it: {Tilde(p)}";
                 return;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(p)!);
             using (new FileStream(p, FileMode.CreateNew, FileAccess.Write)) { }
+            _changes.Created(p);
             ShowInTree(p);
             TryOpen(p, 0);
-            _status = $"File created and opened: {p}";
+            _status = $"File created and opened: {Tilde(p)}";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -159,6 +162,8 @@ internal sealed partial class App
             bool synced = inSync?.Contains(tab.Editor) == true;
             if (Paths.Same(fp, oldPath)) tab.Editor.RenameTo(newPath, synced);
             else if (isDir && Paths.IsInside(fp, oldPath)) tab.Editor.RenameTo(newPath + fp[oldPath.Length..], synced);
+            else continue;
+            tab.Editor.SetBaseline(Baseline(tab.Editor.FilePath!));
         }
     }
 
@@ -252,6 +257,7 @@ internal sealed partial class App
         job.Cts.Dispose();
         var (what, p) = (job.What, job.Progress);
         bool moved = what.Cut && !Path.Exists(what.Path) && Path.Exists(job.To);
+        if (Path.Exists(job.To)) _changes.Created(job.To);
         if (moved)
         {
             _picked = null;
