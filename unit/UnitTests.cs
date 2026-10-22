@@ -25,12 +25,14 @@ internal static class UnitTests
         Environment.SetEnvironmentVariable("LTT_RECOVERY_DIR", TempDir("recovery"));
         var groups = new (string Name, Action Test)[]
         {
-            ("scoring", TestScoring), ("highlight", TestHighlight), ("input", TestInput),
+            ("scoring", TestScoring), ("highlight", TestHighlight), ("input", TestInput), ("key sweep", TestKeySweep),
             ("cells", TestCells), ("screen", TestScreen), ("round-trip", TestRoundTrip),
             ("save", TestSaveSafety), ("editing", TestEditing), ("undo", TestUndo),
+            ("edit vectors", TestEditVectors), ("edit walk", TestEditWalk),
             ("disk", TestDiskChanges), ("scrolling", TestScrolling), ("search", TestSearch), ("refine", TestSearchRefine),
             ("git search", TestGitSearch), ("tree", TestTree), ("git tree", TestGitTree), ("sizes", TestSizes),
-            ("copy/move", TestCopyMove), ("changes", TestChanges), ("watcher", TestWatcher), ("misc", TestMisc),
+            ("copy/move", TestCopyMove), ("changes", TestChanges), ("diff", TestDiff), ("watcher", TestWatcher),
+            ("misc", TestMisc),
         };
         try
         {
@@ -1231,6 +1233,277 @@ internal static class UnitTests
         Check(WaitDue(watcher) != null && !watcher.TryConsumeDue(out _), "watch: a due batch is handed out exactly once");
         watcher.SyncRoots(Array.Empty<string>());
         Check(watcher.WatchedRoots.Count == 0, "watch: removing roots stops the watching");
+    }
+
+    /// <summary>The events parsed from these bytes, as if they came from the terminal.</summary>
+    private static List<InputEvent> Parse(byte[] bytes)
+    {
+        using var input = new RawTerminalInput(bytes);
+        var list = new List<InputEvent>();
+        while (input.TryRead(0, out var ev) && ev != null) list.Add(ev);
+        return list;
+    }
+
+    private static void TestKeySweep()
+    {
+        // Every cursor and editing key with every modifier code, as xterm sends them (dte's generated
+        // sweep): the key and its modifiers, a byte after it left for the next event, and no strict
+        // prefix of the sequence that makes an event of its own.
+        var finals = new (char Final, ConsoleKey Key)[]
+        {
+            ('A', ConsoleKey.UpArrow), ('B', ConsoleKey.DownArrow), ('C', ConsoleKey.RightArrow),
+            ('D', ConsoleKey.LeftArrow), ('H', ConsoleKey.Home), ('F', ConsoleKey.End),
+        };
+        var tildes = new (int Code, ConsoleKey Key)[]
+        {
+            (2, ConsoleKey.Insert), (3, ConsoleKey.Delete), (5, ConsoleKey.PageUp), (6, ConsoleKey.PageDown),
+            (15, ConsoleKey.F5), (17, ConsoleKey.F6), (18, ConsoleKey.F7), (19, ConsoleKey.F8), (20, ConsoleKey.F9),
+            (21, ConsoleKey.F10), (23, ConsoleKey.F11), (24, ConsoleKey.F12),
+        };
+        var wrong = new List<string>();
+        void Probe(string seq, ConsoleKey key, int m)
+        {
+            int bits = m - 1;
+            bool shift = (bits & 1) != 0, alt = (bits & 2) != 0, ctrl = (bits & 4) != 0;
+            if ((bits & 8) != 0) // Cmd/Super+arrows move like on a Mac
+                (key, ctrl) = key switch
+                {
+                    ConsoleKey.LeftArrow => (ConsoleKey.Home, false), ConsoleKey.RightArrow => (ConsoleKey.End, false),
+                    ConsoleKey.UpArrow => (ConsoleKey.Home, true), ConsoleKey.DownArrow => (ConsoleKey.End, true),
+                    _ => (key, ctrl),
+                };
+            bool ok = Parse(Encoding.ASCII.GetBytes(seq + "x")) is [KeyInput { Key: var k }, KeyInput { Key.KeyChar: 'x' }]
+                      && k.Key == key && k.Modifiers.HasFlag(ConsoleModifiers.Shift) == shift
+                      && k.Modifiers.HasFlag(ConsoleModifiers.Alt) == alt && k.Modifiers.HasFlag(ConsoleModifiers.Control) == ctrl;
+            for (int len = 2; ok && len < seq.Length; len++) ok = Parse(Encoding.ASCII.GetBytes(seq[..len])).Count == 0;
+            if (!ok) wrong.Add(seq.Replace("\x1b", "ESC"));
+        }
+        for (int m = 1; m <= 16; m++)
+        {
+            foreach (var (final, key) in finals) Probe($"\x1b[1;{m}{final}", key, m);
+            foreach (var (code, key) in tildes) Probe($"\x1b[{code};{m}~", key, m);
+        }
+        Check(wrong.Count == 0, "key sweep: 18 keys x 16 modifier codes come out whole, with nothing typed from a prefix"
+                                + (wrong.Count > 0 ? $" — wrong: {string.Join(", ", wrong.Take(8))}" : ""));
+    }
+
+    private static void TestEditVectors()
+    {
+        // VS Code's edit vectors, by way of micro (EditVectors.cs). The edits of a case are made last
+        // first, so the earlier positions still hold; undo takes them all back, redo brings them again.
+        string dir = TempDir("vectors");
+        var failed = new List<string>();
+        for (int n = 0; n < EditVectors.All.Length; n++)
+        {
+            var (name, before, edits, after) = EditVectors.All[n];
+            var ed = Open(Put(dir, $"v{n}.txt", string.Join("\n", before)));
+            for (int k = edits.Length - 1; k >= 0; k--)
+            {
+                var (sl, sc, el, ec, text) = edits[k];
+                ed.SetCursor(sl, sc);
+                ed.SetAnchorHere();
+                ed.SetCursor(el, ec);
+                if (text.Length > 0) ed.InsertText(text);
+                else ed.DeleteSelection();
+            }
+            string was = string.Join("\n", before), want = string.Join("\n", after);
+            bool ok = Text(ed) == want && ed.Dirty == (want != was);
+            while (ok && ed.CanUndo) ed.Undo();
+            ok = ok && Text(ed) == was && !ed.Dirty;
+            while (ok && ed.CanRedo) ed.Redo();
+            if (!ok || Text(ed) != want) failed.Add(name);
+        }
+        Check(failed.Count == 0, $"edit vectors: VS Code's {EditVectors.All.Length} cases come out right, undo and redo too"
+                                 + (failed.Count > 0 ? $" — failed: {string.Join(", ", failed)}" : ""));
+    }
+
+    /// <summary>The cursor as an index into the text with its lines joined by \n.</summary>
+    private static int Offset(TextEditor ed)
+    {
+        int o = ed.Cx;
+        for (int i = 0; i < ed.Cy; i++) o += ed.LineText(i).Length + 1;
+        return o;
+    }
+
+    private static void TestEditWalk()
+    {
+        // Seeded random edits checked against a plain model of the text after every step; then the
+        // whole history undone and redone (ideas from micro's buffer tests and its mixed alphabet, and
+        // from Kakoune's and dte's undo fuzzing). A .c file, so the block-comment cache is walked too.
+        string[] pieces = { " ", "a", "b", "e", "\u00e4", "\u0645", "\U0001F4DA", "\t", "e\u0301", "/*", "*/", "\n", "  " };
+        var rnd = new Random(2026);
+        string dir = TempDir("walk");
+        string Random(int n)
+        {
+            var sb = new StringBuilder();
+            for (int i = 0; i < n; i++) sb.Append(pieces[rnd.Next(pieces.Length)]);
+            return sb.ToString();
+        }
+        static string Show(string s) => "\"" + s.Replace("\n", "\\n").Replace("\t", "\\t") + "\"";
+        static (int Start, string Line) LineAt(string text, int at)
+        {
+            int start = at == 0 ? 0 : text.LastIndexOf('\n', at - 1) + 1, end = text.IndexOf('\n', at);
+            return (start, text[start..(end < 0 ? text.Length : end)]);
+        }
+        string? problem = null;
+        int steps = 0;
+        for (int run = 0; run < 30 && problem == null; run++)
+        {
+            var ed = Open(Put(dir, $"walk{run}.c", Random(rnd.Next(40))), 40, 10);
+            string opened = Text(ed), model = opened;
+            for (int step = 0; step < 120 && problem == null; step++, steps++)
+            {
+                ed.ClearSelection(); // undo brings back the selection of its step
+                int line = rnd.Next(ed.LineCount);
+                ed.SetCursor(line, rnd.Next(ed.LineText(line).Length + 1));
+                int lo = Offset(ed), hi = lo;
+                if (rnd.Next(4) == 0)
+                {
+                    ed.SetAnchorHere();
+                    int l2 = rnd.Next(ed.LineCount);
+                    ed.SetCursor(l2, rnd.Next(ed.LineText(l2).Length + 1));
+                    (lo, hi) = (Math.Min(lo, Offset(ed)), Math.Max(lo, Offset(ed)));
+                }
+                string cut = model[..lo] + model[hi..]; // the text once a selection is gone
+                string? want = null;
+                int at = lo;
+                string op;
+                switch (rnd.Next(7))
+                {
+                    case 0:
+                        char c = "x\u00e4\u0645*/ "[rnd.Next(6)];
+                        op = $"type {c}";
+                        ed.InsertChar(c);
+                        (want, at) = (cut.Insert(lo, c.ToString()), lo + 1);
+                        break;
+                    case 1:
+                        string t = Random(rnd.Next(1, 6));
+                        op = "paste";
+                        ed.InsertText(t);
+                        (want, at) = (cut.Insert(lo, t), lo + t.Length);
+                        break;
+                    case 2:
+                        op = "backspace";
+                        ed.Backspace();
+                        if (hi > lo || lo == 0) (want, at) = (cut, lo);
+                        else if (model[lo - 1] == '\n') (want, at) = (model.Remove(lo - 1, 1), lo - 1);
+                        else
+                        {
+                            var (start, text) = LineAt(model, lo);
+                            int from = start + Cells.PrevBoundary(text, lo - start);
+                            (want, at) = (model.Remove(from, lo - from), from);
+                        }
+                        break;
+                    case 3:
+                        op = "delete";
+                        ed.Delete();
+                        if (hi > lo || lo == model.Length) want = cut;
+                        else if (model[lo] == '\n') want = model.Remove(lo, 1);
+                        else
+                        {
+                            var (start, text) = LineAt(model, lo);
+                            want = model.Remove(lo, start + Cells.NextBoundary(text, lo - start) - lo);
+                        }
+                        break;
+                    case 4:
+                        op = "enter";
+                        ed.InsertNewline();
+                        var (ls, lt) = LineAt(cut, lo);
+                        int indent = 0;
+                        while (indent < lo - ls && lt[indent] is ' ' or '\t') indent++;
+                        (want, at) = (cut.Insert(lo, "\n" + lt[..indent]), lo + 1 + indent);
+                        break;
+                    case 5:
+                        op = "delete a word";
+                        ed.DeleteWordBackward(); // its word rules have tests of their own: no model here
+                        break;
+                    default:
+                        op = "undo/redo";
+                        if (rnd.Next(2) == 0) ed.Undo();
+                        else ed.Redo();
+                        break;
+                }
+                if (want != null && (Text(ed) != want || Offset(ed) != at))
+                    problem = $"run {run} step {step} ({op}) on {Show(model)} at {lo}..{hi}: {Show(Text(ed))} at {Offset(ed)}, wanted {Show(want)} at {at}";
+                else if (Cells.FloorBoundary(ed.LineText(ed.Cy), ed.Cx) != ed.Cx)
+                    problem = $"run {run} step {step} ({op}): the cursor sits inside a character";
+                model = Text(ed);
+                ed.BlockCommentStateBefore(ed.LineCount - 1); // fill the cache, for the edits to cut back
+            }
+            if (problem != null) break;
+            string final = model;
+            var fresh = Open(Put(dir, $"walk{run}-fresh.c", final), 40, 10);
+            if (Enumerable.Range(0, ed.LineCount).Any(i => ed.BlockCommentStateBefore(i) != fresh.BlockCommentStateBefore(i)))
+                problem = $"run {run}: the block-comment cache disagrees with a fresh read";
+            int undone = 0;
+            for (; ed.CanUndo; undone++) ed.Undo();
+            if (problem == null && (Text(ed) != opened || ed.Dirty || Enumerable.Range(0, ed.LineCount).Any(i => ed.ChangeMark(i) != 0)))
+                problem = $"run {run}: undoing everything does not give back the text as opened, clean and unmarked";
+            for (int k = 0; k < undone; k++) ed.Redo(); // as many as were undone: the walk may end on an undo
+            if (problem == null && Text(ed) != final) problem = $"run {run}: redoing everything does not give the final text";
+        }
+        Check(problem == null, $"edit walk: {steps} random edits match a plain model; undo and redo the whole history"
+                               + (problem != null ? $" — {problem}" : ""));
+    }
+
+    private static void TestDiff()
+    {
+        // LineDiff against an LCS oracle on small texts (Kakoune's diff cases among them: a line per
+        // character), and over a long changed middle, which takes the walk instead of one exact diff.
+        static string[] Chars(string s) => s.Select(c => c.ToString()).ToArray();
+        static int Lcs(string[] a, string[] b)
+        {
+            var dp = new int[a.Length + 1, b.Length + 1];
+            for (int i = 1; i <= a.Length; i++)
+                for (int j = 1; j <= b.Length; j++)
+                    dp[i, j] = a[i - 1] == b[j - 1] ? dp[i - 1, j - 1] + 1 : Math.Max(dp[i - 1, j], dp[i, j - 1]);
+            return dp[a.Length, b.Length];
+        }
+        // The lines marked neither added nor modified: all of them, in order, are lines of `was`.
+        static bool Sound(string[] was, string[] now, byte[] marks, out int kept)
+        {
+            kept = 0;
+            int p = 0;
+            for (int j = 0; j < now.Length; j++)
+            {
+                if ((marks[j] & (LineDiff.Added | LineDiff.Modified)) != 0) continue;
+                kept++;
+                while (p < was.Length && was[p] != now[j]) p++;
+                if (p++ == was.Length) return false;
+            }
+            return true;
+        }
+        bool Exact(string a, string b) =>
+            Sound(Chars(a), Chars(b), LineDiff.Marks(Chars(a), Chars(b)), out int kept) && kept == Lcs(Chars(a), Chars(b));
+        Check(Exact("a?", "!") && Exact("abcde", "cd") && Exact("abcd", "cdef")
+              && Exact("mais que fais la police", "mais ou va la police") && Exact("abcdefghijk", "1cdef2hij34"),
+            "diff: Kakoune's cases keep as many lines as the longest common subsequence");
+        Check(LineDiff.Marks(Chars("abcde"), Chars("cd")).SequenceEqual(new byte[] { LineDiff.RemovedAbove, LineDiff.RemovedBelow })
+              && LineDiff.Marks(Chars("abcd"), Chars("cdef")).SequenceEqual(new byte[] { LineDiff.RemovedAbove, 0, LineDiff.Added, LineDiff.Added }),
+            "diff: lines gone before the first kept one mark it from above, gone after the last from below");
+        var rnd = new Random(77);
+        bool all = true;
+        for (int n = 0; n < 2000 && all; n++)
+        {
+            string a = new(Enumerable.Range(0, rnd.Next(13)).Select(_ => "abc"[rnd.Next(3)]).ToArray());
+            string b = new(Enumerable.Range(0, rnd.Next(1, 13)).Select(_ => "abc"[rnd.Next(3)]).ToArray()); // an editor has a line
+            all = Exact(a, b);
+        }
+        Check(all, "diff: 2,000 random small texts: the kept lines are a common subsequence, and a longest one");
+
+        // 6,000 different lines, changed in 50 places at least 10 lines apart, one line added and one removed.
+        var was = Enumerable.Range(0, 6000).Select(i => $"line {i}").ToArray();
+        var now = new List<string>(was);
+        var want = new List<byte>(new byte[6000]);
+        for (int k = 5; k < 6000; k += 120) { now[k] += " changed"; want[k] = LineDiff.Modified; }
+        now.RemoveAt(4500); want.RemoveAt(4500); want[4499] |= LineDiff.RemovedBelow;
+        now.Insert(1500, "a new line"); want.Insert(1500, LineDiff.Added);
+        var marks = LineDiff.Marks(was.ToArray(), now);
+        Check(marks.SequenceEqual(want),
+            "diff: a long middle changed in 50 places, a line added and one removed: exactly those marks");
+        var shuffled = was.OrderBy(_ => rnd.Next()).ToArray();
+        Check(Sound(was.ToArray(), shuffled, LineDiff.Marks(was.ToArray(), shuffled), out _),
+            "diff: a long text shuffled: what is kept is still in order in the old text");
     }
 
     private static void TestMisc()

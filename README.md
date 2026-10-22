@@ -47,7 +47,7 @@ Once a bug is fixed its test fails as XPASS — then drop the mark.
 | `harness/workspace.py` | `Workspace`: files, git repositories, HOME, recovery folder, fake clipboard |
 | `harness/build.py` | find the checkout, build it, cache big fixture data |
 | `cases/test_*.py` | the functional tests, one file per area; `cases/*_helpers.py` — helpers of an area |
-| `unit/` | the unit tests: `UnitTests.cs`, built together with ltt's sources by `unit.csproj` |
+| `unit/` | the unit tests: `UnitTests.cs`, built together with ltt's sources by `unit.csproj`; `EditVectors.cs` — VS Code's edit vectors by way of micro (MIT, notice inside) |
 
 ## What is covered
 
