@@ -15,6 +15,7 @@ import pytest
 from harness import keys as K
 from perf_helpers import (MILLION, PLAIN, answer, big_repo, first_frame, million_js, million_line, million_log,
                           minified_js, quickest_start, rss_mb, runs, secs, sent, tree)
+from vim_helpers import with_vim
 
 pytestmark = pytest.mark.perf
 
@@ -209,6 +210,25 @@ def test_typing_at_the_end_of_a_million_lines(ltt):
     app.press("ctrl+end")
     t = best_of(app, "x", typed_one_more)
     assert t < secs(0.1), f"best key answered after {t:.3f} s"  # ~5 ms
+
+
+def test_first_frame_with_a_million_line_file_does_not_wait_for_vim(ltt, ws):
+    with_vim(ws, syntax=False)
+    t, app = quickest_start(ltt, million_js(), env=PLAIN, limit=secs(3.0))
+    assert first_frame(app).editor_lines[0] == million_line(1)
+    assert t < secs(3.0), f"first frame after {t:.3f} s"  # ~0.3 s, as without vim
+
+
+def test_keys_at_the_end_of_a_million_lines_answer_while_vim_works(ltt, ws):
+    # vim takes seconds over a million lines of JavaScript (its syntax is read from the top); ltt does not wait
+    with_vim(ws, syntax=False)
+    app = million_session(ltt)
+    t, _ = answer(app, "ctrl+end", at_last_line)
+    assert t < secs(1.5), f"Ctrl+End answered after {t:.3f} s"
+    t = best_of(app, "x", typed_one_more)
+    assert t < secs(0.1), f"best key answered after {t:.3f} s"  # ~5 ms
+    t, _ = answer(app, "ctrl+home", lambda s: s.pos is not None and s.pos[0] == 1)
+    assert t < secs(0.5), f"Ctrl+Home answered after {t:.3f} s"
 
 
 def test_undo_at_the_end_of_a_million_lines_keeps_the_comment_state(ltt):
