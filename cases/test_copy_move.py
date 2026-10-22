@@ -1,6 +1,7 @@
 """Copying and moving files and folders in the tree: Ctrl+C / Ctrl+X pick an entry up, Ctrl+V pastes it."""
 import base64
 import os
+import stat
 import time
 
 import pytest
@@ -1178,3 +1179,64 @@ def test_folder_moved_across_disks_with_an_unreadable_file_stays(ws, other_disk,
         assert app.quit() == 0
     finally:
         os.chmod(secret, 0o644)
+
+
+
+def _mode(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a copied folder gets the default mode (0755), not its own: a private "
+                                       "0700 folder is opened to everyone")
+@pytest.mark.parametrize("mode", [0o700, 0o750, 0o555], ids=["0700", "0750", "0555"])
+def test_a_copied_folder_keeps_its_mode(ltt, ws, mode):  # Emacs's files-tests: copy-directory
+    ws.write("proj/a/private/secret.txt", "s")
+    os.chmod(ws.path("proj/a/private/secret.txt"), 0o600)
+    os.chmod(ws.path("proj/a/private"), mode)
+    ws.mkdir("proj/b")
+    try:
+        app = start(ltt, ws, "proj")
+        select(app, "proj/a/private")
+        app.press("ctrl+c")
+        select(app, "proj/b")
+        app.press("ctrl+v")
+        status_is(app, "Copied private/ into b/ (1 files).")
+        assert _mode(ws.path("proj/b/private")) == mode
+        assert _mode(ws.path("proj/b/private/secret.txt")) == 0o600
+    finally:
+        for p in ("proj/a/private", "proj/b/private"):
+            if os.path.isdir(ws.path(p)):
+                os.chmod(ws.path(p), 0o755)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a folder moved to another disk gets the default mode (0755), "
+                                       "not its own")
+def test_a_folder_moved_to_another_disk_keeps_its_mode(ws, other_disk, ltt):  # Emacs's files-tests
+    ws.write("proj/a/private/secret.txt", "s")
+    os.chmod(ws.path("proj/a/private"), 0o700)
+    app = ltt(ws.path("proj"), other_disk, cols=WIDE)
+    select(app, "proj/a/private")
+    app.press("ctrl+x")
+    select(app, "C")
+    app.press("ctrl+v")
+    s = app.wait(lambda s: s.status.startswith(("Moved", "Move error", "Copied")), what="the move's outcome")
+    assert s.status == "Moved private/ into C/."
+    assert _mode(os.path.join(other_disk, "private")) == 0o700
+    assert app.quit() == 0
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a link whose target is not UTF-8 is copied with U+FFFD in its target")
+def test_a_link_whose_target_is_not_utf8_is_copied_byte_for_byte(ltt, ws):  # Emacs's files-tests: odd names
+    ws.mkdir("proj/a")
+    ws.mkdir("proj/b")
+    try:
+        os.symlink(b"caf\xe9.txt", os.fsencode(ws.path("proj/a/link")))
+    except OSError:
+        pytest.skip("this file system takes no such link")
+    app = start(ltt, ws, "proj")
+    select(app, "proj/a")
+    app.press("ctrl+c")
+    select(app, "proj/b")
+    app.press("ctrl+v")
+    status_is(app, "Copied a/ into b/ (1 files).")
+    assert os.readlink(os.fsencode(ws.path("proj/b/a/link"))) == b"caf\xe9.txt"

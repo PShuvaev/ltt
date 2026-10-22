@@ -313,3 +313,15 @@ def test_yaml_hash_inside_a_value_is_not_a_comment(ltt, ws):  # Kakoune's yaml.k
     app = open_text(ltt, ws, "url: http://x/#top\nk: v # c\n", name="a.yaml")
     s = app.snap()
     assert fg(s, "http://x/#top") == "Gray" and fg(s, "# c", line=2) == "DarkGreen"
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: '/*' inside a JS regex literal or a multi-line template literal "
+                                       "opens a block comment that runs to the end of the file")
+@pytest.mark.parametrize("text, line", [
+    ("const re = /\\/*$/;\nlet x = 1;\n", 2),
+    ("const help = `\nusage: lint src/*.js\n`;\nlet x = 1;\n", 4),
+], ids=["regex", "template"])
+def test_slash_star_in_a_js_regex_or_template_opens_no_comment(ltt, ws, text, line):  # Textadept's lexer tests
+    app = open_text(ltt, ws, text, name="a.js")
+    assert fg(app.snap(), "let", line=line) == "Cyan"

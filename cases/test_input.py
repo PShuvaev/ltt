@@ -407,3 +407,62 @@ def test_a_huge_terminal_reply_is_not_typed(ltt, ws):  # Neovim's 'does not cras
     app = open_file(ltt, ws)
     s = then_mark(app, b"\x1b]52;c;" + b"QUFB" * 20_000 + b"\x1b\\")
     assert s.editor_lines[0] == "|START"
+
+
+
+# ---------------------------------------------------------------- ideas from tvision's and turbo's terminal tests
+
+DEVICE_ATTRIBUTES = {
+    "VT100": b"\x1b[?1;2c", "VT102": b"\x1b[?6c", "VT220 with an empty field": b"\x1b[?62;c",
+    "xterm": b"\x1b[?64;1;2;6;9;15;18;21;22c", "WezTerm": b"\x1b[?65;4;6;18;22c",
+    "xterm secondary": b"\x1b[>0;276;0c", "iTerm2 secondary": b"\x1b[>0;95;0c",
+}
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: device-attribute replies are read as keys: most select text "
+                                       "(Shift+Right, a word, the rest of the line)")
+@pytest.mark.parametrize("reply", DEVICE_ATTRIBUTES.values(), ids=DEVICE_ATTRIBUTES.keys())
+def test_device_attribute_replies_are_not_keys(ltt, ws, reply):  # tvision's terminal tests
+    app = open_file(ltt, ws)
+    s = then_mark(app, reply)
+    assert s.editor_lines[0] == "|START" and s.pos == (1, 4, 2, 0)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a device-attribute reply in the tree opens the selected file")
+def test_a_device_attribute_reply_in_the_tree_opens_nothing(ltt, ws):  # tvision's terminal tests
+    ws.write("proj/a.txt", "x\n")
+    ws.write("proj/b.txt", "y\n")
+    app = ltt(ws.path("proj"))
+    before = app.press("down")
+    app.write(b"\x1b[?62;22c")
+    app.settle(frame=False)
+    s = app.snap()
+    assert s.mode == "TREE" and s.tabs == [] and s.tree_selected.name == before.tree_selected.name
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: an SS3 sequence cut short by the next key (ESC O, then ESC [B or CR) "
+                                       "types the rest of that key or loses it")
+@pytest.mark.parametrize("seq, lines", [
+    (b"\x1bO\x1b[B", ["START", "|second"]),
+    (b"\x1bO5\x1b[B", ["START", "|second"]),
+    (b"\x1bO\r", ["", "|START"]),
+], ids=["esc-o-then-down", "esc-o-5-then-down", "esc-o-then-enter"])
+def test_a_key_that_cuts_an_ss3_sequence_short_still_counts(ltt, ws, seq, lines):  # turbo's and tvision's input tests
+    app = open_file(ltt, ws)
+    s = then_mark(app, seq)
+    assert s.editor_lines[:2] == lines
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: Esc with CR or Tab in one burst (Alt+Enter, Alt+Tab of a legacy "
+                                       "terminal) does nothing, though the same keys from the kitty protocol act")
+@pytest.mark.parametrize("legacy, same_as", [(b"\x1b\r", kitty(13, "3")), (b"\x1b\t", kitty(9, "3"))],
+                         ids=["alt-enter", "alt-tab"])
+def test_esc_with_enter_or_tab_does_what_the_kitty_key_does(ltt, ws, legacy, same_as):  # tvision's terminal tests
+    assert effect(ltt, ws, legacy) == effect(ltt, ws, same_as)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+Backspace reported with code 8 (CSI 27;5;8~, CSI 8;5u), as "
+                                       "terminals whose Backspace sends ^H report it, does nothing")
+@pytest.mark.parametrize("seq", [b"\x1b[27;5;8~", b"\x1b[8;5u"], ids=["modifyOtherKeys", "csi-u"])
+def test_ctrl_backspace_with_code_8_deletes_a_word(ltt, ws, seq):  # tvision's terminal tests
+    assert effect(ltt, ws, seq) == effect(ltt, ws, "alt+backspace")
