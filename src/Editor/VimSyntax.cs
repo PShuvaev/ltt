@@ -4,12 +4,14 @@ using System.Diagnostics;
 using System.Text;
 
 /// <summary>
-/// Syntax colours from vim. When vim is on PATH, one vim runs hidden for the session — ex mode, no
-/// vimrc, plugins, modelines, swap file or viminfo — with a buffer per tab that mirrors the tab's
-/// text. ltt asks it which highlight group each visible character is in and draws the groups in
-/// its own colours (see Kinds). vim picks the language of a file itself, by the name and the first
-/// lines, with the syntax files of this machine (~/.vim/syntax as well). Without a vim that answers
-/// the text is plain. Not on Windows: vim answers through /dev/stdout.
+/// Syntax colours from vim. ltt has no highlighter of its own: vim has a mature one (hundreds of
+/// languages) and is on most Unix machines, so a second one would be redundant. When vim is on
+/// PATH, one vim runs hidden for the session — ex mode, no vimrc, plugins, modelines, swap file or
+/// viminfo — with a buffer per tab that mirrors the tab's text. ltt asks it which highlight group
+/// each visible character is in and draws the groups in its own colours (see Kinds). vim picks the
+/// language of a file itself, by the name and the first lines, with the syntax files of this
+/// machine (~/.vim/syntax as well). Without a vim that answers the text is plain. Not on Windows:
+/// vim answers through /dev/stdout.
 /// </summary>
 internal sealed class VimSyntax : IDisposable
 {

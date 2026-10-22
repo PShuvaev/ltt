@@ -88,6 +88,21 @@ terminal part.
   ones yellow, changed lines marked next to the line numbers (outside git:
   what changed since ltt started).
 
+## Colours from vim
+
+ltt has no syntax highlighter of its own: the colours come from vim. A
+highlighter worth having knows hundreds of languages, each with its own
+strings, comments, heredocs and regular expressions, and takes years of
+fixes to get their corners right. vim has one — over 700 languages and
+file formats, refined for decades — and vim is already there on macOS
+and on many Linux systems, one package away elsewhere. A second
+highlighter inside ltt would be redundant.
+
+So ltt keeps one vim running in the background — no vimrc, no plugins,
+no modelines — hands it a copy of each open file and asks only about the
+lines on screen; your own `~/.vim/syntax` files work too. ltt never
+waits for vim, and without it the text is simply plain.
+
 ## Keys
 
 > [!TIP]
@@ -148,8 +163,6 @@ terminal part.
   <kbd>Ctrl+C</kbd> never quits (that's <kbd>Ctrl+Q</kbd>).
 - Pasting in the tree never overwrites: a taken name gets a number
   (`notes 2.txt`). <kbd>Ctrl+C</kbd> on a tree entry also copies its path.
-- Syntax colours come from vim when it is installed: every language it
-  knows, your own `~/.vim/syntax` files too. Without vim the text is plain.
 - Files are saved exactly as they were read — encoding (UTF-8, UTF-16,
   UTF-32, Latin-1), BOM, line endings, the final newline and tabs stay as
   they were — in one atomic rename that keeps the file's permissions and owner.
