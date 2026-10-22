@@ -1,5 +1,6 @@
 """Editing: typing, Enter and auto-indent, Backspace/Delete and joining lines, Tab, word delete,
-and whole characters (emoji, flags, combining marks) — checked on screen and in the saved file."""
+Ctrl+D (duplicate lines), and whole characters (emoji, flags, combining marks) — checked on screen
+and in the saved file."""
 import pytest
 
 from editor_helpers import CLUSTERS, burst, line_col, mark_cursor, open_text, save
@@ -344,6 +345,65 @@ def test_word_delete_never_splits_an_emoji(ltt, ws):
     app = open_text(ltt, ws, "go 👀👀\n")
     app.press("end", "alt+backspace")
     assert save(app, ws) == "go \n"
+
+
+# ---------------------------------------------------------------- Ctrl+D: duplicate lines
+
+
+@pytest.mark.parametrize("keyboard", ["legacy", "kitty"])
+def test_ctrl_d_duplicates_the_line_and_the_cursor_moves_onto_the_copy(ltt, ws, keyboard):
+    app = open_text(ltt, ws, "one\ntwo\nthree\n", keyboard=keyboard)
+    burst(app, "down", "right", "right")
+    s = app.press("ctrl+d")
+    assert s.editor_lines == ["one", "two", "two", "three", ""]
+    assert line_col(s) == (3, 3) and s.title_dirty
+    assert mark_cursor(app, ws) == "one\ntwo\ntw|o\nthree\n"
+
+
+def test_ctrl_d_again_adds_another_copy(ltt, ws):
+    app = open_text(ltt, ws, "a\nb\n")
+    s = app.press("ctrl+d", "ctrl+d")
+    assert s.editor_lines == ["a", "a", "a", "b", ""] and line_col(s) == (3, 1)
+
+
+def test_ctrl_d_duplicates_the_lines_a_selection_touches_and_moves_it_onto_the_copy(ltt, ws):
+    app = open_text(ltt, ws, "a\nbb\ncc\nd\n")
+    burst(app, "down", "right", "shift+down")  # from b|b to c|c
+    s = app.press("ctrl+d")
+    assert s.editor_lines == ["a", "bb", "cc", "bb", "cc", "d", ""]
+    assert s.pos == (5, 7, 2, 3)  # the same three characters selected, in the copy
+    app.type("X")  # replaces them
+    assert save(app, ws) == "a\nbb\ncc\nbXc\nd\n"
+
+
+def test_a_selection_that_ends_at_a_line_start_leaves_that_line_out(ltt, ws):
+    app = open_text(ltt, ws, "a\nb\nc\n")
+    app.press("shift+down", "shift+down")  # "a" and "b" with their line breaks
+    s = app.press("ctrl+d")
+    assert s.editor_lines == ["a", "b", "a", "b", "c", ""]
+    assert s.pos == (5, 6, 1, 4)
+    app.type("X")
+    assert save(app, ws) == "a\nb\nXc\n"
+
+
+@pytest.mark.parametrize("text, keys, want", [
+    ("one\r\ntwo\r\n", [], "one\r\none\r\ntwo\r\n"),
+    ("one\ntwo", ["ctrl+end"], "one\ntwo\ntwo"),
+    ("one\ntwo\n", ["ctrl+a"], "one\ntwo\none\ntwo\n"),
+], ids=["crlf", "no-final-newline", "whole-text"])
+def test_ctrl_d_keeps_the_line_breaks_of_the_file(ltt, ws, text, keys, want):
+    app = open_text(ltt, ws, text)
+    app.press(*keys, "ctrl+d")
+    assert save(app, ws) == want
+
+
+@pytest.mark.parametrize("keys", [["esc"], ["ctrl+f"], ["ctrl+l"]], ids=["tree", "search", "go-to"])
+def test_ctrl_d_outside_the_editor_duplicates_nothing(ltt, ws, keys):
+    app = open_text(ltt, ws, "one\ntwo\n")
+    before = app.press(*keys)
+    s = app.press("ctrl+d")
+    assert (s.mode, s.status_line) == (before.mode, before.status_line)
+    assert s.editor_lines == ["one", "two", ""] and not s.title_dirty
 
 
 # ---------------------------------------------------------------- the cursor after an edit, tabs after a rename

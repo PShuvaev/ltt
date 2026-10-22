@@ -197,6 +197,21 @@ def test_deleting_a_selection_is_one_step_that_brings_it_back(ltt, ws):
     assert s.pos == (3, 4, 1, len("one\ntwo\n"))
 
 
+def test_each_ctrl_d_is_a_step_that_brings_the_selection_back(ltt, ws):
+    app = ltt(ws.write("a.txt", "a\nb\n"))
+    app.press("shift+down", "ctrl+d", "ctrl+d")  # "a" and its line break selected: two copies below
+    text_is(app, "a", "a", "a", "b", "")
+    app.press("ctrl+z")
+    s = text_is(app, "a", "a", "b", "")
+    assert s.pos == (3, 4, 1, 2)  # selected on the first copy, as before the second Ctrl+D
+    app.press("ctrl+z")
+    s = text_is(app, "a", "b", "")
+    assert s.pos == (2, 3, 1, 2) and not s.title_dirty
+    app.press("ctrl+y")
+    s = text_is(app, "a", "a", "b", "")
+    assert s.pos == (3, 4, 1, 0)  # redo: the cursor on the copy
+
+
 def test_saving_ends_the_undo_step(ltt, ws):  # D9: undo can stop at the saved text
     app = ltt(ws.write("a.txt", ""))
     app.type("abc")

@@ -677,6 +677,32 @@ internal static class UnitTests
         join.Backspace();
         Check(join.LineText(0) == "cafe\u0301 noir" && join.Cx == 5,
             "editing: a join that makes one character of two puts the cursor after it");
+
+        // Ctrl+D: the copy goes below, the cursor and the selection move onto it.
+        var dup = Open(Put(dir, "dup.c", "int a;\n/* b */\nend"), 40, 10);
+        var dupColours = new VimSyntax().Attach(dup); // never started: nothing here asks vim
+        Seed(dupColours, dup, "0k3n|0c|0n");
+        long dupMark = dup.LineShifts;
+        dup.SetCursor(0, 4);
+        dup.DuplicateLines();
+        Check(Text(dup) == "int a;\nint a;\n/* b */\nend" && (dup.Cy, dup.Cx) == (1, 4) && dup.Dirty,
+            "duplicate: Ctrl+D puts a copy of the line below it, the cursor onto the copy");
+        Check(dup.FollowLine(0, dupMark) == 0 && dup.FollowLine(1, dupMark) == 2 && Shown(dupColours, dup, 2) == "ccccccc",
+            "duplicate: the lines below move down, their colours with them");
+        dup.Undo();
+        Check(Text(dup) == "int a;\n/* b */\nend" && (dup.Cy, dup.Cx) == (0, 4) && !dup.Dirty, "duplicate: one undo takes the copy away");
+        dup.SetCursor(0, 2);
+        dup.SetAnchorHere();
+        dup.SetCursor(2, 0); // "t a;\n/* b */\n": up to the start of the last line
+        dup.DuplicateLines();
+        Check(Text(dup) == "int a;\n/* b */\nint a;\n/* b */\nend" && dup.SelectionRange() == (2, 2, 4, 0)
+              && dup.SelectedText() == "t a;\n/* b */\n",
+            "duplicate: the lines a selection touches, not one it ends at the start of; the selection moves onto the copy");
+        dup.ClearSelection();
+        dup.SetCursor(4, 1);
+        dup.DuplicateLines();
+        Check(Text(dup) == "int a;\n/* b */\nint a;\n/* b */\nend\nend" && dup.Cy == 5,
+            "duplicate: the last line, still without a line break at the end");
     }
 
     private static void TestUndo()
@@ -1458,7 +1484,7 @@ internal static class UnitTests
                 string? want = null;
                 int at = lo;
                 string op;
-                switch (rnd.Next(7))
+                switch (rnd.Next(8))
                 {
                     case 0:
                         char c = "x\u00e4\u0645*/ "[rnd.Next(6)];
@@ -1506,6 +1532,15 @@ internal static class UnitTests
                     case 5:
                         op = "delete a word";
                         ed.DeleteWordBackward(); // its word rules have tests of their own: no model here
+                        break;
+                    case 6:
+                        op = "duplicate";
+                        // The lines from lo's to hi's (not one a selection ends at the start of) go below, the cursor along.
+                        var (top, _) = LineAt(model, lo);
+                        var (last, lastLine) = LineAt(model, hi > lo && model[hi - 1] == '\n' ? hi - 1 : hi);
+                        int bottom = last + lastLine.Length, moved = Offset(ed) + bottom - top + 1;
+                        ed.DuplicateLines();
+                        (want, at) = (model.Insert(bottom, "\n" + model[top..bottom]), moved);
                         break;
                     default:
                         op = "undo/redo";

@@ -11,9 +11,9 @@ TREE_HELP = ("↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N fo
              "Ctrl+O add root · Ctrl+L go to")
 EDITOR_HELP = ("Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · "
                "Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+C/X/V clipboard · Ctrl+S save · "
-               "Ctrl+W close tab")
+               "Ctrl+W close tab · Ctrl+D duplicate line")
 RESULTS_HELP = "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
-WIDE = 230  # columns that fit the longest help line
+WIDE = 240  # columns that fit the longest help line
 
 
 def roots(s):

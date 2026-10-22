@@ -228,7 +228,7 @@ def test_dirty_close_ctrl_c_keeps_the_tab(ltt, ws):
     assert s.status == "Cancelled (Ctrl+C)." and s.tab_names == ["a.txt", "b.txt"] and s.tabs[0].dirty
 
 
-@pytest.mark.parametrize("key", ["enter", "x", "y", "space", "ctrl+w"])
+@pytest.mark.parametrize("key", ["enter", "x", "y", "space", "ctrl+w", "ctrl+d"])  # Ctrl+D duplicates lines: it never answers D
 def test_dirty_close_other_keys_keep_the_question(ltt, ws, key):
     app = dirty_a(ltt, ws)
     app.press("ctrl+w")

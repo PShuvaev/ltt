@@ -112,9 +112,9 @@ def test_ctrl_c_cancels_the_quit(ltt, ws):
     assert s.tabs[0].dirty and s.tabs[1].dirty
 
 
-@pytest.mark.parametrize("key", ["enter", "x", "q", "y", "space", "tab", "ctrl+q", "ctrl+w"])
+@pytest.mark.parametrize("key", ["enter", "x", "q", "y", "space", "tab", "ctrl+q", "ctrl+w", "ctrl+d"])
 def test_other_keys_keep_the_question(ltt, ws, key):
-    # no destructive default: only S, D and Esc answer
+    # no destructive default: only S, D and Esc answer (Ctrl+D, which duplicates lines, does not)
     app = two_dirty(ltt, ws)
     app.press("ctrl+q")
     s = app.press(key)
