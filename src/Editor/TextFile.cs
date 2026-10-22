@@ -1,7 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text;
 
-public enum TextEncoding { Utf8, Utf16LE, Utf16BE, Latin1 }
+public enum TextEncoding { Utf8, Utf16LE, Utf16BE, Latin1, Utf32LE, Utf32BE }
 
 /// <summary>How a file's text is stored on disk; saving writes it back the same way.</summary>
 public sealed record TextFormat(TextEncoding Encoding, bool Bom, string NewLine, bool MixedNewLines = false)
@@ -16,6 +16,8 @@ public sealed record TextFormat(TextEncoding Encoding, bool Bom, string NewLine,
         {
             TextEncoding.Latin1 => "Latin-1 (not valid UTF-8)",
             TextEncoding.Utf16LE => "UTF-16 LE",
+            TextEncoding.Utf32LE => "UTF-32 LE",
+            TextEncoding.Utf32BE => "UTF-32 BE",
             _ => "UTF-16 BE",
         });
         else if (Bom) parts.Add("UTF-8 with BOM");
@@ -61,7 +63,18 @@ internal static class TextFile
         using var reader = latin1
             ? new StreamReader(fs, Encoding.Latin1, detectEncodingFromByteOrderMarks: false)
             : new StreamReader(fs, DecoderFor(TextEncoding.Utf8), detectEncodingFromByteOrderMarks: true);
-        while (reader.ReadLine() is { } line) yield return line;
+        var split = new LineSplitter(); // the lines Read makes, so a hit's line number is the editor's
+        var lines = new List<string>();
+        var buf = new char[1 << 16];
+        int read;
+        while ((read = reader.Read(buf, 0, buf.Length)) > 0)
+        {
+            split.Feed(buf.AsSpan(0, read), lines);
+            foreach (var line in lines) yield return line;
+            lines.Clear();
+        }
+        split.Finish(lines);
+        foreach (var line in lines) yield return line;
     }
 
     /// <summary>Lines from bytes, decoded the way a file is read (a committed version of one, say).</summary>
@@ -73,10 +86,12 @@ internal static class TextFile
 
     private static (List<string> Lines, TextFormat Format) Decode(Stream fs)
     {
-        Span<byte> head = stackalloc byte[3];
-        int n = fs.ReadAtLeast(head, 3, throwOnEndOfStream: false);
+        Span<byte> head = stackalloc byte[4];
+        int n = fs.ReadAtLeast(head, 4, throwOnEndOfStream: false);
         var (enc, bomLen) =
             n >= 3 && head[0] == 0xEF && head[1] == 0xBB && head[2] == 0xBF ? (TextEncoding.Utf8, 3)
+            : n >= 4 && head[0] == 0xFF && head[1] == 0xFE && head[2] == 0 && head[3] == 0 ? (TextEncoding.Utf32LE, 4)
+            : n >= 4 && head[0] == 0 && head[1] == 0 && head[2] == 0xFE && head[3] == 0xFF ? (TextEncoding.Utf32BE, 4)
             : n >= 2 && head[0] == 0xFF && head[1] == 0xFE ? (TextEncoding.Utf16LE, 2)
             : n >= 2 && head[0] == 0xFE && head[1] == 0xFF ? (TextEncoding.Utf16BE, 2)
             : (TextEncoding.Utf8, 0);
@@ -98,6 +113,8 @@ internal static class TextFile
         TextEncoding.Utf8 => new UTF8Encoding(false, throwOnInvalidBytes: true),
         TextEncoding.Utf16LE => new UnicodeEncoding(bigEndian: false, byteOrderMark: false, throwOnInvalidBytes: true),
         TextEncoding.Utf16BE => new UnicodeEncoding(bigEndian: true, byteOrderMark: false, throwOnInvalidBytes: true),
+        TextEncoding.Utf32LE => new UTF32Encoding(bigEndian: false, byteOrderMark: false, throwOnInvalidCharacters: true),
+        TextEncoding.Utf32BE => new UTF32Encoding(bigEndian: true, byteOrderMark: false, throwOnInvalidCharacters: true),
         _ => Encoding.Latin1,
     };
 
@@ -106,6 +123,8 @@ internal static class TextFile
         TextEncoding.Utf8 => new UTF8Encoding(false),
         TextEncoding.Utf16LE => new UnicodeEncoding(bigEndian: false, byteOrderMark: false),
         TextEncoding.Utf16BE => new UnicodeEncoding(bigEndian: true, byteOrderMark: false),
+        TextEncoding.Utf32LE => new UTF32Encoding(bigEndian: false, byteOrderMark: false),
+        TextEncoding.Utf32BE => new UTF32Encoding(bigEndian: true, byteOrderMark: false),
         _ => Encoding.Latin1,
     };
 
@@ -114,52 +133,101 @@ internal static class TextFile
         TextEncoding.Utf8 => new byte[] { 0xEF, 0xBB, 0xBF },
         TextEncoding.Utf16LE => new byte[] { 0xFF, 0xFE },
         TextEncoding.Utf16BE => new byte[] { 0xFE, 0xFF },
+        TextEncoding.Utf32LE => new byte[] { 0xFF, 0xFE, 0, 0 },
+        TextEncoding.Utf32BE => new byte[] { 0, 0, 0xFE, 0xFF },
         _ => Array.Empty<byte>(),
     };
 
-    /// <summary>Decode and split on \n, \r\n and \r, counting each kind of break.</summary>
+    /// <summary>Decode and split into lines (see LineSplitter), counting each kind of break.</summary>
     private static (List<string>, TextFormat) ReadAs(Stream fs, TextEncoding enc, int bomLen)
     {
         fs.Position = bomLen;
         using var reader = new StreamReader(fs, DecoderFor(enc), detectEncodingFromByteOrderMarks: false,
             bufferSize: 1 << 16, leaveOpen: true);
         var lines = new List<string>();
-        var partial = new StringBuilder();
+        var split = new LineSplitter();
         var buf = new char[1 << 16];
-        int lf = 0, crlf = 0, cr = 0;
-        bool pendingCr = false; // a \r ended the last chunk: a \n may still follow
         int read;
         while ((read = reader.Read(buf, 0, buf.Length)) > 0)
         {
             var span = buf.AsSpan(0, read);
             if (enc is TextEncoding.Utf8 or TextEncoding.Latin1 && span.Contains('\0'))
                 throw new InvalidDataException("The file looks binary; editing is disabled.");
-            int i = 0;
-            if (pendingCr)
-            {
-                pendingCr = false;
-                if (span[0] == '\n') { crlf++; i = 1; }
-                else cr++;
-            }
-            while (i < read)
-            {
-                int k = span[i..].IndexOfAny('\r', '\n');
-                if (k < 0) { partial.Append(span[i..]); break; }
-                if (partial.Length == 0) lines.Add(new string(span.Slice(i, k)));
-                else { partial.Append(span.Slice(i, k)); lines.Add(partial.ToString()); partial.Clear(); }
-                int at = i + k;
-                if (span[at] == '\n') { lf++; i = at + 1; }
-                else if (at + 1 == read) { pendingCr = true; i = read; }
-                else if (span[at + 1] == '\n') { crlf++; i = at + 2; }
-                else { cr++; i = at + 1; }
-            }
+            split.Feed(span, lines);
         }
-        if (pendingCr) cr++;
-        lines.Add(partial.ToString()); // after the last break: "" when the file ends with one
+        split.Finish(lines);
 
+        var (lf, crlf, cr) = (split.Lf, split.CrLf, split.Cr);
         int kinds = (lf > 0 ? 1 : 0) + (crlf > 0 ? 1 : 0) + (cr > 0 ? 1 : 0);
         string newLine = crlf > lf && crlf >= cr ? "\r\n" : cr > lf && cr > crlf ? "\r" : "\n";
         return (lines, new TextFormat(enc, bomLen > 0, newLine, kinds > 1));
+    }
+
+    /// <summary>
+    /// Lines out of decoded text, a chunk at a time: broken at \n and \r\n, and at a lone \r only in
+    /// text with no \n at all (old Mac files) — elsewhere a lone \r is part of its line (a progress bar
+    /// redrawn in a log). Lines a lone \r ended wait until the first \n, or the end, tells which they are.
+    /// </summary>
+    private sealed class LineSplitter
+    {
+        public int Lf, CrLf, Cr;            // the breaks, by kind
+        private readonly StringBuilder _partial = new();
+        private List<string>? _held;        // ended by a lone \r while no \n has come yet
+        private bool _pendingCr;            // a \r ended the last chunk: a \n may still follow
+        private bool _sawLf;
+
+        public void Feed(ReadOnlySpan<char> s, List<string> lines)
+        {
+            int i = 0;
+            if (_pendingCr && s.Length > 0)
+            {
+                _pendingCr = false;
+                if (s[0] == '\n') { CrLf++; Emit(default, lines); i = 1; }
+                else LoneCr();
+            }
+            while (i < s.Length)
+            {
+                int k = s[i..].IndexOfAny('\r', '\n');
+                if (k < 0) { _partial.Append(s[i..]); return; }
+                int at = i + k;
+                if (s[at] == '\n') { Lf++; Emit(s[i..at], lines); i = at + 1; }
+                else if (at + 1 == s.Length) { _partial.Append(s[i..at]); _pendingCr = true; return; }
+                else if (s[at + 1] == '\n') { CrLf++; Emit(s[i..at], lines); i = at + 2; }
+                else { _partial.Append(s[i..at]); LoneCr(); i = at + 1; }
+            }
+        }
+
+        /// <summary>The end of the text: lines still held were lines after all; then the last one ("" after a break).</summary>
+        public void Finish(List<string> lines)
+        {
+            if (_pendingCr) { _pendingCr = false; LoneCr(); }
+            if (_held != null) { lines.AddRange(_held); Cr = _held.Count; _held = null; }
+            lines.Add(_partial.ToString());
+            _partial.Clear();
+        }
+
+        private void LoneCr()
+        {
+            if (_sawLf) _partial.Append('\r'); // text: this file breaks its lines with \n
+            else
+            {
+                (_held ??= new List<string>()).Add(_partial.ToString());
+                _partial.Clear();
+            }
+        }
+
+        private void Emit(ReadOnlySpan<char> tail, List<string> lines)
+        {
+            string line = _partial.Length == 0 ? new string(tail) : _partial.Append(tail).ToString();
+            _partial.Clear();
+            if (_held != null) // the first \n: the lone \r before it were text
+            {
+                line = string.Join('\r', _held) + '\r' + line;
+                _held = null;
+            }
+            _sawLf = true;
+            lines.Add(line);
+        }
     }
 
     /// <summary>
@@ -200,7 +268,13 @@ internal static class TextFile
         FileStream fs;
         try
         {
-            fs = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1 << 16);
+            var options = new FileStreamOptions
+            {
+                Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None, BufferSize = 1 << 16,
+            };
+            // An existing file's text stays its owner's until the copy takes the file's own mode.
+            if (kind != null) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+            fs = new FileStream(temp, options);
         }
         catch (UnauthorizedAccessException) when (File.Exists(target))
         {
@@ -218,6 +292,8 @@ internal static class TextFile
             }
             if (!OperatingSystem.IsWindows() && File.Exists(target))
             {
+                // The owner and the group first (a change of owner may clear set-id bits), then the mode.
+                if (kind is { } k && chown(temp, k.Uid, k.Gid) != 0) chown(temp, uint.MaxValue, k.Gid);
                 try { File.SetUnixFileMode(temp, File.GetUnixFileMode(target)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             }
@@ -231,15 +307,49 @@ internal static class TextFile
         }
     }
 
-    /// <summary>Overwrite the file itself. Not atomic: the new bytes are made in full before it is touched.</summary>
+    /// <summary>
+    /// Overwrite the file itself. Not atomic: the new bytes are made in full before it is touched, and
+    /// should the writing stop midway (a full disk), the old bytes go back over the part it reached.
+    /// </summary>
     private static void WriteInPlace(string target, IReadOnlyList<string> lines, TextFormat format, Encoding encoding)
     {
         var bytes = new MemoryStream();
         WriteTo(bytes, lines, format, encoding);
-        using var fs = new FileStream(target, FileMode.Open, FileAccess.Write, FileShare.Read);
-        fs.Write(bytes.GetBuffer(), 0, (int)bytes.Length);
-        fs.SetLength(bytes.Length);
-        fs.Flush(flushToDisk: true);
+        using var fs = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.Read, bufferSize: 0);
+        var old = new byte[fs.Length];
+        fs.ReadExactly(old);
+        const int Chunk = 1 << 16;
+        long done = 0;
+        try
+        {
+            var buf = bytes.GetBuffer();
+            for (long len = bytes.Length; done < len; done += Chunk)
+                RandomAccess.Write(fs.SafeFileHandle, buf.AsSpan((int)done, (int)Math.Min(Chunk, len - done)), done);
+            fs.SetLength(bytes.Length);
+            fs.Flush(flushToDisk: true);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) // EFBIG: ArgumentOutOfRange
+        {
+            if (!PutBack(fs, old, done + Chunk))
+                throw new IOException($"{e.Message} The file may be damaged: its old text could not be put back.", e);
+            throw;
+        }
+    }
+
+    /// <summary>The old bytes over the part a failed write may have reached; whether the file is as it was.</summary>
+    private static bool PutBack(FileStream fs, byte[] old, long reached)
+    {
+        try { RandomAccess.Write(fs.SafeFileHandle, old.AsSpan(0, (int)Math.Min(old.Length, reached)), 0); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { } // as far as it goes: checked below
+        try
+        {
+            if (fs.Length != old.Length) fs.SetLength(old.Length);
+            var now = new byte[old.Length];
+            for (int got = 0, n; got < now.Length; got += n)
+                if ((n = RandomAccess.Read(fs.SafeFileHandle, now.AsSpan(got), got)) == 0) return false;
+            return now.AsSpan().SequenceEqual(old);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or ArgumentException) { return false; }
     }
 
     private static void WriteTo(Stream stream, IReadOnlyList<string> lines, TextFormat format, Encoding encoding)
@@ -255,6 +365,9 @@ internal static class TextFile
 
     [DllImport("libc", SetLastError = true)]
     private static extern int access(string path, int mode);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int chown(string path, uint owner, uint group);
 
     private static bool IsWritable(string path) => OperatingSystem.IsWindows()
         ? (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0
@@ -272,20 +385,20 @@ internal static class TextFile
     private static extern int xstat(int version, string path, byte[] buf);
 
     /// <summary>
-    /// Whether path is a regular file, how many names it has, and which file it is
-    /// (the device and the inode); null when unknown. Links are followed.
+    /// Whether path is a regular file, how many names it has, which file it is (the device and the
+    /// inode), its owner and group, and when its inode last changed (ns); null when unknown. Links are followed.
     /// </summary>
-    internal static (bool Regular, long Links, long Dev, long Ino)? Stat(string path)
+    internal static (bool Regular, long Links, long Dev, long Ino, uint Uid, uint Gid, long ChangeNs)? Stat(string path)
     {
         var arch = RuntimeInformation.ProcessArchitecture;
         bool mac = OperatingSystem.IsMacOS(), linux = OperatingSystem.IsLinux();
-        // Byte offsets of st_mode and st_nlink, and the size of st_nlink. st_dev comes first
-        // (4 bytes on macOS, 8 on Linux) and st_ino sits at 8 everywhere.
-        var (mode, links, linkSize) =
-            mac ? (4, 6, 2)
-            : linux && arch == Architecture.X64 ? (24, 16, 8)
-            : linux && arch == Architecture.Arm64 ? (16, 20, 4)
-            : (-1, -1, 0);
+        // Byte offsets of st_mode and st_nlink, the size of st_nlink, st_uid (st_gid follows it) and
+        // st_ctim. st_dev comes first (4 bytes on macOS, 8 on Linux) and st_ino sits at 8 everywhere.
+        var (mode, links, linkSize, uid, ctime) =
+            mac ? (4, 6, 2, 16, 64)
+            : linux && arch == Architecture.X64 ? (24, 16, 8, 28, 104)
+            : linux && arch == Architecture.Arm64 ? (16, 20, 4, 24, 104)
+            : (-1, -1, 0, 0, 0);
         if (mode < 0) return null;
         var buf = new byte[256];
         int rc;
@@ -306,16 +419,24 @@ internal static class TextFile
             _ => BitConverter.ToInt64(buf, links),
         };
         long dev = mac ? BitConverter.ToInt32(buf, 0) : BitConverter.ToInt64(buf, 0);
-        return ((BitConverter.ToUInt16(buf, mode) & 0xF000) == 0x8000, count, dev, BitConverter.ToInt64(buf, 8));
+        long changeNs = BitConverter.ToInt64(buf, ctime) * 1_000_000_000 + BitConverter.ToInt64(buf, ctime + 8);
+        return ((BitConverter.ToUInt16(buf, mode) & 0xF000) == 0x8000, count, dev, BitConverter.ToInt64(buf, 8),
+            BitConverter.ToUInt32(buf, uid), BitConverter.ToUInt32(buf, uid + 4), changeNs);
     }
 
-    /// <summary>What identifies a version of the file on disk; null when it is missing.</summary>
-    public static (DateTime WriteUtc, long Length)? Stamp(string path)
+    /// <summary>
+    /// What identifies a version of the file on disk; null when it is missing. Besides the time and
+    /// the size, the inode and its change time: a rewrite that keeps the first two (cp -p, rsync -t,
+    /// a coarse clock) still moves these — and so does a mere chmod, so the text has the last word.
+    /// </summary>
+    public static (DateTime WriteUtc, long Length, long Ino, long ChangeNs)? Stamp(string path)
     {
         try
         {
             var fi = Followed(path);
-            return fi.Exists ? (fi.LastWriteTimeUtc, fi.Length) : null;
+            if (!fi.Exists) return null;
+            var st = Stat(path);
+            return (fi.LastWriteTimeUtc, fi.Length, st?.Ino ?? 0, st?.ChangeNs ?? 0);
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return null; }
     }

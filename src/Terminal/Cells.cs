@@ -3,8 +3,9 @@ using System.Globalization;
 /// <summary>
 /// How text occupies terminal cells: a tab runs to the next multiple of
 /// TabWidth, East Asian wide characters and emoji take two cells, combining
-/// marks and format characters take none. Control characters would be
-/// executed by the terminal, so they are drawn as visible stand-ins.
+/// marks and joiners take none. Control characters would be executed by the
+/// terminal, and characters that show nothing could hide in the text, so both
+/// are drawn as visible stand-ins of one cell.
 /// Columns in this class are cells; indexes are UTF-16 positions in a string.
 /// </summary>
 internal static class Cells
@@ -34,10 +35,21 @@ internal static class Cells
         0x1FA70, 0x1FAFF, 0x20000, 0x2FFFD, 0x30000, 0x3FFFD,
     };
 
+    /// <summary>
+    /// Characters that show nothing yet change what is shown: bidi controls (a bidi-aware terminal
+    /// reorders the line around them: "Trojan Source"), zero-width spaces and word joiners, a BOM inside
+    /// the text, the soft hyphen, line and paragraph separators. ZWJ, ZWNJ, variation selectors and
+    /// emoji tags are not among them: they join what they join.
+    /// </summary>
+    public static bool Hidden(int cp) => cp is 0xAD or 0x61C or 0x180E or 0x200B or 0x200E or 0x200F
+        or (>= 0x2028 and <= 0x202E) or (>= 0x2060 and <= 0x2064) or (>= 0x2066 and <= 0x206F) or 0xFEFF
+        or (>= 0xFFF9 and <= 0xFFFB);
+
     /// <summary>Cells a code point takes: 0, 1 or 2 (tabs are measured by the callers).</summary>
     public static int Width(int cp)
     {
         if (cp < 0x300) return 1; // ASCII and Latin-1; controls are drawn as one-cell stand-ins
+        if (Hidden(cp)) return 1; // drawn as a stand-in too
         if (cp is >= 0x1160 and <= 0x11FF) return 0; // Hangul medial/final jamo join the syllable
         var cat = CharUnicodeInfo.GetUnicodeCategory(cp);
         if (cat is UnicodeCategory.NonSpacingMark or UnicodeCategory.EnclosingMark or UnicodeCategory.Format)
@@ -124,12 +136,13 @@ internal static class Cells
         return s.Length;
     }
 
-    /// <summary>What the terminal is given for c: control characters become visible stand-ins.</summary>
+    /// <summary>What the terminal is given for c: control characters and hidden ones become visible stand-ins.</summary>
     public static char Visible(char c) => c switch
     {
         < ' ' => (char)(0x2400 + c), // ␀ … ␟ (control pictures)
         '\x7F' => '\u2421', // ␡
         >= '\x80' and <= '\x9F' => '\uFFFD',
+        _ when Hidden(c) => '\uFFFD',
         _ => c,
     };
 

@@ -32,7 +32,7 @@ for that loop.
 already keep open next to your agent, shows folders on the left and files
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
-dependencies: ~7.9k lines of C# in a 230 KB assembly (.NET 10).
+dependencies: ~8.3k lines of C# in a 230 KB assembly (.NET 10).
 
 It is a general tool, not only for codebases: notes, docs, configs, logs —
 any folder of text works the same way. Open several folders side by side,
@@ -149,8 +149,8 @@ terminal part.
 - Pasting in the tree never overwrites: a taken name gets a number
   (`notes 2.txt`). <kbd>Ctrl+C</kbd> on a tree entry also copies its path.
 - Files are saved exactly as they were read — encoding (UTF-8, UTF-16,
-  Latin-1), BOM, line endings, the final newline and tabs stay as they
-  were — in one atomic rename that keeps the file's permissions.
+  UTF-32, Latin-1), BOM, line endings, the final newline and tabs stay as
+  they were — in one atomic rename that keeps the file's permissions and owner.
 - The tree shows sizes, largest first; folders are counted in the
   background (`≥` while still counting).
 - In a git repository search covers the files git knows (tracked and

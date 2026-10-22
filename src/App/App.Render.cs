@@ -108,7 +108,7 @@ internal sealed partial class App
             int used = screen.Put(sx, y, line.AsSpan(i, runEnd - i),
                 sel ? ConsoleColor.White : Highlighter.ColorFor(tok.Kind),
                 sel ? ConsoleColor.DarkBlue : ConsoleColor.Black,
-                end - sx, out int consumed, tabOrigin: col, pad: false);
+                end - sx, out int consumed, tabOrigin: col, pad: false, joinBefore: sx > x);
             sx += used;
             col += used;
             lastSel = sel;
@@ -482,7 +482,8 @@ internal sealed partial class App
         int x = _screen.Put(0, _statusY, label + shown, ConsoleColor.White, ConsoleColor.DarkBlue, w, out _, pad: false);
         int cursorX = x;
         if (ghost.Length > 0 && x < w)
-            x += _screen.Put(x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w - x, out _, pad: false);
+            x += _screen.Put(x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w - x, out _, pad: false,
+                joinBefore: true); // the ghost goes on from the typed text
         if (suffix.Length > 0 && x < w)
             x += _screen.Put(x, _statusY, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w - x, out _, pad: false);
         if (x < w) WriteAt(x, _statusY, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - x);

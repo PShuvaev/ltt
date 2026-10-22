@@ -79,12 +79,13 @@ public static class FuzzySearch
 
         // The most compact window, tried from each occurrence of the first
         // character; characters spread wider than MaxGaps are noise, not a match.
+        // A try looks at no more than MaxGaps + token.Length characters, so even
+        // a long line full of the first character costs a bounded pass per start.
         int best = -1;
         char first = char.ToLowerInvariant(token[0]);
-        for (int s = 0, tries = 0; s < text.Length && tries < 32; s++)
+        for (int s = 0; s < text.Length; s++)
         {
             if (char.ToLowerInvariant(text[s]) != first) continue;
-            tries++;
             int k = 1, last = s, consecutive = 0, boundary = AtWordStart(text, s) ? 15 : 0;
             for (int si = s + 1; si < text.Length && k < token.Length && si - s - k <= MaxGaps; si++)
             {

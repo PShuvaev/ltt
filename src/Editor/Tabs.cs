@@ -15,7 +15,14 @@ internal sealed class TabManager
     public bool AnyDirty => Tabs.Any(t => t.Editor.Dirty);
     public int DirtyCount => Tabs.Count(t => t.Editor.Dirty);
 
-    public int IndexOfPath(string fullPath) => Tabs.FindIndex(t => Paths.Same(t.Editor.FilePath, fullPath));
+    /// <summary>The tab of a file, however its path is spelled (a symlinked folder on the way); -1 for none.</summary>
+    public int IndexOfPath(string fullPath)
+    {
+        int i = Tabs.FindIndex(t => Paths.Same(t.Editor.FilePath, fullPath));
+        if (i >= 0 || Tabs.Count == 0) return i;
+        string real = Paths.Real(fullPath);
+        return Tabs.FindIndex(t => t.Editor.FilePath is { } p && Paths.Same(Paths.Real(p), real));
+    }
 
     /// <summary>Add a tab at the end and make it active.</summary>
     public EditorTab Add(TextEditor editor)

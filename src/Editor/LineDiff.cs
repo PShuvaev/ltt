@@ -40,6 +40,34 @@ internal static class LineDiff
         return marks;
     }
 
+    /// <summary>
+    /// Where lines of `was` are in `now`, by the diff Marks makes: a kept line where it went; one in a
+    /// changed stretch at the same distance into what replaced it — or, past the end of that, at the
+    /// line that follows it now (as for a stretch that went entirely; now.Count when that is past the end).
+    /// </summary>
+    public static int[] Follow(string[] was, IReadOnlyList<string> now, params int[] lines)
+    {
+        var marks = Marks(was, now);
+        var kept = new List<(int Old, int New)>(); // the kept lines of now, matched in order to the lines of was they are
+        for (int j = 0, p = 0; j < now.Count; j++)
+        {
+            if ((marks[j] & (Added | Modified)) != 0) continue;
+            while (p < was.Length && !string.Equals(was[p], now[j], StringComparison.Ordinal)) p++;
+            if (p == was.Length) break;
+            kept.Add((p++, j));
+        }
+        var at = new int[lines.Length];
+        for (int q = 0; q < lines.Length; q++)
+        {
+            int line = lines[q], k = kept.FindLastIndex(e => e.Old <= line);
+            if (k >= 0 && kept[k].Old == line) { at[q] = kept[k].New; continue; }
+            var (o1, n1) = k >= 0 ? kept[k] : (-1, -1);
+            int n2 = k + 1 < kept.Count ? kept[k + 1].New : now.Count;
+            at[q] = line - o1 < n2 - n1 ? n1 + (line - o1) : n2;
+        }
+        return at;
+    }
+
     /// <summary>Marks for now[b0..b0+bn) against was[a0..a0+an): an exact diff, or — too costly — all changed.</summary>
     private static void MarkStretch(string[] was, int a0, int an, IReadOnlyList<string> now, int b0, int bn,
         byte[] marks, int maxEdits)
@@ -60,7 +88,7 @@ internal static class LineDiff
             if (j > j0)
                 for (int k = j0; k < j; k++) marks[b0 + k] = i > i0 ? Modified : Added;
             else if (b0 + j0 > 0) marks[b0 + j0 - 1] |= RemovedBelow;
-            else marks[0] |= RemovedAbove;
+            else if (marks.Length > 0) marks[0] |= RemovedAbove; // all gone: no line is left to mark
         }
     }
 

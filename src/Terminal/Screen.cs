@@ -62,11 +62,14 @@ internal sealed class Screen
     /// <summary>
     /// Put text at (x, y) within `width` cells: clipped there and, unless pad
     /// is false, padded with spaces to fill them. Tabs run to multiples of
-    /// Cells.TabWidth counted from tabOrigin cells before x. Returns the cells
-    /// the text took; consumed — how many of its characters fitted.
+    /// Cells.TabWidth counted from tabOrigin cells before x. A combining mark
+    /// joins the character before it; one at the start of the text has none,
+    /// unless the text goes on from a run drawn just before (joinBefore), and is
+    /// not put on whatever stands to its left. Returns the cells the text took;
+    /// consumed — how many of its characters fitted.
     /// </summary>
     public int Put(int x, int y, ReadOnlySpan<char> text, ConsoleColor fg, ConsoleColor bg, int width,
-        out int consumed, int tabOrigin = 0, bool pad = true)
+        out int consumed, int tabOrigin = 0, bool pad = true, bool joinBefore = false)
     {
         consumed = 0;
         if (y < 0 || y >= Height || x >= Width || width <= 0) return 0;
@@ -88,7 +91,7 @@ internal sealed class Screen
             int w = Cells.WidthAt(text, i, 0, out int len);
             if (w == 0)
             {
-                if (col > 0) AddMarks(col - 1, y, text.Slice(i, len));
+                if (col > x || (joinBefore && col > 0)) AddMarks(col - 1, y, text.Slice(i, len));
                 i += len;
                 continue;
             }
@@ -120,10 +123,15 @@ internal sealed class Screen
 
     private static Cell Blank(Cell c) => new() { Ch = ' ', Fg = c.Fg, Bg = c.Bg };
 
+    // A few marks stack on a character; Zalgo text puts thousands on one, which would only cost time
+    // on every frame and flood the terminal. A cell keeps this many UTF-16 units of them.
+    private const int MaxMarks = 16;
+
     private void AddMarks(int x, int y, ReadOnlySpan<char> marks)
     {
         ref var c = ref _cells[y * Width + x];
         if (c.Kind == 2 && x > 0) c = ref _cells[y * Width + x - 1];
+        if ((c.Marks?.Length ?? 0) + marks.Length > MaxMarks) return;
         c.Marks = c.Marks == null ? marks.ToString() : c.Marks + marks.ToString();
     }
 
@@ -188,20 +196,5 @@ internal sealed class Screen
         int n = Encoding.UTF8.GetBytes(_chars, 0, len, _bytes, 0);
         Stdout.Write(_bytes, 0, n);
         Stdout.Flush();
-    }
-
-    /// <summary>The text of a row (for tests).</summary>
-    internal string RowText(int y)
-    {
-        var sb = new StringBuilder();
-        for (int x = 0; x < Width; x++)
-        {
-            var c = _cells[y * Width + x];
-            if (c.Kind == 2) continue;
-            sb.Append(c.Ch);
-            if (c.Low != '\0') sb.Append(c.Low);
-            if (c.Marks != null) sb.Append(c.Marks);
-        }
-        return sb.ToString();
     }
 }

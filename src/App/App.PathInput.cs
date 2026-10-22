@@ -79,14 +79,15 @@ internal sealed partial class App
 
     /// <summary>
     /// "path", "path:line" or "path:line:column" (as compilers and agents print
-    /// them); a path that exists as typed wins over a suffix reading. Lines and
-    /// columns come back 0-based. null — nothing usable.
+    /// them, gcc and Go with a colon after); a path that exists as typed wins
+    /// over a suffix reading. Lines and columns come back 0-based. null — nothing usable.
     /// </summary>
     internal static (string Path, int Line, int Column)? ParseLocation(string text)
     {
         text = text.Trim();
         if (text.Length == 0) return null;
         if (File.Exists(text) || Directory.Exists(text)) return (text, 0, -1);
+        if (text.Length > 1 && text[^1] == ':') text = text[..^1]; // "file:12:5: error…"
         var parts = text.Split(':');
         // Trailing numeric fields; a Windows drive "C:" stays part of the path.
         int numeric = 0;
@@ -122,6 +123,7 @@ internal sealed partial class App
             if (inRoot == null) { _status = $"File not found: {loc.Path}"; return; }
             path = inRoot;
         }
+        path = _tree.InPanel(path);
         _tree.SelectPath(path);
         TryOpen(path, loc.Line, column: loc.Column);
     }
@@ -137,6 +139,7 @@ internal sealed partial class App
         string p = ResolveInputPath(loc.Path);
         if (File.Exists(p))
         {
+            p = _tree.InPanel(p);
             if (!_tree.RootPaths.Any(r => Paths.IsInside(p, r))) AddRootUi(Path.GetDirectoryName(p)!);
             _tree.SelectPath(p);
             TryOpen(p, loc.Line, column: loc.Column);

@@ -68,4 +68,26 @@ internal static class Paths
         catch (EntryPointNotFoundException) { return full; }
         return Path.GetDirectoryName(full) is { } parent ? Path.Combine(Real(parent), Path.GetFileName(full)) : full;
     }
+
+    /// <summary>Whether two paths name one file or folder, symlinks resolved.</summary>
+    public static bool SameReal(string a, string b) => Same(a, b) || Same(Real(a), Real(b));
+
+    /// <summary>
+    /// The path spelled from the first of the folders that holds it, though it
+    /// or they may be reached through a symlink (a linked folder; /tmp for
+    /// /private/tmp on macOS), so one file is one tab and one tree entry. Null
+    /// when none of them holds it.
+    /// </summary>
+    public static string? Within(string path, IReadOnlyList<string> folders)
+    {
+        if (folders.Any(f => IsSameOrInside(path, f))) return path;
+        string real = Real(path);
+        foreach (string f in folders)
+        {
+            string r = Real(f);
+            if (Same(real, r)) return f;
+            if (IsInside(real, r)) return Path.Combine(f, Path.GetRelativePath(r, real));
+        }
+        return null;
+    }
 }

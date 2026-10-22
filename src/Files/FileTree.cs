@@ -54,6 +54,9 @@ public sealed class FileTree
     private List<(TreeNode Parent, FolderSizer Sizer)> _unfinishedSizing = new();
 
     public IReadOnlyList<string> RootPaths => Roots.Select(r => r.FullPath).ToList();
+
+    /// <summary>The path as the panel spells it (see Paths.Within); as it is outside every root.</summary>
+    public string InPanel(string fullPath) => Paths.Within(fullPath, RootPaths) ?? fullPath;
     public List<TreeNode> Visible { get; private set; } = new();
     public int SelectedIndex { get; private set; }
     public int ScrollOffset { get; private set; }
@@ -325,7 +328,7 @@ public sealed class FileTree
     public bool AddRoot(string path)
     {
         string full = Paths.Normalize(path);
-        var existing = Roots.FirstOrDefault(r => Paths.Same(r.FullPath, full));
+        var existing = Roots.FirstOrDefault(r => Paths.SameReal(r.FullPath, full)); // a link to a root is that root
         if (existing != null)
         {
             SelectNode(existing);

@@ -47,7 +47,7 @@ public sealed class TextEditor
     public (int Line, int Col)? SelAnchor { get; private set; }
 
     /// <summary>The disk version the buffer was loaded from or last saved as (null — no file on disk).</summary>
-    public (DateTime WriteUtc, long Length)? DiskStamp { get; private set; }
+    public (DateTime WriteUtc, long Length, long Ino, long ChangeNs)? DiskStamp { get; private set; }
 
     /// <summary>The file changed on disk while this buffer had unsaved edits (they are kept).</summary>
     public bool ChangedOnDisk { get; set; }
@@ -157,7 +157,7 @@ public sealed class TextEditor
     /// <summary>A path whose file is gone (a recovered buffer): empty, marked missing on disk.</summary>
     public void OpenMissing(string path) => Load(Path.GetFullPath(path), new List<string> { "" }, TextFormat.Default, null);
 
-    private void Load(string full, List<string> lines, TextFormat format, (DateTime, long)? stamp)
+    private void Load(string full, List<string> lines, TextFormat format, (DateTime, long, long, long)? stamp)
     {
         BeginChange();
         _lines = lines;
@@ -272,12 +272,32 @@ public sealed class TextEditor
         if (FilePath == null) return DiskState.Same;
         var stamp = TextFile.Stamp(FilePath);
         if (stamp == null) return DiskState.Missing;
-        return stamp == DiskStamp ? DiskState.Same : DiskState.Changed;
+        if (stamp == DiskStamp) return DiskState.Same;
+        // Only the inode or its change time moved: a rewrite that kept the time and the size, or
+        // just a chmod or a new link. The text says which.
+        if (DiskStamp is { } known && (stamp.Value.WriteUtc, stamp.Value.Length) == (known.WriteUtc, known.Length)
+            && HoldsSavedText())
+        {
+            DiskStamp = stamp;
+            return DiskState.Same;
+        }
+        return DiskState.Changed;
+    }
+
+    /// <summary>Whether the file on disk holds the text this buffer was loaded from or last saved as.</summary>
+    private bool HoldsSavedText()
+    {
+        try
+        {
+            var (lines, format) = TextFile.Read(FilePath!);
+            return format == Format && lines.SequenceEqual(_savedContent, StringComparer.Ordinal);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException) { return false; }
     }
 
     /// <summary>
     /// Take the file's content from disk: the lines that differ are replaced as
-    /// one undo step; the cursor and the view stay where they were.
+    /// one undo step; the cursor and the view stay on the text they were on.
     /// </summary>
     public void Reload()
     {
@@ -289,8 +309,16 @@ public sealed class TextEditor
         int suf = 0;
         while (suf < lines.Count - pre && suf < _lines.Count - pre
                && lines[lines.Count - 1 - suf] == _lines[_lines.Count - 1 - suf]) suf++;
-        int oldEnd = _lines.Count - suf, delta = lines.Count - _lines.Count;
+        int oldEnd = _lines.Count - suf, newEnd = lines.Count - suf, delta = lines.Count - _lines.Count;
         var (cy, cx, sy) = (Cy, Cx, ScrollY);
+        // Lines above the changed block keep their numbers, lines below it shift; inside it (an agent's
+        // edit in several places at once) the diff of the block tells where the cursor's line went.
+        int[] middle = new[] { cy, sy }.Where(l => l >= pre && l < oldEnd).Select(l => l - pre).ToArray();
+        int[] followed = middle.Length == 0 ? middle
+            : LineDiff.Follow(_lines.GetRange(pre, oldEnd - pre).ToArray(), lines.GetRange(pre, newEnd - pre), middle);
+        int m = 0;
+        int Moved(int line) => line < pre ? line : line >= oldEnd ? line + delta : pre + followed[m++];
+        (cy, sy) = (Moved(cy), Moved(sy));
         SelAnchor = null;
         Step? step = null;
         if (pre < oldEnd || pre < lines.Count - suf)
@@ -306,11 +334,10 @@ public sealed class TextEditor
         DiskStamp = stamp;
         ChangedOnDisk = MissingOnDisk = false;
         Dirty = false;
-        // Lines below the changed block keep their place on screen.
-        Cy = Math.Clamp(cy >= oldEnd ? cy + delta : cy, 0, _lines.Count - 1);
-        Cx = Cells.FloorBoundary(_lines[Cy], cx);
+        Cy = Math.Clamp(cy, 0, _lines.Count - 1);
+        Cx = Cells.FloorBoundary(_lines[Cy], Math.Min(cx, _lines[Cy].Length));
         if (step != null) step.After = (Cy, Cx); // redo puts the cursor back here
-        ScrollY = Math.Clamp(sy >= oldEnd ? sy + delta : sy, 0, MaxScrollY);
+        ScrollY = Math.Clamp(sy, 0, MaxScrollY);
         _desiredCol = CursorColumn;
         EnsureCursorVisible();
     }

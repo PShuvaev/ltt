@@ -158,12 +158,13 @@ internal sealed class Changes
     public string[]? Committed(string path, bool isNew)
     {
         if (RepoFor(path) is not { } repo) return isNew || IsCreated(path) ? Array.Empty<string>() : null;
-        if (repo.Entries.GetValueOrDefault(path) == Kind.Added || InNewDir(repo, path) == Kind.Added)
+        if (Target(repo, path) is not { } file) return null;
+        if (repo.Entries.GetValueOrDefault(file) == Kind.Added || InNewDir(repo, file) == Kind.Added)
             return Array.Empty<string>();
         if (repo.Head.Length == 0 || TextFile.Stamp(path) is not { Length: <= MaxCommittedBytes }) return null;
-        string key = repo.Head + ":" + path;
+        string key = repo.Head + ":" + file;
         if (_committed.TryGetValue(key, out var cached)) return cached;
-        string rel = Path.GetRelativePath(repo.Root, path).Replace(Path.DirectorySeparatorChar, '/');
+        string rel = Path.GetRelativePath(repo.Root, file).Replace(Path.DirectorySeparatorChar, '/');
         string[]? text = null;
         if (Proc.RunBytes("git", "cat-file --batch", repo.Root, stdin: $"{repo.Head}:{rel}\n") is { } output
             && Blob(output) is { } blob)
@@ -177,6 +178,17 @@ internal sealed class Changes
 
     private Repo? RepoFor(string path) =>
         _repos.Where(r => Paths.IsSameOrInside(path, r.Root)).MaxBy(r => r.Root.Length);
+
+    /// <summary>
+    /// The file a path leads to, spelled from the repository's root as git lists
+    /// it: git keeps a symlink as the name of its target, so the text to compare
+    /// is the target's. Null when a link leads out of the repository.
+    /// </summary>
+    private static string? Target(Repo repo, string path)
+    {
+        string real = Paths.Real(path), root = Paths.Real(repo.Root);
+        return Paths.IsInside(real, root) ? Path.Combine(repo.Root, Path.GetRelativePath(root, real)) : null;
+    }
 
     private static Kind InNewDir(Repo repo, string path) =>
         repo.NewDirs.Any(d => Paths.IsInside(path, d)) ? Kind.Added : Kind.None;

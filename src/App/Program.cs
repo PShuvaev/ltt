@@ -16,10 +16,6 @@ internal static class Program
         Console.OutputEncoding = Encoding.UTF8;
         try { Console.InputEncoding = Encoding.UTF8; } catch (IOException) { }
 
-#if DEBUG
-        if (args.Contains("--self-test")) // checks without a terminal; Debug builds only
-            return SelfTest.Run();
-#endif
         // Arguments: any number of folders (left-panel roots) and files (opened as
         // tabs; `file:line` jumps to the line). A file inside a folder that is
         // already a root does not add its own folder as another root.
@@ -45,11 +41,12 @@ internal static class Program
         }
         var roots = new List<string>();
         foreach (var r in dirRoots)
-            if (!roots.Contains(r, Paths.Comparer)) roots.Add(r);
-        foreach (var (f, _) in files)
+            if (!roots.Any(x => Paths.SameReal(x, r))) roots.Add(r);
+        for (int i = 0; i < files.Count; i++)
         {
-            string dir = Path.GetDirectoryName(f)!;
-            if (!roots.Any(r => Paths.IsSameOrInside(dir, r))) roots.Add(dir);
+            // A file through a link to a root's folder is that root's file.
+            if (Paths.Within(files[i].Path, roots) is { } inRoot) files[i] = (inRoot, files[i].Line);
+            else roots.Add(Path.GetDirectoryName(files[i].Path)!);
         }
         if (roots.Count == 0) roots.Add(Paths.Normalize(Directory.GetCurrentDirectory()));
 
@@ -70,7 +67,7 @@ internal static class Program
 
         // A kill signal or a closed terminal must not take unsaved edits with it.
         var signals = new List<PosixSignalRegistration>();
-        foreach (var sig in new[] { PosixSignal.SIGTERM, PosixSignal.SIGHUP, PosixSignal.SIGINT })
+        foreach (var sig in new[] { PosixSignal.SIGTERM, PosixSignal.SIGHUP, PosixSignal.SIGINT, PosixSignal.SIGQUIT })
         {
             if (OperatingSystem.IsWindows() && sig == PosixSignal.SIGINT) continue;
             try { signals.Add(PosixSignalRegistration.Create(sig, OnSignal)); }
@@ -78,7 +75,16 @@ internal static class Program
         }
         // A resize that ends at the old size still needs a full repaint: the terminal may have dropped cells.
         if (!OperatingSystem.IsWindows())
+        {
             signals.Add(PosixSignalRegistration.Create(PosixSignal.SIGWINCH, _ => App.Resized = true));
+            // Back from a stop the runtime would put back the terminal settings it took at its start —
+            // raw already — and do it again at exit, after ltt's own restore. ltt sets its own instead.
+            signals.Add(PosixSignalRegistration.Create(PosixSignal.SIGCONT, ctx =>
+            {
+                ctx.Cancel = true;
+                App.Continued = true;
+            }));
+        }
 
         Exception? crash = null;
         TerminalModes.Enter(raw);
@@ -123,7 +129,10 @@ internal static class Program
         if (app != null)
         {
             ctx.Cancel = true;
-            int code = 128 + ctx.Signal switch { PosixSignal.SIGHUP => 1, PosixSignal.SIGINT => 2, _ => 15 };
+            int code = 128 + ctx.Signal switch
+            {
+                PosixSignal.SIGHUP => 1, PosixSignal.SIGINT => 2, PosixSignal.SIGQUIT => 3, _ => 15,
+            };
             if (app.RequestEmergencyExit($"signal {ctx.Signal}", code, waitMs: 2000)) return;
             // The UI thread did not answer in time: secure the edits from here.
             app.SaveRecovery();
@@ -151,11 +160,21 @@ internal static class TerminalModes
     {
         _raw = raw;
         if (OperatingSystem.IsWindows()) EnableVirtualTerminal();
-        // Kitty keyboard protocol, flags 1|4|8|16: disambiguate, report alternate
-        // (shifted/base-layout) keys, report all keys as CSI u, report associated
-        // text. Terminals without the protocol simply ignore this.
-        Write("\x1b[?1049h\x1b[?25l" + (raw ? "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>29u" : ""));
+        Write(Modes(raw));
         Interlocked.Exchange(ref _entered, 1);
+    }
+
+    // Kitty keyboard protocol, flags 1|4|8|16: disambiguate, report alternate
+    // (shifted/base-layout) keys, report all keys as CSI u, report associated
+    // text. Terminals without the protocol simply ignore this.
+    private static string Modes(bool raw) =>
+        "\x1b[?1049h\x1b[?25l" + (raw ? "\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>29u" : "");
+
+    /// <summary>The modes once more, back from a stop: whatever ran in the meantime may have reset them.</summary>
+    public static void Reenter()
+    {
+        // Pop first: kitty keeps a stack of flags, and Leave takes off one entry only.
+        if (Volatile.Read(ref _entered) == 1) Write((_raw ? "\x1b[<u" : "") + Modes(_raw));
     }
 
     public static void Leave()
@@ -221,6 +240,9 @@ internal sealed partial class App
     /// <summary>Set by SIGWINCH: repaint everything on the next tick.</summary>
     internal static volatile bool Resized;
 
+    /// <summary>Set by SIGCONT: the terminal settings and modes again, and everything repainted.</summary>
+    internal static volatile bool Continued;
+
     private readonly StringBuilder _searchQuery = new();
     private readonly StringBuilder _pathInput = new();
     private List<string> _pathCandidates = new();      // path completion candidates (full input lines)
@@ -279,7 +301,7 @@ internal sealed partial class App
     private DateTime _lastClickAt = DateTime.MinValue;
     private int _lastClickX = -1, _lastClickY = -1;
     private TreeNode? _lastClickedNode; // the tree entry under the last click (double-click check)
-    private bool _dragging; // a mouse drag selection is in progress
+    private TextEditor? _dragging; // the editor a mouse drag selection is in progress in
     private int _treeWheelNumerator; // see TreeWheelSteps
     private int _resultsWheelNumerator;
     private string? _titlePath; // the path shown in the title — a click copies it
@@ -344,6 +366,14 @@ internal sealed partial class App
                 if (Resized)
                 {
                     Resized = false;
+                    _screen.Invalidate();
+                    dirty = true;
+                }
+                if (Continued)
+                {
+                    Continued = false;
+                    input.Resume();
+                    TerminalModes.Reenter();
                     _screen.Invalidate();
                     dirty = true;
                 }
@@ -668,7 +698,7 @@ internal sealed partial class App
     /// </summary>
     private void TryOpen(string path, int lineZeroBased, bool activateOnly = false, int column = -1)
     {
-        string full = Path.GetFullPath(path);
+        string full = _tree.InPanel(Path.GetFullPath(path));
         int existing = _tabs.IndexOfPath(full);
         if (existing >= 0)
         {

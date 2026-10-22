@@ -9,6 +9,8 @@ using System.Text;
 internal static class Recovery
 {
     private const string Magic = "ltt-recovery 1";
+    // The same, for a path with a line break in it: % CR LF are written %25 %0D %0A, so it stays one line.
+    private const string MagicEscaped = "ltt-recovery 2";
 
     /// <summary>Where recovery files go (LTT_RECOVERY_DIR overrides it, e.g. for tests).</summary>
     public static string Dir => Environment.GetEnvironmentVariable("LTT_RECOVERY_DIR") is { Length: > 0 } custom
@@ -39,14 +41,17 @@ internal static class Recovery
                 try
                 {
                     if (!ed.Dirty || ed.FilePath is not { } path || ed.SnapshotLines() is not { } lines) continue;
-                    Directory.CreateDirectory(Dir);
+                    MakeDir();
                     string name = $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Session}-{++_sequence:D6}.txt";
                     string file = Path.Combine(Dir, name), temp = file + ".tmp";
-                    using (var fs = new FileStream(temp, FileMode.Create, FileAccess.Write))
+                    using (var fs = new FileStream(temp, Private(FileMode.Create)))
                     using (var w = new StreamWriter(fs, new UTF8Encoding(false)))
                     {
                         // The line count shows a file cut short for what it is.
-                        w.Write($"{Magic}\n{lines.Length}\n{path}\n");
+                        bool escaped = path.AsSpan().IndexOfAny('\n', '\r') >= 0;
+                        w.Write(escaped
+                            ? $"{MagicEscaped}\n{lines.Length}\n{path.Replace("%", "%25").Replace("\r", "%0D").Replace("\n", "%0A")}\n"
+                            : $"{Magic}\n{lines.Length}\n{path}\n");
                         for (int i = 0; i < lines.Length; i++)
                         {
                             if (i > 0) w.Write('\n');
@@ -69,6 +74,20 @@ internal static class Recovery
     /// <summary>The session ended with nothing left unsaved: its files are not needed.</summary>
     public static void Clear() => Save(Array.Empty<TextEditor>());
 
+    // Unsaved edits are their owner's alone: the folder ltt makes is 0700, each backup 0600.
+    private static void MakeDir()
+    {
+        if (OperatingSystem.IsWindows()) Directory.CreateDirectory(Dir);
+        else Directory.CreateDirectory(Dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
+    private static FileStreamOptions Private(FileMode mode)
+    {
+        var options = new FileStreamOptions { Mode = mode, Access = FileAccess.Write };
+        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        return options;
+    }
+
     /// <summary>
     /// Recovered buffers, the newest for each path, oldest first: the recovery
     /// file, the original path, the lines. Older copies of a path are deleted.
@@ -84,11 +103,12 @@ internal static class Recovery
                 try
                 {
                     var all = File.ReadAllText(file, Encoding.UTF8).Split('\n');
-                    if (all.Length < 4 || all[0] != Magic || all[2].Length == 0
+                    if (all.Length < 4 || all[0] is not (Magic or MagicEscaped) || all[2].Length == 0
                         || !int.TryParse(all[1], out int count) || all.Length - 3 != count)
                         continue; // not ours, or cut short
-                    if (newest.TryGetValue(all[2], out var older)) Delete(older.File);
-                    newest[all[2]] = (file, all[2], all[3..].ToList());
+                    string path = all[0] == MagicEscaped ? Uri.UnescapeDataString(all[2]) : all[2];
+                    if (newest.TryGetValue(path, out var older)) Delete(older.File);
+                    newest[path] = (file, path, all[3..].ToList());
                 }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
             }
@@ -108,7 +128,7 @@ internal static class Recovery
     {
         try
         {
-            Directory.CreateDirectory(Dir);
+            MakeDir();
             string log = Path.Combine(Path.GetDirectoryName(Dir)!, "crash.log");
             File.AppendAllText(log, $"--- {DateTime.Now:yyyy-MM-dd HH:mm:ss}\n{ex}\n");
             return log;

@@ -17,8 +17,11 @@ public sealed class Syntax
     public HashSet<string>? Keywords { get; init; }
     public bool SlashComments { get; init; }   // // and /* */
     public bool HashComments { get; init; }    // # to the end of the line
+    public string? HashAfter { get; init; }    // # opens a comment only at the line start or after one of these
     public bool Preprocessor { get; init; }    // a line starting with # is a directive
     public bool Strings { get; init; }         // "…", '…', `…` with \ escapes
+    public bool RawSingleQuotes { get; init; } // '…' takes no \ escapes (shell, YAML)
+    public bool Lifetimes { get; init; }       // Rust: 'a is a lifetime or a label, not a character
     public bool VerbatimStrings { get; init; } // C#: @"…" — "" is a quote, \ is literal
     public bool Numbers { get; init; }
     public bool IsPlain => Keywords == null && !SlashComments && !HashComments && !Strings && !Numbers;
@@ -88,14 +91,26 @@ public sealed class Syntax
         Name = "C-like", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
         Strings = true, Numbers = true,
     };
+    private static readonly Syntax Rust = new()
+    {
+        Name = "Rust", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
+        Strings = true, Numbers = true, Lifetimes = true,
+    };
     private static readonly Syntax Css = new() { Name = "CSS", SlashComments = true, Strings = true, Numbers = true };
     private static readonly Syntax Python = new()
         { Name = "Python", Keywords = PythonWords, HashComments = true, Strings = true, Numbers = true };
+    // A # inside a word is no comment: $#, ${#a[@]}, ${p##*/}.
     private static readonly Syntax Shell = new()
-        { Name = "shell", Keywords = ShellWords, HashComments = true, Strings = true, Numbers = true };
+    {
+        Name = "shell", Keywords = ShellWords, HashComments = true, HashAfter = " \t;&|()<>",
+        Strings = true, RawSingleQuotes = true, Numbers = true,
+    };
     private static readonly Syntax Ruby = new()
         { Name = "Ruby", Keywords = RubyWords, HashComments = true, Strings = true, Numbers = true };
     private static readonly Syntax Config = new() { Name = "config", HashComments = true, Strings = true, Numbers = true };
+    // A # comment needs a space before it, so a URL's #anchor stays in the value.
+    private static readonly Syntax Yaml = new()
+        { Name = "YAML", HashComments = true, HashAfter = " \t", Strings = true, RawSingleQuotes = true, Numbers = true };
     private static readonly Syntax HashOnly = new() { Name = "hash comments", HashComments = true };
 
     /// <summary>The syntax for a file, by extension or well-known name.</summary>
@@ -121,14 +136,16 @@ public sealed class Syntax
             ".cs" or ".csx" => CSharp,
             ".c" or ".h" or ".cpp" or ".hpp" or ".cc" or ".cxx" or ".hh" or ".hxx" or ".ino"
                 or ".m" or ".mm" or ".java" or ".js" or ".mjs" or ".cjs" or ".ts" or ".mts" or ".cts"
-                or ".tsx" or ".jsx" or ".go" or ".rs" or ".swift" or ".kt" or ".kts" or ".php"
+                or ".tsx" or ".jsx" or ".go" or ".swift" or ".kt" or ".kts" or ".php"
                 or ".scala" or ".dart" or ".groovy" or ".gradle" or ".proto" or ".zig" or ".sol"
                 or ".json" or ".jsonc" or ".json5" => CLike,
+            ".rs" => Rust,
             ".css" or ".scss" or ".less" => Css,
             ".py" or ".pyw" or ".pyi" => Python,
             ".sh" or ".bash" or ".zsh" or ".fish" or ".ksh" or ".bats" => Shell,
             ".rb" or ".rake" or ".gemspec" => Ruby,
-            ".yml" or ".yaml" or ".toml" or ".conf" or ".cfg" or ".properties" or ".tf" or ".tfvars"
+            ".yml" or ".yaml" => Yaml,
+            ".toml" or ".conf" or ".cfg" or ".properties" or ".tf" or ".tfvars"
                 or ".hcl" or ".nix" or ".cmake" or ".ps1" or ".psm1" or ".pl" or ".pm" or ".r" => Config,
             ".mk" or ".dockerfile" => HashOnly,
             _ => Plain,
@@ -275,12 +292,21 @@ public static class Highlighter
                 i = pend = i + end + 4;
                 continue;
             }
-            if (syntax.HashComments && c == '#')
+            if (syntax.HashComments && c == '#' && (syntax.HashAfter == null || i == 0 || syntax.HashAfter.Contains(line[i - 1])))
             {
                 FlushNormal(i);
                 Emit(TokenKind.Comment, i, line.Length - i);
                 i = pend = line.Length;
                 return;
+            }
+
+            // Rust: 'a, 'static, 'outer: — a lifetime or a label; 'a' is a character.
+            if (syntax.Lifetimes && c == '\'' && i + 1 < line.Length && (char.IsLetter(line[i + 1]) || line[i + 1] == '_')
+                && !(i + 2 < line.Length && line[i + 2] == '\''))
+            {
+                i++;
+                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_')) i++;
+                continue;
             }
 
             // Strings: "…", '…', `…` with \ escapes; C# @"…" and $@"…" are verbatim.
@@ -299,11 +325,12 @@ public static class Highlighter
                     FlushNormal(i);
                     int start = i;
                     char quote = line[q];
+                    bool escapes = !verbatim && !(quote == '\'' && syntax.RawSingleQuotes);
                     i = q + 1;
                     while (i < line.Length)
                     {
                         if (verbatim && line[i] == '"' && i + 1 < line.Length && line[i + 1] == '"') { i += 2; continue; }
-                        if (!verbatim && line[i] == '\\' && i + 1 < line.Length) { i += 2; continue; }
+                        if (escapes && line[i] == '\\' && i + 1 < line.Length) { i += 2; continue; }
                         if (line[i] == quote) { i++; break; }
                         i++;
                     }
@@ -315,12 +342,15 @@ public static class Highlighter
 
             if (tokens == null) { i++; continue; } // nothing else changes the comment state
 
-            // Numbers: 123, 1.5, 0xFF, 10_000, 1e-3
+            // Numbers: 123, 1.5, 0xFF, 10_000, 1e-3 (in 0x1E-3 the - is a minus)
             if (syntax.Numbers && char.IsDigit(c) && (i == 0 || !char.IsLetter(line[i - 1])))
             {
                 FlushNormal(i);
                 int start = i;
-                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] is '_' or '.')) i++;
+                bool hex = c == '0' && c1 is 'x' or 'X';
+                while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] is '_' or '.'
+                    || (!hex && line[i] is '+' or '-' && line[i - 1] is 'e' or 'E'
+                        && i + 1 < line.Length && char.IsDigit(line[i + 1])))) i++;
                 Emit(TokenKind.Number, start, i - start);
                 pend = i;
                 continue;
@@ -333,6 +363,7 @@ public static class Highlighter
                 int start = i;
                 if (c == '@') i++; // consume it, or the scan below makes no progress
                 while (i < line.Length && (char.IsLetterOrDigit(line[i]) || line[i] == '_')) i++;
+                if (i < line.Length && line[i] == '?' && hasKeywords && kwLookup.Contains(line[start..(i + 1)])) i++; // Ruby's defined?
                 var word = line[start..i];
                 bool isKeyword = c != '@' && normal == TokenKind.Normal && hasKeywords && kwLookup.Contains(word);
                 Emit(isKeyword ? TokenKind.Keyword : normal, start, i - start);

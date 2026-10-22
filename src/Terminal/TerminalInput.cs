@@ -37,6 +37,9 @@ internal interface ITerminalInput : IDisposable
 {
     /// <summary>Read an event but wait no longer than timeoutMs: false — nothing arrived in time.</summary>
     bool TryRead(int timeoutMs, out InputEvent? ev);
+
+    /// <summary>The terminal settings again, after the process was stopped and continued.</summary>
+    void Resume();
 }
 
 /// <summary>Fallback without the mouse (Windows, or when raw mode is unavailable).</summary>
@@ -66,6 +69,8 @@ internal sealed class ConsoleInput : ITerminalInput
             Thread.Sleep(10);
         }
     }
+
+    public void Resume() { }
 
     public void Dispose() { }
 }
@@ -131,12 +136,18 @@ internal sealed class RawTerminalInput : ITerminalInput
         tcsetattr(StdinFd, TcsaNow, _termios);
     }
 
-    /// <summary>Parse the given bytes instead of a terminal (self-test).</summary>
+    /// <summary>Parse the given bytes instead of a terminal (tests).</summary>
     internal RawTerminalInput(byte[] bytes)
     {
         _noTerminal = true;
         bytes.CopyTo(_buf, 0);
         _bufLen = bytes.Length;
+    }
+
+    /// <summary>Raw mode again: whatever ran while the process was stopped may have changed the settings.</summary>
+    public void Resume()
+    {
+        if (!_noTerminal && Volatile.Read(ref _disposed) == 0) tcsetattr(StdinFd, TcsaNow, _termios);
     }
 
     /// <summary>Restore the terminal. Also called from a signal handler, so only the first call acts.</summary>
@@ -277,10 +288,13 @@ internal sealed class RawTerminalInput : ITerminalInput
             {
                 _unread.Push(b3);
                 var inner = ReadEscapeAfterEsc();
-                return inner is KeyInput { Key: var k }
-                    ? new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift),
-                        alt: true, k.Modifiers.HasFlag(ConsoleModifiers.Control)))
-                    : inner;
+                if (inner is KeyInput { Key: var k })
+                    return new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift),
+                        alt: true, k.Modifiers.HasFlag(ConsoleModifiers.Control)));
+                // A mouse report, a paste or a terminal reply right behind it (Esc pressed while a
+                // trackpad still scrolls): the Esc was a key of its own.
+                if (inner != null) _pending.Enqueue(inner);
+                return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape));
             }
             if (b3 >= 0) _unread.Push(b3);
             _unread.Push(0x1B);
@@ -307,6 +321,15 @@ internal sealed class RawTerminalInput : ITerminalInput
                     _unread.Push(c); // not part of a sequence: a key typed after a cut-off one
                     return null;
                 }
+                if (c == '[' && p.Length == 0) // the Linux console's F1-F5: ESC [ [ A..E
+                {
+                    int f = ReadByte(40);
+                    if (f is >= 'A' and <= 'E') return new KeyInput(MakeKey('\0', ConsoleKey.F1 + (f - 'A')));
+                    if (f >= 0) _unread.Push(f);
+                    return null;
+                }
+                // rxvt ends Shift+key with '$', elsewhere a byte in the middle of a sequence: ESC [ 7 $ is Shift+Home.
+                if (c == '$' && p.Length > 0 && p.ToString().All(char.IsAsciiDigit)) return ParseCsi(p.ToString(), '$');
                 if (c is >= 0x40 and <= 0x7E)
                 {
                     if (p.Length > 256) return null; // overlong: dropped whole, never typed
@@ -327,9 +350,17 @@ internal sealed class RawTerminalInput : ITerminalInput
         }
         if (b2 == 'O') // SS3: F1-F4, arrows, Home/End, and the keypad in application mode
         {
-            int c = ReadByte(40);
+            // Konsole and old xterm put a modifier before the final byte: ESC O 2 P is Shift+F1, ESC O 5 A Ctrl+Up.
+            var mods = new StringBuilder();
+            int c;
+            while ((c = ReadByte(40)) is >= '0' and <= '9' or ';' && mods.Length < 16) mods.Append((char)c);
             if (c < 0) return null;
-            return ParseSs3((char)c);
+            var ev = ParseSs3((char)c);
+            if (mods.Length == 0 || ev is not KeyInput { Key: var k }) return ev;
+            string m = mods.ToString();
+            var (sh, al, ct, _) = DecodeModifiers(int.TryParse(m[(m.LastIndexOf(';') + 1)..], out int code) ? code : 1);
+            return new KeyInput(MakeKey(k.KeyChar, k.Key, sh || k.Modifiers.HasFlag(ConsoleModifiers.Shift), al,
+                ct || k.Modifiers.HasFlag(ConsoleModifiers.Control)));
         }
         // OSC, DCS, APC, PM, SOS: a terminal's reply to someone's query (a colour, a version), never typed.
         if (b2 is ']' or 'P' or '_' or '^' or 'X')
@@ -351,10 +382,13 @@ internal sealed class RawTerminalInput : ITerminalInput
         return null;
     }
 
-    /// <summary>Skip a string sequence up to its end: BEL or ST (ESC \); a pause in the input ends it too.</summary>
+    /// <summary>
+    /// Skip a string sequence up to its end: BEL or ST (ESC \), however long (an OSC 52 answer carries a
+    /// whole clipboard); a pause in the input ends it too.
+    /// </summary>
     private void SkipString()
     {
-        for (int n = 0; n < 1 << 16; n++)
+        for (int n = 0; n < 1 << 26; n++)
         {
             int b = ReadByte(40);
             if (b < 0 || b == 0x07) return;
@@ -380,24 +414,26 @@ internal sealed class RawTerminalInput : ITerminalInput
         return button < 128 ? new MouseInput(button, x - 33, y - 33, !release) : null;
     }
 
-    /// <summary>SS3 sequences: F1-F4, arrows, Home/End and the application-mode keypad.</summary>
+    /// <summary>SS3 sequences: F1-F4, arrows (rxvt's a..d with Ctrl), Home/End and the application-mode keypad.</summary>
     internal static InputEvent? ParseSs3(char c)
     {
         ConsoleKey key = c switch
         {
             'P' => ConsoleKey.F1, 'Q' => ConsoleKey.F2, 'R' => ConsoleKey.F3, 'S' => ConsoleKey.F4,
-            'A' => ConsoleKey.UpArrow, 'B' => ConsoleKey.DownArrow,
-            'C' => ConsoleKey.RightArrow, 'D' => ConsoleKey.LeftArrow,
+            'A' or 'a' => ConsoleKey.UpArrow, 'B' or 'b' => ConsoleKey.DownArrow,
+            'C' or 'c' => ConsoleKey.RightArrow, 'D' or 'd' => ConsoleKey.LeftArrow,
             'H' => ConsoleKey.Home, 'F' => ConsoleKey.End,
-            'M' => ConsoleKey.Enter,
+            'M' => ConsoleKey.Enter, 'I' => ConsoleKey.Tab,
             _ => (ConsoleKey)0,
         };
-        if (key != (ConsoleKey)0) return new KeyInput(MakeKey(key == ConsoleKey.Enter ? '\r' : '\0', key));
-        // Keypad digits and operators: ESC O p..y → 0..9, j k m n o X → * + - . / =
+        if (key != (ConsoleKey)0)
+            return new KeyInput(MakeKey(key switch { ConsoleKey.Enter => '\r', ConsoleKey.Tab => '\t', _ => '\0' }, key,
+                ctrl: c is >= 'a' and <= 'd'));
+        // Keypad digits and operators: ESC O p..y → 0..9, j k l m n o X → * + , - . / =, and its space
         char typed = c switch
         {
             >= 'p' and <= 'y' => (char)('0' + (c - 'p')),
-            'j' => '*', 'k' => '+', 'm' => '-', 'n' => '.', 'o' => '/', 'X' => '=',
+            'j' => '*', 'k' => '+', 'l' => ',', 'm' => '-', 'n' => '.', 'o' => '/', 'X' => '=', ' ' => ' ',
             _ => '\0',
         };
         return typed == '\0' ? null : new KeyInput(CharKey(typed));
@@ -466,8 +502,17 @@ internal sealed class RawTerminalInput : ITerminalInput
             return evs.Count > 0 ? evs[0] : null;
         }
         ConsoleKey key;
-        if (final == '~')
+        if (final is '~' or '^' or '$' or '@')
         {
+            // xterm's modifyOtherKeys (tmux's extended keys too): CSI 27 ; modifiers ; key ~ is CSI key ; modifiers u.
+            if (final == '~' && Arg(0, 0) == 27 && !Field(p, 2).IsEmpty)
+            {
+                var evs = int.TryParse(Field(p, 2), out int code) ? ParseCsiU($"{code};{Field(p, 1)}") : new();
+                return evs.Count > 0 ? evs[0] : null;
+            }
+            // rxvt's own finals: ^ is Ctrl, $ is Shift, @ is both.
+            if (final is '^' or '@') ctrl = true;
+            if (final is '$' or '@') shift = true;
             key = Arg(0, 0) switch
             {
                 1 or 7 => ConsoleKey.Home,
@@ -493,9 +538,11 @@ internal sealed class RawTerminalInput : ITerminalInput
                 'H' => ConsoleKey.Home,
                 'F' => ConsoleKey.End,
                 'Z' => ConsoleKey.Tab, // Shift+Tab
+                'a' => ConsoleKey.UpArrow, 'b' => ConsoleKey.DownArrow, // rxvt's Shift+arrows
+                'c' => ConsoleKey.RightArrow, 'd' => ConsoleKey.LeftArrow,
                 _ => (ConsoleKey)0,
             };
-            if (final == 'Z') shift = true;
+            if (final is 'Z' or 'a' or 'b' or 'c' or 'd') shift = true;
         }
         if (key == (ConsoleKey)0) return null;
         // Cmd/Super+arrows move like on a Mac: to the line start/end, the document start/end.
@@ -535,6 +582,9 @@ internal sealed class RawTerminalInput : ITerminalInput
         int eventType = SubInt(modField, 1);
         if (eventType == 3) return none; // key release (not requested, tolerated)
         var (sh, al, ct, su) = DecodeModifiers(modCode == 0 ? 1 : modCode);
+        // Hyper and Meta (16, 32) on their own: no shortcut of ltt's uses them, and nothing is typed.
+        int bits = Math.Max(0, modCode - 1);
+        if ((bits & 48) != 0 && (bits & 14) == 0) return none;
         if (su) ct = true;
         bool latin = cp is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
         int id = latin || baseCp <= 0 ? cp : baseCp;
@@ -588,6 +638,15 @@ internal sealed class RawTerminalInput : ITerminalInput
 
         char TypedChar() => (sh && shiftedCp > 0 ? shiftedCp : cp) is int tcp and > 0 and <= 0xFFFF
             and not (>= 0xD800 and <= 0xDFFF) ? (char)tcp : '\0';
+
+        // The keypad's digits and operators type even from a terminal that leaves their text out.
+        char pad = id switch
+        {
+            >= 57399 and <= 57408 => (char)('0' + (id - 57399)),
+            57409 => '.', 57410 => '/', 57411 => '*', 57412 => '-', 57413 => '+', 57415 => '=', 57416 => ',',
+            _ => '\0',
+        };
+        if (pad != '\0') return new List<InputEvent> { new KeyInput(MakeKey(pad, CharKey(pad).Key, sh, al, ct)) };
 
         if (key != (ConsoleKey)0)
         {

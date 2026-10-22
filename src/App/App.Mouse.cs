@@ -77,12 +77,14 @@ internal sealed partial class App
             return;
         }
 
-        // Releasing the button ends a drag selection.
+        // Releasing the button ends a drag selection — in its own tab only (another may have taken over).
         if (!m.Pressed)
         {
-            if (_dragging)
+            if (_dragging != null)
             {
-                _dragging = false;
+                bool here = _dragging == _editor;
+                _dragging = null;
+                if (!here) return;
                 if (_editor.HasSelection)
                     _status = $"Selected: {_editor.SelectionCharCount()} chars. Ctrl+C copies, Ctrl+X cuts.";
                 else
@@ -94,7 +96,7 @@ internal sealed partial class App
         // Motion with the left button held extends the editor selection.
         if (m.IsMotion)
         {
-            if (_dragging && m.IsLeftDrag && _editor.HasFile)
+            if (_dragging == _editor && m.IsLeftDrag && _editor.HasFile)
             {
                 int line = _editor.ScrollY + Math.Clamp(m.Y - _contentTop, 0, Math.Max(0, _mainContentH - 1));
                 _editor.SetCursorAtCell(line, _editor.ScrollX + Math.Max(0, m.X - _editorTextX));
@@ -179,7 +181,7 @@ internal sealed partial class App
             {
                 _editor.SetAnchorHere();
             }
-            _dragging = true;
+            _dragging = _editor;
         }
     }
 }
