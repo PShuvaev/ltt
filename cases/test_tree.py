@@ -520,8 +520,6 @@ def test_a_nested_repository_keeps_its_dimming_after_a_refresh(ltt, ws):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="a backslash is a separator there")
-@pytest.mark.xfail(strict=True, reason="BUG: a refresh asks git about a folder named 'a\\b' as 'a/b', "
-                                       "so the rules for a/b dim its files")
 def test_a_backslash_in_a_folder_name_keeps_its_dimming_after_a_refresh(ltt, ws):
     ws.repo("repo", files={"a\\b/x.txt": "x\n"}, ignore="a/b/*.txt\n")  # one folder named a\b; there is no a/b
     app = ltt(ws.path("repo"))
@@ -529,7 +527,8 @@ def test_a_backslash_in_a_folder_name_keeps_its_dimming_after_a_refresh(ltt, ws)
     s = app.press("right")
     assert s.tree_row("x.txt").fg == "Gray"
     ws.write("repo/a\\b/y.txt", "y")  # the watcher re-reads a\b: one git question for its repository
-    s = app.wait_tree("y.txt")
+    app.wait_tree("y.txt")
+    s = app.wait(lambda s: s.tree_row("y.txt").fg != "Gray", what="y.txt marked new (or dimmed)")
     assert (s.tree_row("x.txt").fg, s.tree_row("y.txt").fg) == ("Gray", "Green")  # committed and new: no dimming
 
 
