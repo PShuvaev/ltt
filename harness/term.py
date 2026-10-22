@@ -7,7 +7,9 @@ frame is complete (ltt wraps each frame in DEC 2026 synchronized output),
 so a test never looks at a half-drawn frame.
 
 Rules this module keeps (learned the hard way):
-- only our own child is ever signalled, by pid — never pkill/killall;
+- only our own child is ever signalled, by pid — never pkill/killall; when a
+  test is over, its process group too: ltt leads a session of its own, so
+  the group is ltt and what it started (vim, git, a clipboard tool);
 - the reader never blocks in read(): on macOS close() of a pty master
   waits for a thread blocked in read() on it, so it polls with select.
 """
@@ -534,12 +536,14 @@ class Ltt:
         return self.wait_exit(timeout)
 
     def close(self):
-        """Stop everything: our child if still running, the reader, the pty."""
+        """Stop everything: our child and what it started, the reader, the pty."""
+        # A vim left running would get the closed terminal's SIGHUP and SIGCONT, and vim's
+        # handlers can then loop for good at full CPU: the whole group goes before the pty.
+        try:
+            os.killpg(self.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass  # all of it ended already
         if self.poll() is None:
-            try:
-                os.kill(self.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
             try:
                 os.waitpid(self.pid, 0)
             except ChildProcessError:
