@@ -185,8 +185,6 @@ def test_a_click_on_the_left_marker_keeps_the_cursor_in_view(ltt, ws):
     assert s.editor_row(1).text == "‹" + LONG[140:]  # the view did not move
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a click on the › cell puts the cursor on the marker, before a character "
-                                       "that is not shown (the V17 fix covers only the ‹ side)")
 def test_a_click_on_the_right_marker_keeps_the_cursor_off_it(ltt, ws):
     app = open_text(ltt, ws, LONG + "\n")
     s = app.snap()

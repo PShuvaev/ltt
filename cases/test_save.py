@@ -451,8 +451,6 @@ def _xattr(path, name, value=None):
     return r.stdout.rstrip(b"\n") if r.returncode == 0 else None
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the atomic save drops the file's extended attributes "
-                                       "(Finder tags, user attributes)")
 def test_save_keeps_extended_attributes(ltt, ws):
     p = ws.write("a.txt", "hello\n")
     _xattr(p, "user.ltt-test", b"kept")

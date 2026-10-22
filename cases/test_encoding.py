@@ -105,8 +105,6 @@ def test_latin1_refuses_to_save_a_character_it_cannot_hold(ltt, ws):
     assert ws.read_bytes("f.txt") == b"caf\xe9\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the Latin-1 save error names half of an emoji ('\ufffd') "
-                                       "instead of the character")
 def test_the_latin1_save_error_names_a_character_outside_the_bmp(ltt, ws):
     p = ws.write("f.txt", b"caf\xe9\n")
     app = ltt(p, cols=140)

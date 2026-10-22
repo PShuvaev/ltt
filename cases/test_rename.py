@@ -221,8 +221,6 @@ def test_renamed_root_is_still_watched(ltt, ws):
     app.wait_tree("new.txt")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: renaming a folder that holds another root leaves that root on the old, "
-                                       "gone path: its files vanish from the panel")
 def test_root_inside_a_renamed_root_follows_it(ltt, ws):
     ws.write("proj/a.txt", "a")
     ws.write("proj/sub/s.txt", "s")
@@ -231,6 +229,16 @@ def test_root_inside_a_renamed_root_follows_it(ltt, ws):
     s = app.press("end", "up")  # the second root
     assert (s.tree_selected.name, s.tree_selected.depth) == ("sub", 0)
     assert s.title_path.endswith("/proj2/sub")
+
+
+def test_root_inside_a_renamed_folder_follows_it(ltt, ws):
+    ws.write("proj/x/y/s.txt", "s")
+    app = ltt(ws.path("proj"), ws.path("proj/x/y"))  # the second root lies inside a folder of the first
+    select_in_tree(app, "x")
+    rename(app, "z")
+    s = app.press("end", "up")  # the second root
+    assert (s.tree_selected.name, s.tree_selected.depth) == ("y", 0)
+    assert s.title_path.endswith("/proj/z/y") and s.tree_row("s.txt") is not None
 
 
 # ---- refusals ----
@@ -282,8 +290,6 @@ def test_taken_folder_name_is_refused(ltt, ws):
     assert ws.files("proj") == ["a.txt", "sub/c.txt"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a rename onto the name of an open tab whose file is gone leaves two tabs "
-                                       "on one path (V19 guards only moves made outside ltt)")
 def test_rename_onto_the_name_of_an_open_tab_leaves_one_tab_per_path(ltt, ws):
     ws.write("proj/x.txt", "x")
     ws.write("proj/a.txt", "a")
@@ -293,6 +299,20 @@ def test_rename_onto_the_name_of_an_open_tab_leaves_one_tab_per_path(ltt, ws):
     app.press("alt+2")
     s = rename(app, "x.txt")  # free on disk, so allowed
     assert len(set(s.tab_names)) == len(s.tab_names)
+
+
+def test_rename_onto_a_gone_file_whose_tab_has_unsaved_edits_is_refused(ltt, ws):
+    ws.write("proj/x.txt", "x")
+    ws.write("proj/a.txt", "a")
+    app = ltt(ws.path("proj"), ws.path("proj/x.txt"), ws.path("proj/a.txt"), cols=160)
+    app.type("mine ")  # into x.txt, the active tab
+    ws.remove("proj/x.txt")
+    app.wait(lambda s: s.tabs[0].missing, what="the ✗ on x.txt")
+    app.press("alt+2")
+    s = rename(app, "x.txt")
+    assert s.status == "Name held by unsaved edits in the tab x.txt — save or close it first."
+    assert ws.files("proj") == ["a.txt"]
+    assert [(t.name, t.dirty, t.missing) for t in s.tabs] == [("x.txt", True, True), ("a.txt", False, False)]
 
 
 def test_rename_of_a_file_deleted_on_disk_is_an_error(ltt, ws):

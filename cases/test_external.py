@@ -7,7 +7,6 @@ after the folder watcher reports a change; a tab follows a rename only
 through the watcher.
 """
 import os
-import sys
 import time
 
 import pytest
@@ -501,9 +500,6 @@ def test_renamed_then_edited_dirty_tab_asks_before_saving(ltt, ws):
     assert ws.read("proj/b.txt") == "line one\nline two\nagent edit\n"
 
 
-@pytest.mark.xfail(sys.platform == "darwin", strict=True,
-                   reason="BUG: a rename with a write to the new name right after it (within ~5 ms) reaches ltt as "
-                          "a deletion and a new file (FSEvents): the tab shows ✗ instead of following")
 def test_renamed_and_at_once_edited_files_take_their_tabs_along(ltt, ws):
     for i in (1, 2, 3):
         ws.write(f"proj/a{i}.txt", f"text {i}\n")
@@ -688,8 +684,6 @@ def test_file_turned_binary_marks_the_clean_tab(ltt, ws):
     assert app.press("ctrl+s").question.startswith("a.txt changed on disk since it was opened!")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a clean tab whose file cannot be read is re-read every second "
-                                       "and its message comes back over any other status")
 def test_file_turned_binary_is_reported_once(ltt, ws):
     app = open_file(ltt, ws)
     ws.write("proj/a.txt", b"\x00\x01\x02binary\n")

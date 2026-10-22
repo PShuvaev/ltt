@@ -508,8 +508,6 @@ def test_a_nested_repository_dims_by_its_own_gitignore(ltt, ws):
     assert [r.fg for r in s.tree if r.name == ".git"] == ["DarkGray", "DarkGray"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: after a refresh, files in a nested repository are dimmed by the "
-                                       "outer repository's .gitignore (the first load asks the inner one)")
 def test_a_nested_repository_keeps_its_dimming_after_a_refresh(ltt, ws):
     app = ltt(nested(ws))
     select(app, "inner")
@@ -531,8 +529,6 @@ def test_a_repository_inside_a_plain_folder_dims_its_ignored_files(ltt, ws):
     assert s.tree_row("x.log").fg == "DarkGray" and s.tree_row("a.txt").fg == "Gray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: after a refresh, the ignored files of a repository inside a plain "
-                                       "(non-git) root lose their dimming")
 def test_a_repository_inside_a_plain_folder_keeps_its_dimming_after_a_refresh(ltt, ws):
     ws.write("plain/top.txt", "t")
     ws.repo("plain/repo", files={"a.txt": "a\n"}, ignore="*.log\n")
@@ -545,8 +541,6 @@ def test_a_repository_inside_a_plain_folder_keeps_its_dimming_after_a_refresh(lt
     assert s.tree_row("x.log").fg == "DarkGray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG (minor): the .git file of a linked worktree or a submodule is not "
-                                       "dimmed and sorts among the files, unlike a .git folder")
 def test_a_dot_git_file_is_dimmed_like_a_dot_git_folder(ltt, ws):
     ws.repo("main", files={"a.txt": "a\n"})
     ws.git("worktree", "add", "-q", ws.path("wt"), "-b", "side", cwd="main")  # wt/.git is a file

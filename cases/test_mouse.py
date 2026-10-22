@@ -173,8 +173,6 @@ def test_click_on_the_left_edge_marker_keeps_the_cursor_in_view(ltt, ws):  # V17
     assert s.cursor == (s.text_x + 1, s.editor_row(1).y) and LONG[s.pos[2] - 1] == view[1]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a click on the › cell of a line cut at the right edge puts the cursor "
-                                        "on the marker, over a hidden character — the V17 fix covers only the ‹ edge")
 def test_click_on_the_right_edge_marker_keeps_the_cursor_off_it(ltt, ws):
     app = edit(ltt, ws, LONG + "\n")
     s = app.snap()

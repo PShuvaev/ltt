@@ -169,9 +169,6 @@ def test_signal_while_the_ui_is_stuck_backs_up_from_the_handler(ltt, ws):
     assert texts(ws.recovery) == ["XYZhello\n"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a terminal closed during a paste is noticed only when the paste times "
-                                       "out (2 s), racing the SIGHUP handler's own 2 s wait: two backups, or the "
-                                       "paste lost")
 def test_closed_terminal_mid_paste_ends_ltt_at_once_with_what_arrived(ltt, ws):
     app = edited(ltt, ws)
     app.write(b"\x1b[200~partial")

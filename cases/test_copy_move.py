@@ -883,8 +883,6 @@ def test_move_leaves_tabs_of_a_folder_with_a_longer_name_alone(ltt, ws):
     assert s.title_path == ws.path("proj/a/docs2/other.txt") and not s.tabs[0].missing
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a file moved onto the path of a tab whose file was deleted "
-                                       "leaves two tabs on one path (V19 for ltt's own moves)")
 def test_file_moved_onto_the_path_of_a_tab_whose_file_is_gone(ltt, ws):
     ws.write("proj/a/note.txt", "from a\n")
     ws.write("proj/b/note.txt", "from b\n")
@@ -901,6 +899,25 @@ def test_file_moved_onto_the_path_of_a_tab_whose_file_is_gone(ltt, ws):
     s = status_is(app, "Moved note.txt into b/.")
     labels = s.tab_names
     assert len(set(labels)) == len(labels), f"two tabs on one path: {labels}"
+
+
+def test_a_move_keeps_clear_of_a_gone_file_whose_tab_has_unsaved_edits(ltt, ws):
+    ws.write("proj/a/note.txt", "from a\n")
+    ws.write("proj/b/note.txt", "from b\n")
+    app = start(ltt, ws, "proj")
+    _open(app, "proj/b/note.txt")
+    app.type("mine ")
+    app.press("esc")
+    _open(app, "proj/a/note.txt")
+    app.press("esc")
+    ws.remove("proj/b/note.txt")
+    app.wait(lambda s: s.tabs[0].missing, what="the first tab marked as gone from disk")
+    app.press("ctrl+x")
+    select(app, "proj/b")
+    app.press("ctrl+v")
+    s = status_is(app, "Moved note.txt into b/ as note 2.txt.")  # the name is the unsaved tab's
+    assert ws.files("proj") == ["b/note 2.txt"]
+    assert [(t.name, t.dirty, t.missing) for t in s.tabs] == [("note.txt", True, True), ("note 2.txt", False, False)]
 
 
 # ---------------------------------------------------------------- links, pipes, unreadable entries
@@ -974,7 +991,6 @@ def test_copy_of_a_lone_pipe_creates_nothing(ltt, ws):
     assert os.listdir(ws.path("proj/dst")) == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: copying a lone pipe says 'Copied pipe into dst/.' though nothing was copied")
 def test_copy_of_a_lone_pipe_does_not_claim_a_copy(ltt, ws):
     ws.mkdir("proj")
     os.mkfifo(ws.path("proj/pipe"))

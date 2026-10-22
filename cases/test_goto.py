@@ -43,8 +43,6 @@ def test_line_number_without_an_open_file(ltt, ws):
     assert s.status == "Open a file first, or type a path." and s.mode == "TREE" and s.tabs == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a line number past the int range is looked up as a file: "
-                                       "'File not found: 99999999999'")
 def test_huge_line_number_goes_to_the_last_line(ltt, ws):
     ws.write("proj/a.txt", FIFTY)
     app = ltt(ws.path("proj/a.txt"))
@@ -143,8 +141,6 @@ def test_location_in_an_open_file_activates_its_tab(ltt, ws):
     assert s.status == "Line 40." and s.pos[0] == 40
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+L file:99 into an open 3-line file says 'Line 99.' "
-                                       "while the cursor stops on line 3")
 def test_location_past_the_end_of_an_open_file_reports_the_line_reached(ltt, ws):
     ws.write("proj/b.txt", "b1\nb2\nb3")
     app = ltt(ws.path("proj/b.txt"))
@@ -287,9 +283,6 @@ def test_colon_inside_a_folder_name_stays_in_the_path(ltt, ws):
     assert s.active_tab.name == "notes.txt" and s.pos[0] == 3
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: whether a relative path exists as typed is checked against the "
-                                       "process's working directory, not the prompt's folder: `odd:5` next to "
-                                       "the open file reads as `odd`, line 5")
 def test_relative_name_with_a_colon_opens_that_file(ltt, ws):
     ws.write("proj/sub/odd:5", "odd")
     ws.write("proj/sub/c.txt", "c")

@@ -256,8 +256,6 @@ def test_ctrl_o_on_a_file_named_with_two_leading_dots(ltt, ws):
     assert s.tab_names == ["..foo"] and roots(s) == ["proj"] and s.tree_selected.name == "..foo"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: whether a relative 'name:12' exists is checked in the process's "
-                                       "working folder, not in the selected one (P1)")
 def test_ctrl_o_on_a_relative_file_with_a_colon_in_its_name(ltt, ws):
     ws.write("proj/log:12", "colon\n")
     ws.mkdir("elsewhere")
@@ -377,8 +375,6 @@ def test_mouse_back_and_forward_buttons_leave_the_roots_alone(ltt, ws):
     assert roots(s) == ["proj", "other"] and s.tree_selected.name == "proj"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: removing a root above the selection (right click) moves the "
-                                       "selection to another entry")
 def test_removing_a_root_above_the_selection_keeps_it(ltt, ws):
     for root in "ABC":
         ws.write(f"{root}/{root.lower()}1.txt", "1")
