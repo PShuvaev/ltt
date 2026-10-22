@@ -513,7 +513,7 @@ internal sealed partial class App
             ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
                 ? " ↑↓ select · Enter opens · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
-                : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab";
+                : " Esc to tree · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+D duplicate line";
         if (_paste is { } job) help = PasteProgress(job);
         else if (_picked is { } p && _focus == Focus.Tree && _mode == UiMode.Normal)
             help = $" Ctrl+V {(p.Cut ? "moves" : "copies")} {p.Label} here · Esc forgets it ·" + help;

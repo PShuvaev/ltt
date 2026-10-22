@@ -166,6 +166,7 @@ waits for vim, and without it the text is simply plain.
 | <kbd>Option+Backspace</kbd> / <kbd>Ctrl+Backspace</kbd> | delete the word before the cursor |
 | <kbd>Ctrl+Home</kbd> / <kbd>Ctrl+End</kbd> · <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | document start/end · page |
 | <kbd>Ctrl+A</kbd> · <kbd>Ctrl+C</kbd> / <kbd>Ctrl+X</kbd> / <kbd>Ctrl+V</kbd> | select all · copy / cut / paste via the system clipboard |
+| <kbd>Ctrl+D</kbd> | duplicate the line, or the selected lines |
 
 ### Prompts and search
 

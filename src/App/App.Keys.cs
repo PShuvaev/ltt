@@ -325,6 +325,7 @@ internal sealed partial class App
             switch (key.Key)
             {
                 case ConsoleKey.A: _editor.SelectAll(); _status = $"Selected all: {_editor.SelectionCharCount()} chars."; return;
+                case ConsoleKey.D: _editor.DuplicateLines(); return;
                 case ConsoleKey.X when _editor.HasSelection: // cut the selection to the clipboard
                     CopySelection();
                     _editor.DeleteSelection();
@@ -459,6 +460,8 @@ internal sealed partial class App
     private void HandleConfirm(ConsoleKeyInfo key)
     {
         if (_confirm == null || key.Key == ConsoleKey.Escape) { Cancel("Cancelled."); return; }
+        // Ctrl+D duplicates lines in the editor: pressed out of habit, it must not answer D and throw edits away.
+        if (IsCtrlKey(key, ConsoleKey.D)) return;
         char answer = AnswerLetter(key);
         // Any other key (Enter included) leaves the question standing: no destructive default.
         if (_confirm.Choices.FirstOrDefault(c => c.Key == answer).Act is not { } act) return;

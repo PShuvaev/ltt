@@ -631,6 +631,22 @@ public sealed class TextEditor
         EndEdit();
     }
 
+    /// <summary>
+    /// Ctrl+D: a copy of the cursor's line, or of the lines the selection touches, goes below them as one
+    /// undo step; the cursor and the selection move onto the copy, so pressing it again adds another.
+    /// </summary>
+    public void DuplicateLines()
+    {
+        var (sl, _, el, ec) = SelectionRange();
+        if (el > sl && ec == 0) el--; // a selection that ends at a line start leaves that line out
+        int n = el - sl + 1;
+        BeginEdit("other");
+        Splice(el + 1, 0, _lines.GetRange(sl, n).ToArray());
+        Cy += n;
+        if (SelAnchor is { } a) SelAnchor = (a.Line + n, a.Col);
+        EndEdit();
+    }
+
     // ---------- Cursor movement ----------
 
     private (string? Line, int Index, int Col) _column; // the last answer: a long line is scanned once per change
