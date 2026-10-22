@@ -52,6 +52,18 @@ your unsaved edits are never overwritten without a question.
 
 ![Three folders in one panel: search them all, edit a config, copy a log into the notes, write a new note](https://raw.githubusercontent.com/PShuvaev/ltt/media/folders.gif)
 
+## Change it, don't script it
+
+ltt is not scriptable, on purpose: no configuration language, no plugin
+API. Customising an editor through scripts in its own little language —
+Vimscript, Emacs Lisp — is tedious, fragile and limited to whatever the
+editor chose to expose; it is a habit from before language models. Now
+it is quicker in every sense to fork ltt and ask Claude, or any coding
+agent, to rework whatever gets in your way: the whole editor is a small
+C# codebase with no dependencies, and the tests in the `tests` branch
+tell the agent whether anything broke. ltt is meant as a minimal base to
+reshape that way, not a platform to configure.
+
 ## Why a terminal
 
 With AI, most of a rich interface has nothing left to do. Menus, toolbars,
