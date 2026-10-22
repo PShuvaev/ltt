@@ -453,3 +453,14 @@ def test_title_in_search_results_shows_the_hit_file(ltt, ws):
     assert s.mode == "SEARCH" and s.title == f"ltt · ~/proj/{first}"
     second = s.results[1].path
     assert app.press("down").title == f"ltt · ~/proj/{second}"
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the error of a later file on the command line is lost: "
+                                       "'ltt a.txt bin.dat' opens a.txt and says nothing about bin.dat")
+def test_the_error_of_a_later_file_on_the_command_line_is_shown(ltt, ws):  # Textadept's args_test.lua
+    a = ws.write("a.txt", "alpha\n")
+    b = ws.write("bin.dat", b"\x00\x01binary\n")
+    app = ltt(a, b)
+    s = app.snap()
+    assert s.tab_names == ["a.txt"] and "The file looks binary" in s.status

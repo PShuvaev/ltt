@@ -1,4 +1,6 @@
 """Ctrl+L: a line number, or file[:line[:col]] as compilers and agents print it — paths, completion, help, keys."""
+import unicodedata
+
 import pytest
 
 from harness import keys as K
@@ -574,3 +576,29 @@ def test_a_location_with_a_colon_after_it_opens_there(ltt, ws, suffix, pos):  # 
     app.type(p + suffix)
     s = app.press("enter")
     assert s.tab_names == ["b.txt"] and s.pos[:3] == pos
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: Tab completes the prefix the first 50 matches share: with abc00…abc49 "
+                                       "and abd.txt it completes 'a' to 'abc', past abd.txt")
+def test_tab_completes_only_what_every_match_shares(ltt, ws):  # Textadept's ui_test.lua (completion lists)
+    for i in range(50):
+        ws.write(f"proj/abc{i:02d}.txt", "x")
+    ws.write("proj/abd.txt", "d")
+    app = ltt(ws.write("proj/zz.txt", "z"))
+    app.press("ctrl+l")
+    app.type("a")
+    s = app.press("tab")
+    assert prompt_line(s) == " Go to: ab"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: completion compares names unit by unit: a name stored decomposed "
+                                       "(e and a combining accent, as macOS often keeps é) is not offered for é")
+def test_completion_offers_a_decomposed_name_for_a_composed_one(ltt, ws):  # Textadept's lfs_ext tests
+    ws.write("proj/" + unicodedata.normalize("NFD", "café.txt"), "c")
+    app = ltt(ws.write("proj/zz.txt", "z"))
+    app.press("ctrl+l")
+    app.type("caf\u00e9")
+    s = app.press("tab")
+    assert unicodedata.normalize("NFC", prompt_line(s)) == " Go to: café.txt"
+    assert unicodedata.normalize("NFC", app.press("enter").active_tab.name) == "café.txt"
