@@ -838,3 +838,14 @@ def test_a_match_after_many_of_the_first_letter_is_found(ltt, ws):  # Kakoune's 
     app.type("eror")
     s = final_results(app, "eror")
     assert found(s) == "1" and locations(s) == ["f.txt:1"]
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the two-character threshold counts UTF-16 units: one emoji "
+                                       "starts a search")
+def test_one_emoji_is_one_character_short_of_a_search(ltt, ws):  # Ox's kaolinite char_mapping
+    ws.write("proj/a.txt", "\U0001F440 here\n")
+    app = ltt(ws.path("proj"))
+    app.press("ctrl+f")
+    s = app.type("\U0001F440")
+    assert search_input(s) == ("folder", "\U0001F440", "search starts at 2 characters")

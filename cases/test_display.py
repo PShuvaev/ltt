@@ -4,6 +4,7 @@ colours and the position in the status line. At 100x30 the text area is 63 cells
 import pytest
 
 from editor_helpers import burst, line_col, open_text, row_y
+from harness import keys as K
 
 WIDE = "ascii line\n日本語のテキスト ⚡ text\n\tx = find(me);\n"
 LONG = "".join(chr(ord("a") + i % 26) for i in range(200))
@@ -380,3 +381,54 @@ def test_a_tab_hidden_while_the_terminal_shrank_shows_its_cursor_line(ltt, ws):
     row = s.editor_row(25)
     assert row is not None and row.current
     assert s.cursor == (s.text_x, row.y) and not s.cursor_hidden
+
+
+# ---------------------------------------------------------------- the cursor at the markers, counts of characters
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a wide character under the cursor in the last cell before the › "
+                                       "marker does not fit and is drawn blank: the cursor sits on an empty cell")
+@pytest.mark.parametrize("how", ["left_from_the_end", "right_from_the_start"])
+def test_the_wide_character_under_the_cursor_at_the_right_edge_is_shown(ltt, ws, how):  # Ox's kaolinite widths
+    if how == "left_from_the_end":
+        app = open_text(ltt, ws, "日本語" * 40 + "\n")
+        app.press("end")
+        s = burst(app, *["left"] * 31)
+    else:
+        app = open_text(ltt, ws, "x" + "日本語" * 40 + "\n")
+        s = burst(app, *["right"] * 31)
+    x, y = s.cursor
+    assert s.cell(x, y).ch in ("日", "本", "語") and s.cell(x + 1, y).ch != "›"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: after a sideways wheel the cursor is drawn on the ‹ or › marker "
+                                       "that covers its column")
+@pytest.mark.parametrize("side", ["left", "right"])
+def test_a_cursor_under_a_marker_after_a_sideways_wheel_is_hidden(ltt, ws, side):  # Ox's document_scrolling
+    app = open_text(ltt, ws, LONG + "\n")
+    if side == "left":
+        s = burst(app, "right", "right", "right")
+        wheel, marker = K.WHEEL_RIGHT, s.text_x  # three columns a notch: column 4 goes under the ‹
+    else:
+        s = burst(app, *["right"] * 62)  # the view is one column in; the wheel takes it back to 0
+        wheel, marker = K.WHEEL_LEFT, s.text_x + 62
+    y = s.cursor[1]
+    app.write(K.mouse(wheel, s.text_x + 5, y))
+    s = app.settle()
+    assert s.cell(marker, y).ch in "‹›" and s.cursor_hidden
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: counts of characters are UTF-16 units: one emoji counts 2 in "
+                                       "'selected:', in the copy, paste and select-all messages")
+def test_an_emoji_counts_as_one_character(ltt, ws):  # Ox's kaolinite char_mapping
+    app = open_text(ltt, ws, "a\U0001F440b\n")
+    app.press("right")
+    s = app.press("shift+right")
+    assert s.pos[3] == 1
+    app.press("ctrl+c")
+    app.wait_status("Copied to the clipboard: 1 chars")
+    s = app.press("ctrl+a")
+    assert s.status == "Selected all: 4 chars."
+    app.press("end")
+    s = app.paste("\U0001F440e\u0301")
+    assert s.status == "Pasted: 2 chars"
