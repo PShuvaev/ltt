@@ -10,6 +10,9 @@ public sealed class TreeNode
     /// <summary>A symbolic link (git asks about the link itself, never about paths beyond it).</summary>
     public bool IsLink { get; init; }
 
+    /// <summary>A symbolic link, or inside a symlinked folder.</summary>
+    public bool ThroughLink => IsLink || Parent is { ThroughLink: true };
+
     /// <summary>Hidden from git by .gitignore (also .git and .gitignore themselves) — drawn dimmed.</summary>
     public bool Ignored { get; set; }
 
@@ -76,15 +79,8 @@ public sealed class FileTree
     public List<TreeNode> Visible { get; private set; } = new();
 
     /// <summary>Expanded folders that are, or lie inside, a symlinked folder: a watcher does not follow links.</summary>
-    public List<TreeNode> ExpandedThroughLinks()
-    {
-        var list = new List<TreeNode>();
-        foreach (var n in Visible)
-            if (n is { IsDir: true, Expanded: true, ChildrenLoaded: true })
-                for (var a = n; a != null; a = a.Parent)
-                    if (a.IsLink) { list.Add(n); break; }
-        return list;
-    }
+    public List<TreeNode> ExpandedThroughLinks() =>
+        Visible.Where(n => n is { IsDir: true, Expanded: true, ChildrenLoaded: true, ThroughLink: true }).ToList();
     public int SelectedIndex { get; private set; }
     public int ScrollOffset { get; private set; }
 
@@ -94,19 +90,13 @@ public sealed class FileTree
     /// <summary>Bumped whenever folders are read: new ones may hold a repository.</summary>
     public int Generation { get; private set; }
 
-    /// <summary>Read folders that hold a .git: repositories, for the change marks.</summary>
-    public IEnumerable<string> RepoFolders()
-    {
-        var stack = new Stack<TreeNode>(Roots);
-        while (stack.Count > 0)
-        {
-            var node = stack.Pop();
-            if (!node.ChildrenLoaded) continue;
-            foreach (var c in node.Children)
-                if (c.Name == ".git") yield return node.FullPath;
-                else if (c.IsDir && !c.IsLink) stack.Push(c);
-        }
-    }
+    /// <summary>Read folders that hold a .git: repositories, for the change marks (none through a symlinked folder).</summary>
+    public IEnumerable<string> RepoFolders() =>
+        Roots.SelectMany(Folders).Where(n => !n.ThroughLink && n.Children.Any(c => c.Name == ".git")).Select(n => n.FullPath);
+
+    /// <summary>A folder and every folder listed below it, read or not (a root nested in another is listed twice).</summary>
+    private static IEnumerable<TreeNode> Folders(TreeNode n) =>
+        n.ChildrenLoaded ? n.Children.Where(c => c.IsDir).SelectMany(Folders).Prepend(n) : new[] { n };
 
     public FileTree(string rootPath) : this(new[] { rootPath }) { }
 
@@ -147,15 +137,15 @@ public sealed class FileTree
         if (!node.IsDir || node.ChildrenLoaded) return;
         node.ChildrenLoaded = true;
         Generation++;
-        node.Children.Clear();
         node.Children.AddRange(ReadEntries(node));
-        MarkIgnored(node);
+        MarkIgnored(node.FullPath, new[] { node });
         StartSizing(node, sync: true);
         SortChildren(node);
     }
 
-    /// <summary>The folder's entries from disk as fresh nodes (empty when unreadable or gone).</summary>
-    private static List<TreeNode> ReadEntries(TreeNode node)
+    /// <summary>The folder's entries from disk as fresh nodes (empty when unreadable or gone);
+    /// isNew — it is read again, where those it did not hold before are new entries.</summary>
+    private static List<TreeNode> ReadEntries(TreeNode node, bool isNew = false)
     {
         var list = new List<TreeNode>();
         try
@@ -172,6 +162,7 @@ public sealed class FileTree
                     Size = e is FileInfo fi ? SafeLength(fi) : 0,
                     SizeExact = e is FileInfo,
                     WriteUtc = SafeWriteTime(e),
+                    IsNew = isNew,
                 });
         }
         catch (UnauthorizedAccessException) { /* folder not accessible — just empty */ }
@@ -179,7 +170,7 @@ public sealed class FileTree
         return list;
     }
 
-    private static long SafeLength(FileInfo fi)
+    internal static long SafeLength(FileInfo fi)
     {
         try { return fi.Length; }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return 0; }
@@ -281,38 +272,21 @@ public sealed class FileTree
     private static string Literal(string query) => query.StartsWith(':') ? "./" + query : query;
 
     /// <summary>
-    /// Mark children that git ignores, asking git itself (`git check-ignore`) so
-    /// nested .gitignore files, negations and global excludes count; outside a
-    /// repository nothing is marked. .git and .gitignore are marked too, as
-    /// service entries git does not report.
+    /// Mark the children of these folders that git ignores, asking git itself (one
+    /// `git check-ignore` in cwd) so nested .gitignore files, negations and global
+    /// excludes count; outside a repository nothing is marked. .git and .gitignore
+    /// are marked too, as service entries git does not report. false — git gave no
+    /// answer: outside a repository, or it refused the batch (a path in a nested one, say).
     /// </summary>
-    private static void MarkIgnored(TreeNode dir)
+    private static bool MarkIgnored(string cwd, IEnumerable<TreeNode> dirs, int timeoutMs = 2000)
     {
-        foreach (var c in dir.Children) c.Ignored = IsService(c);
-        if (dir.Children.Count == 0) return;
         // A folder is asked about as "name/"; a symlink as the link itself — a path
         // through it would make git refuse the whole batch ("beyond a symbolic link").
-        static string Query(TreeNode c) => Literal(c.Name + (c.IsDir && !c.IsLink ? "/" : ""));
-        string? output = Proc.Run("git", "check-ignore --stdin -z", dir.FullPath,
-            string.Concat(dir.Children.Select(c => Query(c) + "\0")), timeoutMs: 2000, okExitCodes: new[] { 0, 1 });
-        if (output == null) return;
-        var ignored = new HashSet<string>(output.Split('\0', StringSplitOptions.RemoveEmptyEntries), StringComparer.Ordinal);
-        foreach (var c in dir.Children)
-            if (ignored.Contains(Query(c))) c.Ignored = true;
-    }
-
-    /// <summary>
-    /// Mark ignored children of many folders under one root with a single
-    /// `git check-ignore`. false — git refused the batch (a path in a nested
-    /// repository, say) and the folders should be asked one by one; outside a
-    /// repository there is nothing to mark, so that counts as done.
-    /// </summary>
-    private static bool MarkIgnoredBatch(string root, IReadOnlyList<TreeNode> dirs)
-    {
         var queries = new List<(TreeNode Child, string Query)>();
         foreach (var dir in dirs)
         {
-            string rel = Path.GetRelativePath(root, dir.FullPath).Replace('\\', '/');
+            // git's separator is "/"; off Windows a backslash is part of a name and stays one.
+            string rel = Path.GetRelativePath(cwd, dir.FullPath).Replace(Path.DirectorySeparatorChar, '/');
             string prefix = rel == "." ? "" : rel + "/";
             foreach (var c in dir.Children)
             {
@@ -321,9 +295,9 @@ public sealed class FileTree
             }
         }
         if (queries.Count == 0) return true;
-        string? output = Proc.Run("git", "check-ignore --stdin -z", root, string.Concat(queries.Select(q => q.Query + "\0")),
-            timeoutMs: 5000, okExitCodes: new[] { 0, 1 });
-        if (output == null) return Proc.Run("git", "rev-parse --show-prefix", root) == null; // not a repository at all
+        string? output = Proc.Run("git", "check-ignore --stdin -z", cwd, string.Concat(queries.Select(q => q.Query + "\0")),
+            timeoutMs, okExitCodes: new[] { 0, 1 });
+        if (output == null) return false;
         var ignored = new HashSet<string>(output.Split('\0', StringSplitOptions.RemoveEmptyEntries), StringComparer.Ordinal);
         foreach (var (c, q) in queries)
             if (ignored.Contains(q)) c.Ignored = true;
@@ -356,14 +330,13 @@ public sealed class FileTree
         }
         foreach (var root in Roots) Walk(root);
         Visible = list;
-        SelectedIndex = Math.Clamp(SelectedIndex, 0, Math.Max(0, Visible.Count - 1));
-        EnsureVisible();
+        SelectIndex(SelectedIndex);
     }
 
     private void SelectNode(TreeNode node)
     {
         int idx = Visible.IndexOf(node);
-        if (idx >= 0) { SelectedIndex = idx; EnsureVisible(); }
+        if (idx >= 0) SelectIndex(idx);
     }
 
     /// <summary>Add another root folder to the panel. false — already present (it just gets selected).</summary>
@@ -406,26 +379,15 @@ public sealed class FileTree
         ScrollOffset = Math.Clamp(ScrollOffset, 0, Math.Max(0, Visible.Count - ViewHeight));
     }
 
-    /// <summary>Move the selection by delta rows (mouse wheel).</summary>
-    public void MoveBy(int delta)
-    {
-        SelectedIndex = Math.Clamp(SelectedIndex + delta, 0, Math.Max(0, Visible.Count - 1));
-        EnsureVisible();
-    }
-
-    /// <summary>Select a row by index in the visible list (mouse click).</summary>
+    /// <summary>Select a row by index in the visible list (a click; Home, End), the nearest one when out of range.</summary>
     public void SelectIndex(int index)
     {
         SelectedIndex = Math.Clamp(index, 0, Math.Max(0, Visible.Count - 1));
         EnsureVisible();
     }
 
-    public void MoveUp() { if (SelectedIndex > 0) SelectedIndex--; EnsureVisible(); }
-    public void MoveDown() { if (SelectedIndex < Visible.Count - 1) SelectedIndex++; EnsureVisible(); }
-    public void PageUp() { SelectedIndex = Math.Max(0, SelectedIndex - ViewHeight); EnsureVisible(); }
-    public void PageDown() { SelectedIndex = Math.Min(Math.Max(0, Visible.Count - 1), SelectedIndex + ViewHeight); EnsureVisible(); }
-    public void Home() { SelectedIndex = 0; EnsureVisible(); }
-    public void End() { SelectedIndex = Math.Max(0, Visible.Count - 1); EnsureVisible(); }
+    /// <summary>Move the selection by delta rows (arrows, pages, the mouse wheel).</summary>
+    public void MoveBy(int delta) => SelectIndex(SelectedIndex + delta);
 
     /// <summary>Right arrow: expand a folder or move to its first child.</summary>
     public void ExpandOrDescend()
@@ -435,12 +397,11 @@ public sealed class FileTree
         if (!node.Expanded)
         {
             node.Expanded = true;
-            LoadChildren(node);
-            RebuildVisible();
+            RebuildVisible(); // reads the folder
         }
         else if (node.Children.Count > 0)
         {
-            MoveDown();
+            MoveBy(1);
         }
     }
 
@@ -466,8 +427,7 @@ public sealed class FileTree
         var node = Selected;
         if (node is not { IsDir: true }) return false;
         node.Expanded = !node.Expanded;
-        if (node.Expanded) LoadChildren(node);
-        RebuildVisible();
+        RebuildVisible(); // reads a folder just expanded
         return true;
     }
 
@@ -561,8 +521,6 @@ public sealed class FileTree
     public bool RefreshDirs(IReadOnlyCollection<string>? dirs, bool deep = false)
     {
         // Every listed folder by path (a root nested in another is listed twice).
-        static IEnumerable<TreeNode> Folders(TreeNode n) =>
-            n.ChildrenLoaded ? n.Children.Where(c => c.IsDir).SelectMany(Folders).Prepend(n) : new[] { n };
         var listed = Roots.SelectMany(Folders).ToLookup(n => n.FullPath, Paths.Comparer);
         var targets = new HashSet<TreeNode>(); // loaded folders to re-read
         var recount = new HashSet<TreeNode>(); // folders whose subfolders are counted again
@@ -604,7 +562,7 @@ public sealed class FileTree
             {
                 Name = order[i].Name, FullPath = order[i].FullPath, IsDir = true, Depth = order[i].Depth,
             };
-            probes[i].Children.AddRange(ReadEntries(order[i]));
+            probes[i].Children.AddRange(ReadEntries(order[i], isNew: true));
         });
         // One git call per repository answers for every re-read folder in it (a nested one has rules
         // of its own); per-folder calls only if git refuses the batch. Outside any: the service entries.
@@ -616,16 +574,16 @@ public sealed class FileTree
                 foreach (var c in group.SelectMany(p => p.Children)) c.Ignored = IsService(c);
                 continue;
             }
-            if (!MarkIgnoredBatch(group.Key, group.ToList()))
-                Parallel.ForEach(group, new ParallelOptions { MaxDegreeOfParallelism = 8 }, MarkIgnored);
+            if (!MarkIgnored(group.Key, group, timeoutMs: 5000)
+                && Proc.Run("git", "rev-parse --show-prefix", group.Key) != null) // refused, though a repository
+                Parallel.ForEach(group, new ParallelOptions { MaxDegreeOfParallelism = 8 }, d => MarkIgnored(d.FullPath, new[] { d }));
         }
-        var fresh = probes.Select(p => p.Children).ToArray();
         for (int i = 0; i < order.Count; i++)
         {
             var node = order[i];
             var old = node.Children.ToDictionary(c => c.Name + (c.IsDir ? "/" : ""), StringComparer.Ordinal);
             node.Children.Clear();
-            foreach (var f in fresh[i])
+            foreach (var f in probes[i].Children) // read as this node's: its Parent and Depth are already right
             {
                 if (old.TryGetValue(f.Name + (f.IsDir ? "/" : ""), out var keep) && keep.IsLink == f.IsLink)
                 {
@@ -634,23 +592,14 @@ public sealed class FileTree
                     if (!f.IsDir) keep.Size = f.Size;
                     node.Children.Add(keep);
                 }
-                else
-                    node.Children.Add(new TreeNode
-                    {
-                        Name = f.Name, FullPath = f.FullPath, IsDir = f.IsDir, IsLink = f.IsLink,
-                        Depth = node.Depth + 1, Parent = node, Ignored = f.Ignored,
-                        Size = f.Size, SizeExact = f.SizeExact, WriteUtc = f.WriteUtc, IsNew = true,
-                    });
+                else node.Children.Add(f); // a new entry
             }
             StartSizing(node, sync: false);
             SortChildren(node);
         }
         RebuildVisible();
-        if (selected != null)
-        {
-            int idx = Visible.FindIndex(v => Paths.Same(v.FullPath, selected.FullPath));
-            if (idx >= 0) { SelectedIndex = idx; EnsureVisible(); }
-        }
+        int idx = selected == null ? -1 : Visible.FindIndex(v => Paths.Same(v.FullPath, selected.FullPath));
+        if (idx >= 0) SelectIndex(idx);
         return true;
     }
 }
@@ -695,10 +644,7 @@ internal sealed class FolderSizer : IDisposable
         foreach (var w in _work) { w.Current?.Dispose(); w.Current = null; }
     }
 
-    /// <summary>True when no further progress will be made (done or capped).</summary>
-    public bool Settled => _spent >= TotalEntryBudget || _work.All(w => w.Complete);
-
-    /// <summary>Advance the walk by up to maxEntries entries (and till the deadline). Returns Settled.</summary>
+    /// <summary>Advance the walk by up to maxEntries entries (and till the deadline); true once done or capped.</summary>
     public bool Step(int maxEntries, long deadlineTickMs = long.MaxValue, CancellationToken ct = default)
     {
         int budget = Math.Min(maxEntries, TotalEntryBudget - _spent);
@@ -713,7 +659,7 @@ internal sealed class FolderSizer : IDisposable
                 budget = DrainOneDirectory(w, budget, deadlineTickMs, ct);
             }
         }
-        return Settled;
+        return _spent >= TotalEntryBudget || _work.All(w => w.Complete);
     }
 
     /// <summary>Process one directory of this folder (resuming where a previous step paused).</summary>
@@ -729,25 +675,14 @@ internal sealed class FolderSizer : IDisposable
         var en = w.Current;
         while (budget > 0 && !ct.IsCancellationRequested)
         {
-            FileSystemInfo e;
-            try
-            {
-                if (!en.MoveNext()) { en.Dispose(); w.Current = null; return budget; }
-                e = en.Current;
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                en.Dispose();
-                w.Current = null;
-                return budget;
-            }
+            bool more;
+            try { more = en.MoveNext(); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { more = false; } // gone or unreadable
+            if (!more) { en.Dispose(); w.Current = null; return budget; }
+            var e = en.Current;
             budget--;
             if ((++_spent & 0xFF) == 0 && Environment.TickCount64 > deadlineTickMs) return budget;
-            if (e is FileInfo fi)
-            {
-                try { w.Partial += fi.Length; }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { /* vanished mid-walk */ }
-            }
+            if (e is FileInfo fi) w.Partial += FileTree.SafeLength(fi); // 0 when it vanished mid-walk
             else if ((e.Attributes & FileAttributes.ReparsePoint) == 0)
                 w.Todo.Push(e.FullName);
         }

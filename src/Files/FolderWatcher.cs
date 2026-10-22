@@ -4,10 +4,9 @@
 /// <param name="Dirs">Folders whose entries were created, deleted, renamed or written to.</param>
 /// <param name="Deep">A burst too big to list folder by folder: Dirs are where it happened, anywhere below.</param>
 /// <param name="Renames">Renames seen (old path → new path), for open tabs to follow.</param>
-/// <param name="Content">Some file's contents changed.</param>
 /// <param name="Restart">A watcher failed: the watchers are to be created anew.</param>
 internal sealed record WatchBatch(string Summary, bool Overflow, IReadOnlyCollection<string> Dirs, bool Deep,
-    IReadOnlyList<(string Old, string New)> Renames, bool Content, bool Restart);
+    IReadOnlyList<(string Old, string New)> Renames, bool Restart);
 
 /// <summary>
 /// Watching the panel's root folders, recursively, so the tree follows
@@ -45,7 +44,6 @@ internal sealed class FolderWatcher : IDisposable
     private bool _overflow;
     private bool _deep;
     private bool _restart;
-    private bool _content;
     private int _count;
     private DateTime _firstAt;
     private DateTime _lastAt;
@@ -77,6 +75,7 @@ internal sealed class FolderWatcher : IDisposable
     {
         if (_disposed) return;
         var wanted = roots.Select(Paths.Normalize).Distinct(Paths.Comparer).ToList();
+        List<string> pollSnapshot;
         lock (_lock)
         {
             _roots = new HashSet<string>(wanted, Paths.Comparer);
@@ -84,22 +83,19 @@ internal sealed class FolderWatcher : IDisposable
             _pollGaveUp.RemoveWhere(r => !_roots.Contains(r));
             foreach (var stale in _pollSig.Keys.Where(k => !_roots.Contains(k)).ToList())
                 _pollSig.Remove(stale);
+            pollSnapshot = _pollRoots.ToList();
         }
-
-        List<string> pollSnapshot;
-        lock (_lock) pollSnapshot = _pollRoots.ToList();
-        SyncSet(_rootWatchers,
-            wanted.Where(p => Directory.Exists(p) && !pollSnapshot.Contains(p, Paths.Comparer)),
-            recursive: true, isParent: false, forceRecreate);
+        SyncSet(_rootWatchers, wanted.Where(p => Directory.Exists(p) && !pollSnapshot.Contains(p, Paths.Comparer)),
+            isParent: false, forceRecreate);
         var parents = wanted.Select(p => Path.GetDirectoryName(p))
             .Where(p => p != null && Directory.Exists(p))
             .Select(p => p!)
             .Distinct(Paths.Comparer);
-        SyncSet(_parentWatchers, parents, recursive: false, isParent: true, forceRecreate);
+        SyncSet(_parentWatchers, parents, isParent: true, forceRecreate);
     }
 
     private void SyncSet(Dictionary<string, FileSystemWatcher> set, IEnumerable<string> wantedPaths,
-        bool recursive, bool isParent, bool forceRecreate)
+        bool isParent, bool forceRecreate)
     {
         var wanted = new HashSet<string>(wantedPaths, Paths.Comparer);
         foreach (var path in set.Keys.Where(k => !wanted.Contains(k) || forceRecreate).ToList())
@@ -110,20 +106,20 @@ internal sealed class FolderWatcher : IDisposable
         foreach (string path in wanted)
         {
             if (set.ContainsKey(path)) continue;
-            var watcher = TryCreate(path, recursive, isParent);
+            var watcher = TryCreate(path, isParent);
             if (watcher != null) set[path] = watcher;
             else lock (_lock) (isParent ? _deadParents : _pollRoots).Add(path);
         }
     }
 
-    private FileSystemWatcher? TryCreate(string path, bool recursive, bool isParent)
+    private FileSystemWatcher? TryCreate(string path, bool isParent)
     {
         FileSystemWatcher? w = null;
         try
         {
             w = new FileSystemWatcher(path)
             {
-                IncludeSubdirectories = recursive,
+                IncludeSubdirectories = !isParent, // a root's whole tree; a parent's own entries, the root among them
                 // Names drive the tree; LastWrite tells that contents changed (open tabs, sizes).
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName
                                | (isParent ? 0 : NotifyFilters.LastWrite),
@@ -133,7 +129,7 @@ internal sealed class FolderWatcher : IDisposable
             w.Deleted += (_, e) => OnEvent(isParent, e.FullPath, null, "deleted");
             w.Renamed += (_, e) => OnEvent(isParent, e.FullPath, e.OldFullPath, "renamed");
             // A write changes no entry, but it does change sizes (the file's and its folders').
-            if (!isParent) w.Changed += (_, e) => Mark(null, content: true, dir: Path.GetDirectoryName(e.FullPath));
+            if (!isParent) w.Changed += (_, e) => Mark(null, dir: Path.GetDirectoryName(e.FullPath));
             w.Error += (_, e) => OnError(path, isParent, e.GetException());
             w.EnableRaisingEvents = true;
             return w;
@@ -188,7 +184,7 @@ internal sealed class FolderWatcher : IDisposable
     /// <summary>Mark a change for the current batch (safe to call from FileSystemWatcher threads).</summary>
     internal void MarkDirty(string what, bool overflow = false) => Mark(what, overflow: overflow);
 
-    private void Mark(string? what, bool overflow = false, bool content = false, string? dir = null,
+    private void Mark(string? what, bool overflow = false, string? dir = null,
         string? oldDir = null, (string, string)? rename = null)
     {
         lock (_lock)
@@ -200,14 +196,12 @@ internal sealed class FolderWatcher : IDisposable
                 _firstAt = now;
                 _count = 0;
                 _overflow = _deep = false;
-                _content = false;
                 _lastWhat = "";
                 _dirs = new HashSet<string>(Paths.Comparer);
                 _renames = new List<(string, string)>();
             }
             _lastAt = now;
             _overflow |= overflow;
-            _content |= content;
             if (dir != null) _dirs.Add(dir);
             if (oldDir != null) _dirs.Add(oldDir);
             if (_dirs.Count > MaxBatchDirs)
@@ -246,12 +240,12 @@ internal sealed class FolderWatcher : IDisposable
     {
         lock (_lock)
         {
-            batch = new WatchBatch("", false, Array.Empty<string>(), false, Array.Empty<(string, string)>(), false, false);
+            batch = new WatchBatch("", false, Array.Empty<string>(), false, Array.Empty<(string, string)>(), false);
             if (!_pending) return false;
             var due = new[] { _lastAt.AddMilliseconds(_debounceMs), _firstAt.AddMilliseconds(_maxDelayMs) }.Min();
             if (DateTime.UtcNow < due) return false;
             string summary = _count > 1 ? $"{_lastWhat}; {_count} changes in total" : _lastWhat;
-            batch = new WatchBatch(summary, _overflow, _dirs, _deep, _renames, _content, _restart);
+            batch = new WatchBatch(summary, _overflow, _dirs, _deep, _renames, _restart);
             _pending = _restart = false;
             return true;
         }

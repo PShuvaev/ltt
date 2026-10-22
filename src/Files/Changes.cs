@@ -55,12 +55,8 @@ internal sealed class Changes
         }
     }
 
-    /// <summary>ltt made this file or folder (a paste, a new file): outside git it shows as new.</summary>
-    public void Created(string path)
-    {
-        _created.Add(Paths.Normalize(path));
-        _wanted.UnionWith(_repos.Where(r => Paths.IsInside(path, r.Root)).Select(r => r.Root));
-    }
+    /// <summary>ltt made this file or folder (a paste, a new file): outside git it shows as new (in git, RefreshAll follows).</summary>
+    public void Created(string path) => _created.Add(Paths.Normalize(path));
 
     private bool IsCreated(string path) => _created.Any(c => Paths.IsSameOrInside(path, c));
 
@@ -257,22 +253,15 @@ internal sealed class Changes
             else if (f.Length > 4 && f[0] is '1' or '2' or 'u' && f[1] == ' ')
             {
                 // "1 XY sub mH mI mW hH hI path"; a rename has a score before the path and its old path after it.
-                int at = AfterSpaces(f, f[0] == '1' ? 8 : f[0] == '2' ? 9 : 10);
-                if (at < 0) continue;
+                int before = f[0] == '1' ? 8 : f[0] == '2' ? 9 : 10;
+                var parts = f.Split(' ', before + 1); // the path, last, keeps its spaces
+                if (parts.Length <= before) continue;
                 string xy = f.Substring(2, 2);
-                Mark(entries, root, Full(root, f[at..]), xy[0] == 'A' ? Kind.Added : Kind.Modified, gone: xy.Contains('D'));
+                Mark(entries, root, Full(root, parts[before]), xy[0] == 'A' ? Kind.Added : Kind.Modified, gone: xy.Contains('D'));
                 if (f[0] == '2' && i + 1 < fields.Length) Mark(entries, root, Full(root, fields[++i]), Kind.Modified, gone: true);
             }
         }
         return (head, entries, newDirs);
-    }
-
-    /// <summary>Where the text after the first `count` spaces starts; -1 — there are fewer.</summary>
-    private static int AfterSpaces(string s, int count)
-    {
-        int at = -1;
-        while (count-- > 0 && (at = s.IndexOf(' ', at + 1)) >= 0) { }
-        return at < 0 ? -1 : at + 1;
     }
 
     private static string Full(string root, string rel) =>

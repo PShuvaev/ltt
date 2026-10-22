@@ -291,8 +291,8 @@ internal sealed partial class App
                 break;
             case ConsoleKey.X when Ctrl(key): PickUp(cut: true); break;
             case ConsoleKey.V when Ctrl(key): Paste(); break;
-            case ConsoleKey.UpArrow: _tree.MoveUp(); break;
-            case ConsoleKey.DownArrow: _tree.MoveDown(); break;
+            case ConsoleKey.UpArrow: _tree.MoveBy(-1); break;
+            case ConsoleKey.DownArrow: _tree.MoveBy(1); break;
             case ConsoleKey.RightArrow:
                 // Right on a file opens it (like Enter); on a folder it expands/descends.
                 if (_tree.Selected is { IsDir: false } fileToOpen)
@@ -301,10 +301,10 @@ internal sealed partial class App
                     _tree.ExpandOrDescend();
                 break;
             case ConsoleKey.LeftArrow: _tree.CollapseOrAscend(); break;
-            case ConsoleKey.PageUp: _tree.PageUp(); break;
-            case ConsoleKey.PageDown: _tree.PageDown(); break;
-            case ConsoleKey.Home: _tree.Home(); break;
-            case ConsoleKey.End: _tree.End(); break;
+            case ConsoleKey.PageUp: _tree.MoveBy(-_tree.ViewHeight); break;
+            case ConsoleKey.PageDown: _tree.MoveBy(_tree.ViewHeight); break;
+            case ConsoleKey.Home: _tree.SelectIndex(0); break;
+            case ConsoleKey.End: _tree.SelectIndex(_tree.Visible.Count - 1); break;
             case ConsoleKey.Enter:
                 if (!_tree.ToggleSelected() && _tree.Selected is { IsDir: false } file)
                     TryOpen(file.FullPath, 0, activateOnly: true);

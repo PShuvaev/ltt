@@ -220,16 +220,11 @@ public static class FuzzySearch
         return c;
     }
 
-    private sealed class WorstFirst : IComparer<SearchHit>
-    {
-        public static readonly WorstFirst Instance = new();
-        public int Compare(SearchHit? a, SearchHit? b) => RankCompare(b!, a!);
-    }
-
     /// <summary>Keeps the best `capacity` hits of however many are offered.</summary>
     private sealed class TopHits(int capacity)
     {
-        private readonly PriorityQueue<SearchHit, SearchHit> _heap = new(WorstFirst.Instance);
+        // Worst first: the one to drop is at hand.
+        private readonly PriorityQueue<SearchHit, SearchHit> _heap = new(Comparer<SearchHit>.Create((a, b) => RankCompare(b, a)));
         private int _offered;
 
         public void Offer(SearchHit h)
@@ -292,20 +287,11 @@ public static class FuzzySearch
     public static SearchResult SearchLines(string filePath, string relativePath, IEnumerable<string> lines,
         string query, int maxResults = 500, CancellationToken ct = default)
     {
-        var hits = new List<SearchHit>();
-        if (string.IsNullOrWhiteSpace(query)) return new SearchResult(hits, false);
-
-        int lineNo = 0;
-        foreach (var line in lines)
-        {
-            if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) break;
-            if (line.Contains('\0')) break;
-            int score = ScoreQuery(query, line, out int st, out int len);
-            if (score < 0) continue;
-            if (hits.Count >= maxResults) return new SearchResult(hits, true);
-            hits.Add(new SearchHit(filePath, relativePath, lineNo, line, score, st, len));
-        }
-        return new SearchResult(hits, false);
+        if (string.IsNullOrWhiteSpace(query)) return SearchResult.Empty;
+        var hits = Matches(filePath, relativePath, lines, query, ct).Take(maxResults + 1).ToList(); // no line read past that
+        bool truncated = hits.Count > maxResults;
+        if (truncated) hits.RemoveAt(maxResults);
+        return new SearchResult(hits, truncated);
     }
 
     /// <summary>Stream-search a single file from disk in document order (whatever its size).</summary>
@@ -360,7 +346,7 @@ public static class FuzzySearch
                     if (!seen.Add(file)) continue;
                     string rel = prefix + Path.GetRelativePath(home, file);
                     if (buffers != null && buffers.TryGetValue(file, out var lines))
-                        ScanLines(file, rel, lines, query, top.Offer, ct);
+                        foreach (var h in Matches(file, rel, lines, query, ct)) top.Offer(h);
                     else switch (ScanFile(file, rel, query, top, ct))
                     {
                         case Scan.TooLarge: skipped++; break;
@@ -398,13 +384,13 @@ public static class FuzzySearch
             int offered = 0;
             try
             {
-                ScanLines(file, rel, TextFile.ReadLines(file, latin1: false), query, h => { offered++; top.Offer(h); }, ct);
+                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: false), query, ct)) { offered++; top.Offer(h); }
             }
             catch (System.Text.DecoderFallbackException)
             {
                 // Not UTF-8: as the editor does, read every byte as one Latin-1 character.
                 top.Forget(file, offered);
-                ScanLines(file, rel, TextFile.ReadLines(file, latin1: true), query, top.Offer, ct);
+                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: true), query, ct)) top.Offer(h);
             }
         }
         catch (IOException) { /* unreadable or vanished — skip it */ }
@@ -412,16 +398,17 @@ public static class FuzzySearch
         return Scan.Done;
     }
 
-    private static void ScanLines(string file, string rel, IEnumerable<string> lines, string query,
-        Action<SearchHit> offer, CancellationToken ct)
+    /// <summary>The lines that match, in document order, up to a binary-looking line (or a cancellation).</summary>
+    private static IEnumerable<SearchHit> Matches(string file, string rel, IEnumerable<string> lines, string query,
+        CancellationToken ct)
     {
         int lineNo = 0;
         foreach (var line in lines)
         {
-            if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) return;
-            if (line.Contains('\0')) break; // binary file — stop looking further
+            if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) yield break;
+            if (line.Contains('\0')) yield break; // binary file — stop looking further
             int score = ScoreQuery(query, line, out int st, out int len);
-            if (score >= 0) offer(new SearchHit(file, rel, lineNo, line, score, st, len));
+            if (score >= 0) yield return new SearchHit(file, rel, lineNo, line, score, st, len);
         }
     }
 }

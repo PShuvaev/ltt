@@ -108,20 +108,14 @@ internal static class FileOps
             if (from.LinkTarget is { } link) CopyLink(from, to, link);
             else if (from is DirectoryInfo dir)
             {
+                // Private from the start, as the original (0700 stays 0700); its exact mode once it is
+                // filled, so that a read-only folder still takes what goes in it.
+                var mode = OperatingSystem.IsWindows() ? default : File.GetUnixFileMode(from.FullName);
                 if (OperatingSystem.IsWindows()) Directory.CreateDirectory(to);
-                else
-                {
-                    // Private from the start, as the original (0700 stays 0700); its exact mode once it is
-                    // filled, so that a read-only folder still takes what goes in it.
-                    var mode = File.GetUnixFileMode(from.FullName);
-                    Directory.CreateDirectory(to, mode | UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-                    foreach (var entry in dir.EnumerateFileSystemInfos())
-                        CopyEntry(entry, Path.Combine(to, entry.Name), progress, ct);
-                    File.SetUnixFileMode(to, mode);
-                    return;
-                }
+                else Directory.CreateDirectory(to, mode | UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
                 foreach (var entry in dir.EnumerateFileSystemInfos())
                     CopyEntry(entry, Path.Combine(to, entry.Name), progress, ct);
+                if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(to, mode);
                 return;
             }
             else if (TextFile.Stat(from.FullName) is { Regular: false })
