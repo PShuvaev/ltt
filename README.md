@@ -5,8 +5,11 @@
 ### 👀 look at what the agent wrote · ✏️ touch a line or two · 🪃 toss it back
 for the age of coding agents
 
+**No config, no plugins — want it different? [Ask your agent to change it.](#change-it-dont-script-it)**
+
 [![.NET 10](https://img.shields.io/badge/.NET-10-512BD4?style=flat-square&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/download/dotnet/10.0)
 [![dependencies: 0](https://img.shields.io/badge/dependencies-0-2ea44f?style=flat-square)](ltt.csproj)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 </div>
 
@@ -59,10 +62,21 @@ API. Customising an editor through scripts in its own little language —
 Vimscript, Emacs Lisp — is tedious, fragile and limited to whatever the
 editor chose to expose; it is a habit from before language models. Now
 it is quicker in every sense to fork ltt and ask Claude, or any coding
-agent, to rework whatever gets in your way: the whole editor is a small
-C# codebase with no dependencies, and the tests in the `tests` branch
-tell the agent whether anything broke. ltt is meant as a minimal base to
-reshape that way, not a platform to configure.
+agent, to rework whatever gets in your way. The whole editor is a small
+C# codebase with no dependencies, [`AGENTS.md`](AGENTS.md) shows the agent
+around, and about 2,000 tests in the `tests` branch — most of them drive
+ltt in a real terminal, the way you would — tell it whether anything broke.
+ltt is meant as a minimal base to reshape that way, not a platform to
+configure.
+
+> **You:** Ctrl+D should duplicate the current line, or the selected lines.
+>
+> **Claude Code:** done in 20 lines across three files, and in a question
+> Ctrl+D can no longer answer "D — don't save"; 19 new tests, all tests pass.
+> [The change](https://github.com/PShuvaev/ltt/compare/main...example-ctrl-d) ·
+> [its tests](https://github.com/PShuvaev/ltt/compare/tests...example-ctrl-d-tests)
+
+Run your fork from its clone: `dotnet run --project path/to/ltt -c Release`.
 
 ## Why a terminal
 
