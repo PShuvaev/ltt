@@ -32,7 +32,7 @@ for that loop.
 already keep open next to your agent, shows folders on the left and files
 on the right, searches the whole tree fuzzily as you type, and gets out
 of the way. No configuration, no plugins, no project files, zero
-dependencies: ~8.3k lines of C# in a 230 KB assembly (.NET 10).
+dependencies: plain C# on .NET 10.
 
 It is a general tool, not only for codebases: notes, docs, configs, logs —
 any folder of text works the same way. Open several folders side by side,
