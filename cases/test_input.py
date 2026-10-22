@@ -1,8 +1,11 @@
 """Input other than plain typing: escape sequences cut short, too long or unknown, terminal replies,
-broken UTF-8, control bytes, the keypad and the function keys."""
+broken UTF-8, control bytes, the keypad and the function keys, keys as other terminals send them."""
+import signal
 import time
 
 import pytest
+
+from harness import keys as K
 
 TEXT = "START\nsecond\nthird\n"  # four lines: the last one is empty
 
@@ -299,6 +302,19 @@ def test_function_keys_do_nothing_in_the_editor(ltt, ws, name):
     assert s.mode == "EDITOR" and s.tab_names == ["a.txt"] and app.alive
 
 
+@pytest.mark.xfail(strict=True, reason="BUG: function keys of other terminals type their last letter: the Linux "
+                                       "console's ESC [[A..E, and SS3 with a modifier (Konsole, old GNOME: ESC O 2 P)")
+@pytest.mark.parametrize("seq", [
+    pytest.param(b"\x1b[[A", id="linux F1"), pytest.param(b"\x1b[[E", id="linux F5"),
+    pytest.param(b"\x1bO2P", id="SS3 Shift+F1"), pytest.param(b"\x1bO1;2P", id="SS3 1;2 Shift+F1"),
+    pytest.param(b"\x1bO5R", id="SS3 Ctrl+F3"),
+])
+def test_function_keys_of_other_terminals_type_nothing(ltt, ws, seq):  # dte's test_linux_parse_key, Kakoune's parse_ss3
+    app = open_file(ltt, ws)
+    s = then_mark(app, seq)
+    assert s.editor_lines[:2] == ["|START", "second"] and s.pos == (1, 4, 2, 0)
+
+
 def test_function_keys_do_nothing_in_the_tree(ltt, ws):
     ws.write("proj/a.txt", "alpha\n")
     ws.write("proj/sub/b.txt", "beta\n")
@@ -307,3 +323,102 @@ def test_function_keys_do_nothing_in_the_tree(ltt, ws):
     s = app.press(b"".join(FUNCTION_KEYS.values()))
     assert s.tree_names == before.tree_names and s.tree_selected.name == before.tree_selected.name
     assert s.mode == "TREE" and s.tabs == [] and app.alive
+
+
+# ---------------------------------------------------------------- keys as other terminals send them
+# Ideas from dte's terminal tests, Kakoune's terminal_ui.cc and Neovim's tui_spec.
+
+def effect(ltt, ws, key):
+    """What a key does at line 2, column 3 of a.txt, right after typing X there (b.txt is the next tab):
+    the lines, the cursor, the active tab, the mode, the status, the file on disk. The session is killed after."""
+    ws.write("a.txt", TEXT)
+    ws.write("b.txt", "other\n")
+    app = ltt(ws.path("a.txt"), ws.path("b.txt"))
+    app.press("down", "right", "right")
+    app.type("X")
+    if isinstance(key, bytes):
+        app.write(key)
+        app.settle(frame=False)
+    else:
+        app.press(key)
+    s = app.snap()
+    seen = (s.editor_lines[:3], s.pos, s.active_tab.name, s.mode, s.status, ws.read("a.txt"))
+    app.signal(signal.SIGKILL)  # no backup of the dirty tab for the next session to restore
+    app.wait_exit()
+    return seen
+
+
+OTHER_TERMINALS = {
+    "rxvt Shift+Up": (b"\x1b[a", "shift+up"), "rxvt Shift+Down": (b"\x1b[b", "shift+down"),
+    "rxvt Shift+Right": (b"\x1b[c", "shift+right"), "rxvt Shift+Left": (b"\x1b[d", "shift+left"),
+    "rxvt Ctrl+Up": (b"\x1bOa", "ctrl+up"), "rxvt Ctrl+Down": (b"\x1bOb", "ctrl+down"),
+    "rxvt Ctrl+Right": (b"\x1bOc", "ctrl+right"), "rxvt Ctrl+Left": (b"\x1bOd", "ctrl+left"),
+    "rxvt Shift+Home": (b"\x1b[7$", "shift+home"), "rxvt Shift+End": (b"\x1b[8$", "shift+end"),
+    "rxvt Ctrl+PgUp": (b"\x1b[5^", "ctrl+pgup"), "rxvt Ctrl+PgDn": (b"\x1b[6^", "ctrl+pgdn"),
+    "SS3 Ctrl+Left": (b"\x1bO5D", "ctrl+left"), "SS3 Shift+Right": (b"\x1bO2C", "shift+right"),
+    "modifyOtherKeys Ctrl+S": (b"\x1b[27;5;115~", "ctrl+s"), "modifyOtherKeys Ctrl+Z": (b"\x1b[27;5;122~", "ctrl+z"),
+    "modifyOtherKeys Ctrl+Shift+Z": (b"\x1b[27;6;90~", kitty(122, "6")),
+}
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: keys as rxvt, Konsole and xterm with modifyOtherKeys (or tmux with "
+                                       "extended keys) send them do nothing: Shift/Ctrl+arrows, Ctrl+PgUp, Ctrl+S…")
+@pytest.mark.parametrize("name", OTHER_TERMINALS)
+def test_keys_of_other_terminals_do_what_the_key_does(ltt, ws, name):
+    seq, same_as = OTHER_TERMINALS[name]
+    assert effect(ltt, ws, seq) == effect(ltt, ws, same_as)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a key typed right after rxvt's ESC [7$ is swallowed: "
+                                       "'$' is taken for the middle of a longer sequence")
+def test_a_key_right_after_an_rxvt_shift_home_counts(ltt, ws):  # dte's rxvt table
+    app = open_file(ltt, ws)
+    s = then_mark(app, b"\x1b[7$")
+    assert s.editor_lines[0].startswith("|")
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: kitty's Hyper and Meta modifiers are ignored, so Hyper+H or Meta+K "
+                                       "types the letter")
+@pytest.mark.parametrize("seq", [kitty(104, "17"), kitty(107, "33"), kitty(104, "17", "104")],
+                         ids=["hyper+h", "meta+k", "hyper+h with text"])
+def test_kitty_hyper_and_meta_with_a_letter_type_nothing(ltt, ws, seq):  # Neovim's tui_spec, dte's sweep
+    app = open_file(ltt, ws)
+    s = then_mark(app, seq)
+    assert s.editor_lines[0] == "|START"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a kitty keypad digit without its text field types nothing")
+def test_kitty_keypad_digit_without_text_types_the_digit(ltt, ws):  # Neovim's tui_spec
+    app = open_file(ltt, ws)
+    s = then_mark(app, kitty(57399))  # KP_0, as a terminal that leaves the text out sends it
+    assert s.editor_lines[0] == "0|START"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the application keypad's comma (ESC O l) and space (ESC O space) "
+                                       "are dropped")
+@pytest.mark.parametrize("seq, typed", [(b"\x1bOl", ","), (b"\x1bO ", " ")], ids=["comma", "space"])
+def test_application_keypad_comma_and_space_type_themselves(ltt, ws, seq, typed):  # dte's keypad table
+    app = open_file(ltt, ws)
+    s = then_mark(app, seq)
+    assert s.editor_lines[0] == typed + "|START"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: an Esc that arrives together with a mouse report or a focus event "
+                                       "is lost (only a key after it makes it Alt+key)")
+@pytest.mark.parametrize("after", ["wheel", "focus"])
+def test_esc_followed_at_once_by_a_mouse_report_still_acts(ltt, ws, after):  # Neovim's #41763
+    app = open_file(ltt, ws, text="".join(f"line {i}\n" for i in range(1, 200)))
+    s0 = app.snap()
+    tail = K.mouse(K.WHEEL_DOWN, s0.text_x + 5, s0.editor_rows[3].y, True) if after == "wheel" else b"\x1b[I"
+    app.write(b"\x1b" + tail)  # Esc while a trackpad still scrolls
+    s = app.wait(lambda s: s.mode == "TREE", what="the Esc", timeout=3)
+    if after == "wheel":
+        assert s.editor_rows[0].number > s0.editor_rows[0].number
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the tail of a terminal reply over 64 KiB (an OSC 52 clipboard answer) "
+                                       "is typed into the file")
+def test_a_huge_terminal_reply_is_not_typed(ltt, ws):  # Neovim's 'does not crash on large inputs'
+    app = open_file(ltt, ws)
+    s = then_mark(app, b"\x1b]52;c;" + b"QUFB" * 20_000 + b"\x1b\\")
+    assert s.editor_lines[0] == "|START"
