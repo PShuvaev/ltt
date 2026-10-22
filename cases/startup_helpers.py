@@ -68,7 +68,7 @@ def shell_status(code):
     return 128 - code if code < 0 else code
 
 
-SIGNALS = {"SIGTERM": signal.SIGTERM, "SIGINT": signal.SIGINT, "SIGHUP": signal.SIGHUP}
+SIGNALS = {"SIGTERM": signal.SIGTERM, "SIGINT": signal.SIGINT, "SIGHUP": signal.SIGHUP, "SIGQUIT": signal.SIGQUIT}
 
 
 def run_plain(tools, ws, args, stdin, stdout, cwd=None):

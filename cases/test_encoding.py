@@ -1,4 +1,4 @@
-"""Encodings: UTF-8 with and without BOM, UTF-16 LE/BE, Latin-1, broken text, binary files, files over 8 MB."""
+"""Encodings: UTF-8 with and without BOM, UTF-16 and UTF-32 LE/BE, Latin-1, broken text, binary files, files over 8 MB."""
 import os
 import shutil
 
@@ -18,6 +18,9 @@ FORMATS = {
     "utf16be": (lambda t: b"\xfe\xff" + t.encode("utf-16-be"), ", UTF-16 BE"),
     "utf16le_crlf": (lambda t: b"\xff\xfe" + t.replace("\n", "\r\n").encode("utf-16-le"), ", UTF-16 LE, CRLF"),
     "utf16be_crlf": (lambda t: b"\xfe\xff" + t.replace("\n", "\r\n").encode("utf-16-be"), ", UTF-16 BE, CRLF"),
+    # UTF-32 LE's BOM starts like UTF-16 LE's (idea from dte's test/encoding.c)
+    "utf32le": (lambda t: b"\xff\xfe\x00\x00" + t.encode("utf-32-le"), ", UTF-32 LE"),
+    "utf32be": (lambda t: b"\x00\x00\xfe\xff" + t.encode("utf-32-be"), ", UTF-32 BE"),
     "latin1": (lambda t: t.encode("latin-1"), ", Latin-1 (not valid UTF-8)"),
     "latin1_crlf": (lambda t: t.replace("\n", "\r\n").encode("latin-1"), ", Latin-1 (not valid UTF-8), CRLF"),
 }
@@ -34,29 +37,6 @@ def test_open_shows_the_text_and_names_the_format(ltt, ws, fmt):
     assert f"Opened f.txt (3 lines{described}), tab 1/1." in s.status
     assert s.editor_lines[:3] == ["héllo wörld", "naïve café", ""]
     assert not s.tabs[0].dirty
-
-
-# Not in FORMATS while they fail: id -> (BOM, codec, what the open status says)
-UTF32 = {
-    "utf32le": (b"\xff\xfe\x00\x00", "utf-32-le", ", UTF-32 LE"),
-    "utf32be": (b"\x00\x00\xfe\xff", "utf-32-be", ", UTF-32 BE"),
-}
-
-
-@pytest.mark.xfail(strict=True, reason="BUG: UTF-32 LE opens as UTF-16 LE with a NUL between the letters "
-                                       "(its BOM starts like UTF-16's), and UTF-32 BE is refused as binary")
-@pytest.mark.parametrize("fmt", list(UTF32))
-def test_utf32_opens_as_utf32_and_an_edit_keeps_it(ltt, ws, fmt):  # idea from dte's test/encoding.c
-    bom, codec, described = UTF32[fmt]
-    p = ws.write("f.txt", bom + TEXT.encode(codec))
-    app = ltt(ws.root, cols=140)
-    s = open_by_path(app, p)
-    assert f"Opened f.txt (3 lines{described}), tab 1/1." in s.status
-    assert s.editor_lines[:3] == ["héllo wörld", "naïve café", ""]
-    app.type("Ünï ")
-    app.wait_editor(["Ünï héllo wörld"])
-    save(app, "f.txt")
-    assert ws.read_bytes("f.txt") == bom + ("Ünï " + TEXT).encode(codec)
 
 
 def _east_asian_text():
@@ -137,7 +117,7 @@ def test_the_latin1_save_error_names_a_character_outside_the_bmp(ltt, ws):
     assert "'👀' cannot be saved in this file's Latin-1 encoding." in s.status
 
 
-@pytest.mark.parametrize("fmt", ["utf16le", "utf16be", "utf8_bom"])
+@pytest.mark.parametrize("fmt", ["utf16le", "utf16be", "utf8_bom", "utf32le", "utf32be"])
 def test_a_typed_emoji_is_saved_whole(ltt, ws, fmt):
     encode = FORMATS[fmt][0]
     p = ws.write("f.txt", encode("text\n"))
@@ -224,7 +204,7 @@ def test_a_nul_byte_deep_in_the_file_makes_it_binary(ltt, ws):
     assert s.status == BINARY and s.tabs == []
 
 
-@pytest.mark.parametrize("fmt", ["utf8_bom", "utf16le", "utf16be"])
+@pytest.mark.parametrize("fmt", ["utf8_bom", "utf16le", "utf16be", "utf32le", "utf32be"])
 def test_a_bom_alone_is_an_empty_file_that_keeps_its_bom(ltt, ws, fmt):
     encode = FORMATS[fmt][0]
     p = ws.write("f.txt", encode(""))

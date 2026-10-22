@@ -98,8 +98,6 @@ def test_mixed_line_endings_are_announced_and_saved_as_the_most_common(ltt, ws):
     assert ws.read_bytes("m.txt") == b"a\r\nb\r\nc\r\nd\r\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a lone CR in a file with LF line endings counts as a line break, "
-                                       "and saving rewrites every line ending to the most common kind")
 @pytest.mark.parametrize("data, first, edited", [
     (b"1%\r2%\r3%\r4%\nDone\n", "1%\u240d2%\u240d3%\u240d4%", b"1%\r2%\r3%\r4%\nDone!\n"),
     (b"50%\r100%\ndone\n", "50%\u240d100%", b"50%\r100%\ndone!\n"),
@@ -171,8 +169,6 @@ def test_save_keeps_the_permissions(ltt, ws, mode):
     assert ws.read("run.sh") == "#echo hi\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: saving gives the file the group of its folder "
-                                       "(only the mode is copied to the new file)")
 def test_save_keeps_the_group(ltt, ws):  # idea from dte's tmp_file() (fchown before fchmod)
     p = ws.write("proj/g.txt", "hello\n")
     folder_gid = os.stat(ws.path("proj")).st_gid
@@ -188,8 +184,6 @@ def test_save_keeps_the_group(ltt, ws):  # idea from dte's tmp_file() (fchown be
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=True, reason="BUG: the temporary file of a save is created readable by everyone "
-                                       "and takes the original's mode only after the text is in it")
 def test_a_private_file_is_never_readable_by_others_while_it_saves(ltt, ws):
     # Idea from Vim's Test_backupcopy_auto_restrictive_umask: 100 MB, so the temporary file is there a while.
     p = ws.write("proj/secret.txt", ("s" * 99 + "\n") * 1_000_000)
@@ -389,8 +383,6 @@ def _parting(actual, expected):
     return f"they part at {n}: {actual[n:n + 20]!r} instead of {expected[n:n + 20]!r}"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a write error midway through an in-place save (a hard-linked file, "
-                                       "a read-only folder) leaves the new bytes over the start of the old ones")
 @pytest.mark.parametrize("why", ["hard_link", "read_only_folder"])
 def test_a_write_error_midway_in_place_keeps_the_original(ltt, ws, why):  # idea from micro's safeWrite
     body = "x" * 99 + "\n"

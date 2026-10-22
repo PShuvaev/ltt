@@ -1285,6 +1285,24 @@ internal static class UnitTests
         }
         Check(wrong.Count == 0, "key sweep: 18 keys x 16 modifier codes come out whole, with nothing typed from a prefix"
                                 + (wrong.Count > 0 ? $" — wrong: {string.Join(", ", wrong.Take(8))}" : ""));
+
+        // Keys as other terminals send them (dte's tables): rxvt, the Linux console, SS3 with a modifier, modifyOtherKeys.
+        static ConsoleKeyInfo? One(string s) => Parse(Encoding.ASCII.GetBytes(s)) is [KeyInput { Key: var k }] ? k : null;
+        Check(One("\x1b[a") is { Key: ConsoleKey.UpArrow, Modifiers: ConsoleModifiers.Shift }
+              && One("\x1bOd") is { Key: ConsoleKey.LeftArrow, Modifiers: ConsoleModifiers.Control }
+              && One("\x1b[7$") is { Key: ConsoleKey.Home, Modifiers: ConsoleModifiers.Shift }
+              && One("\x1b[5^") is { Key: ConsoleKey.PageUp, Modifiers: ConsoleModifiers.Control }
+              && One("\x1b[2@") is { Key: ConsoleKey.Insert, Modifiers: ConsoleModifiers.Shift | ConsoleModifiers.Control }
+              && One("\x1b[[C") is { Key: ConsoleKey.F3 }
+              && One("\x1bO2P") is { Key: ConsoleKey.F1, Modifiers: ConsoleModifiers.Shift }
+              && One("\x1bO1;5A") is { Key: ConsoleKey.UpArrow, Modifiers: ConsoleModifiers.Control }
+              && One("\x1b[27;5;115~") is { Key: ConsoleKey.S, Modifiers: ConsoleModifiers.Control }
+              && One("\x1b[27;6;90~") is { Key: ConsoleKey.Z } z && z.Modifiers.HasFlag(ConsoleModifiers.Control | ConsoleModifiers.Shift),
+            "keys: rxvt's, the Linux console's, SS3 with a modifier and modifyOtherKeys come out as their keys");
+        Check(Parse("\x1b[104;17u"u8.ToArray()).Count == 0 && Parse("\x1b[107;33u"u8.ToArray()).Count == 0
+              && Parse("\x1b[27;3;1114112~"u8.ToArray()).Count == 0 && Parse("\x1b[27;5;99999999999999999999~"u8.ToArray()).Count == 0
+              && Parse("\x1b[7$x"u8.ToArray()) is [KeyInput { Key.Key: ConsoleKey.Home }, KeyInput { Key.KeyChar: 'x' }],
+            "keys: Hyper or Meta with a letter, and modifyOtherKeys past Unicode, type nothing; a key after ESC [7$ counts");
     }
 
     private static void TestEditVectors()
@@ -1501,6 +1519,10 @@ internal static class UnitTests
         var marks = LineDiff.Marks(was.ToArray(), now);
         Check(marks.SequenceEqual(want),
             "diff: a long middle changed in 50 places, a line added and one removed: exactly those marks");
+        Check(LineDiff.Follow(Chars("abcdef"), Chars("xabcYef"), 1, 3, 4).SequenceEqual(new[] { 2, 4, 5 })
+              && LineDiff.Follow(Chars("abc"), Chars("ac"), 1)[0] == 1
+              && LineDiff.Follow(Chars("abcdefgh"), Chars("aXh"), 1, 2, 5).SequenceEqual(new[] { 1, 2, 2 }),
+            "diff: a line followed through the diff: kept, replaced, or gone to the line after");
         var shuffled = was.OrderBy(_ => rnd.Next()).ToArray();
         Check(Sound(was.ToArray(), shuffled, LineDiff.Marks(was.ToArray(), shuffled), out _),
             "diff: a long text shuffled: what is kept is still in order in the old text");

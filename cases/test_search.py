@@ -831,8 +831,6 @@ def test_the_count_is_never_stale_after_a_fast_scan(ltt, ws):
         app.press("esc", "esc")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a fuzzy match is looked for from the first 32 places of the query's "
-                                       "first letter only, so a long line (a log, minified code) misses it")
 def test_a_match_after_many_of_the_first_letter_is_found(ltt, ws):  # Kakoune's ranked_match tries every start
     p = ws.write("proj/f.txt", "see " * 20 + "error\nnothing\n")
     app = ltt(p)

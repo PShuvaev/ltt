@@ -222,7 +222,7 @@ def test_kitty_keypad_key_without_text_never_types_a_private_use_character(ltt, 
     app = edit(ltt, ws, "x\n", keyboard="kitty")
     app.press(K.kitty(57400) + K.kitty(57413) + K.kitty(57376) + K.kitty_key("y"))  # keypad 1, keypad +, F13
     s = app.snap()
-    assert s.editor_lines[0] == "yx"
+    assert s.editor_lines[0] == "1+yx"  # the keypad's own characters, never its private-use key codes
 
 
 def test_application_keypad_types_digits_and_operators(ltt, ws):  # T10

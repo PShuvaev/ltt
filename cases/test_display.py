@@ -76,8 +76,6 @@ def test_combining_marks_take_no_cell_of_their_own(ltt, ws):
     assert s.cursor == (s.text_x + 7, y)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a combining mark at the start of a line is drawn on the gutter cell "
-                                       "before the text")
 def test_a_combining_mark_at_the_start_of_a_line_stays_out_of_the_gutter(ltt, ws):  # micro's line_array tests
     app = open_text(ltt, ws, "\u0301abc\n")
     s = app.snap()
@@ -96,8 +94,6 @@ INVISIBLE = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: bidi controls and invisible characters reach the terminal as they are: "
-                                       "nothing shows them, and a bidi terminal reorders the line around them")
 @pytest.mark.parametrize("name", INVISIBLE)
 def test_an_invisible_character_shows_as_a_stand_in(ltt, ws, name):
     ch = INVISIBLE[name]

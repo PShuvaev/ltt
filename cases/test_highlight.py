@@ -112,16 +112,12 @@ def test_comment_marks_in_strings_and_quotes_in_comments_are_just_text(ltt, ws):
     assert fg(s, "/* it's */") == "DarkGreen" and fg(s, "long") == "Cyan"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a signed exponent breaks a number: in 1e-3 the - is grey "
-                                       "(the tokenizer's own comment lists 1e-3 as a number)")
 def test_a_number_with_a_signed_exponent_is_one_number(ltt, ws):
     app = open_text(ltt, ws, "x = 1e-3 + 2.5E+4;\n", name="a.c")
     s = app.snap()
     assert fg(s, "1e-3") == "Magenta" and fg(s, "2.5E+4") == "Magenta"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ruby's defined? is in the keyword list but never coloured: "
-                                       "a word ends before the ?")
 def test_ruby_defined_is_a_keyword(ltt, ws):
     app = open_text(ltt, ws, "x = defined?(y)\n", name="a.rb")
     assert fg(app.snap(), "defined?") == "Cyan"
@@ -297,8 +293,6 @@ def test_a_comment_opened_in_a_very_long_line_still_covers_the_next_lines(ltt, w
 
 # ---------------------------------------------------------------- ideas from Kakoune's highlighters
 
-@pytest.mark.xfail(strict=True, reason="BUG: a Rust lifetime ('a) opens a character string that runs to the end "
-                                       "of the line and swallows the comment after it")
 def test_rust_lifetimes_are_not_strings(ltt, ws):  # Kakoune's test/highlight/rust
     text = "fn f<'a>(x: &'a str) -> &'a str { x } // note\nlet c = 'x'; let q = '\\''; let d = '\"';\n"
     app = open_text(ltt, ws, text, name="a.rs")
@@ -307,8 +301,6 @@ def test_rust_lifetimes_are_not_strings(ltt, ws):  # Kakoune's test/highlight/ru
     assert [fg(s, c, line=2) for c in ("'x'", "'\\''", "'\"'")] == ["Yellow"] * 3
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: in shell a # inside a word ($#, ${#a[@]}, ${p##*/}) starts a comment, "
-                                       "and a backslash escapes the closing quote of a single-quoted string")
 def test_shell_hash_inside_a_word_and_single_quotes(ltt, ws):  # Kakoune's sh.kak
     text = "if [ $# -eq 0 ]; then\n  n=${#a[@]}; b=${p##*/}; echo 'C:\\' # x\nfi\n"
     app = open_text(ltt, ws, text, name="a.sh")
@@ -317,7 +309,6 @@ def test_shell_hash_inside_a_word_and_single_quotes(ltt, ws):  # Kakoune's sh.ka
     assert fg(s, "'C:\\'", line=2) == "Yellow" and fg(s, "# x", line=2) == "DarkGreen"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: in YAML a # inside a value (the #anchor of a URL) starts a comment")
 def test_yaml_hash_inside_a_value_is_not_a_comment(ltt, ws):  # Kakoune's yaml.kak
     app = open_text(ltt, ws, "url: http://x/#top\nk: v # c\n", name="a.yaml")
     s = app.snap()

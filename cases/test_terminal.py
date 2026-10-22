@@ -39,7 +39,7 @@ def test_start_takes_over_the_terminal(ltt, ws):
     assert is_raw(app.tty_settings())  # no echo, no line editing, no signal keys, no XON/XOFF
 
 
-@pytest.mark.parametrize("way", ["ctrl+q", "ctrl+q, d", "SIGTERM", "SIGINT", "SIGHUP"])
+@pytest.mark.parametrize("way", ["ctrl+q", "ctrl+q, d", "SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"])
 def test_leaving_restores_the_terminal(ltt, ws, way):  # D7, V14
     ws.write("a.txt", "alpha\n")
     app = ltt(ws.path("a.txt"))
@@ -49,7 +49,7 @@ def test_leaving_restores_the_terminal(ltt, ws, way):  # D7, V14
 
 
 @pytest.mark.parametrize("way, code", [("ctrl+q", 0), ("ctrl+q, d", 0), ("SIGTERM", 143), ("SIGINT", 130),
-                                       ("SIGHUP", 129)])
+                                       ("SIGHUP", 129), ("SIGQUIT", 131)])
 def test_exit_code(ltt, ws, way, code):
     ws.write("a.txt", "alpha\n")
     app = ltt(ws.path("a.txt"))
@@ -73,7 +73,7 @@ def test_nothing_is_printed_after_a_session_without_unsaved_edits(ltt, ws, way):
     assert ws.recovery_files() == []
 
 
-@pytest.mark.parametrize("name", ["SIGTERM", "SIGINT", "SIGHUP"])
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"])
 def test_signal_with_unsaved_edits_leaves_a_note_on_the_shell_screen(ltt, ws, name):
     ws.write("a.txt", "alpha\n")
     app = ltt(ws.path("a.txt"))
@@ -102,19 +102,6 @@ def test_note_counts_the_unsaved_tabs(ltt, ws):
     assert len(ws.recovery_files()) == 2
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: SIGQUIT kills ltt with the terminal left raw, on the alternate screen, "
-                                       "the mouse and kitty keys on")
-def test_sigquit_restores_the_terminal(ltt, ws):  # micro's handled signals, Neovim's signal_spec
-    ws.write("a.txt", "alpha\n")
-    app = ltt(ws.path("a.txt"))
-    app.signal(signal.SIGQUIT)
-    assert app.wait_exit() == 131
-    assert after_last_frame(app.output).startswith(LEAVE)
-    assert app.tty_settings() == fresh_termios()
-
-
-@pytest.mark.xfail(strict=True, reason="BUG: after a stop and a continue, quitting leaves the terminal raw "
-                                       "(the runtime puts back its own snapshot of the settings, taken in raw mode)")
 def test_quit_after_a_stop_and_a_continue_restores_the_terminal(ltt, ws):  # Neovim's tui_spec 'suspending'
     ws.write("a.txt", "alpha\n")
     app = ltt(ws.path("a.txt"))
@@ -125,8 +112,6 @@ def test_quit_after_a_stop_and_a_continue_restores_the_terminal(ltt, ws):  # Neo
     assert app.tty_settings() == fresh_termios()
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: after a stop and a continue, ltt neither sets its terminal modes again "
-                                       "nor repaints, so whatever ran in the meantime stays on the screen")
 def test_continue_after_a_stop_sets_the_modes_again_and_repaints(ltt, ws):
     ws.write("a.txt", "alpha\n")
     app = ltt(ws.path("a.txt"))
@@ -180,7 +165,7 @@ def huge_file():
 
 
 @pytest.mark.slow
-@pytest.mark.parametrize("name", ["SIGTERM", "SIGINT", "SIGHUP"])
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGINT", "SIGHUP", "SIGQUIT"])
 def test_signal_during_startup_restores_the_terminal(ltt, huge_file, name):  # V13
     app = ltt(huge_file, ready=False)
     app.wait_output(ENTER, timeout=20)  # raw mode and the modes are on, the file is still being read

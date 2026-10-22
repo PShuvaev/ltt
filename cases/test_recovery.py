@@ -15,7 +15,7 @@ import pytest
 
 W = 160  # columns: room for the longest status message
 MAGIC = "ltt-recovery 1"
-SIGNALS = [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129)]
+SIGNALS = [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129), (signal.SIGQUIT, 131)]
 
 
 def backups(folder):
@@ -89,15 +89,6 @@ def test_signal_backs_up_the_dirty_tab_and_exits_128_plus_n(ltt, ws, sig, code):
     assert ws.read("proj/note.txt") == "hello\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: SIGQUIT ends ltt without a backup of the unsaved edits "
-                                       "(only TERM, INT and HUP are handled)")
-def test_sigquit_backs_up_the_dirty_tab_and_exits_131(ltt, ws):  # micro and Neovim handle QUIT as well
-    assert killed(ltt, ws, signal.SIGQUIT) == 131
-    assert [b[1:] for b in backups(ws.recovery)] == [(2, ws.path("proj/note.txt"), "XYZhello\n")]
-
-
-@pytest.mark.xfail(strict=True, reason="BUG: backups are readable by everyone: the folder ltt makes is 0755 "
-                                       "and each backup 0644, whatever the mode of the file it keeps")
 def test_backups_are_readable_by_their_owner_only(ltt, ws):  # idea from Vim's test_swap.vim
     assert not os.path.exists(ws.recovery)  # ltt makes it
     app = edited(ltt, ws)
@@ -279,8 +270,6 @@ def test_long_file_name_is_backed_up_and_restored(ltt, ws):
     assert s.editor_lines[0] == "XYZhello" and ws.recovery_files() == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the backup of a file with a line break in its name is never restored "
-                                       "(its path reads as two header lines) and stays in the folder for good")
 def test_a_line_break_in_the_file_name_is_backed_up_and_restored(ltt, ws):  # idea from micro's backup names
     assert killed(ltt, ws, rel="proj/nl\nname.txt") == 143
     app, s = restart(ltt, ws)
@@ -321,7 +310,7 @@ def test_foreign_files_in_the_recovery_folder_are_left_alone(ltt, ws):
         "readme.txt": "just some text\n",
         "20260101-000000-000-aaaaaaaa-000001.txt.tmp": f"{MAGIC}\n1\n{note}\nhalf written",  # a write cut short
         "20260101-000000-000-aaaaaaaa-000002.txt": f"{MAGIC}\n1\n\nno path",
-        "20260101-000000-000-aaaaaaaa-000003.txt": f"ltt-recovery 2\n1\n{note}\nanother format",
+        "20260101-000000-000-aaaaaaaa-000003.txt": f"ltt-recovery 9\n1\n{note}\na later format",
     }
     os.makedirs(ws.recovery, exist_ok=True)
     for name, text in files.items():

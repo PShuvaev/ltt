@@ -436,8 +436,6 @@ def test_hidden_tab_catches_up_with_the_search_results_panel(ltt, ws):
     assert s.results_top is not None and row is not None and row.y < s.results_top
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a file reached through another spelling of its folder (a symlinked "
-                                       "folder; /tmp and /private/tmp on macOS) opens a second tab on the same file")
 def test_a_path_through_a_link_finds_the_tab_already_open(ltt, ws):  # Vim's Test_swap_symlink
     p = ws.write("proj/a.c", "1\n2\n3\n4\n")
     os.symlink(ws.path("proj"), ws.path("alias"))

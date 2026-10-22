@@ -431,8 +431,6 @@ def test_a_renamed_root_is_still_watched(ltt, ws):
     assert roots(s) == ["renamed"] and s.tree_row("new.txt").depth == 1
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder reached through a symlink is taken for another folder: "
-                                       "its file on the command line, or the folder itself in Ctrl+O, adds a second root")
 @pytest.mark.parametrize("how", ["command_line", "ctrl_o"])
 def test_a_folder_through_a_link_is_the_same_root(ltt, ws, how):  # Vim's Test_swap_symlink
     ws.write("proj/a.c", "1\n")

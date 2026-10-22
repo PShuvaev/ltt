@@ -121,8 +121,6 @@ def test_reload_keeps_the_cursor_on_its_line_when_lines_come_above(ltt, ws):
     assert s.pos[:3] == (10, 13, 7)  # still at the end of "line 8", now two lines down
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: when lines change both above and below the cursor, a reload keeps "
-                                       "the cursor's line number and the view's, so both land on other text")
 @pytest.mark.parametrize("own_line", ["kept", "changed"])
 def test_reload_keeps_the_cursor_on_its_text_when_lines_change_above_and_below(ltt, ws, own_line):
     # The usual shape of an agent's edit in several places (idea from Kakoune, which maps
@@ -600,8 +598,6 @@ def rewrite_keeping_time(ws, rel, text):
     os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a rewrite that keeps the size and the modification time goes unnoticed "
-                                       "(only those two tell a disk version), and saving overwrites it without asking")
 def test_a_rewrite_keeping_size_and_time_marks_a_dirty_tab_changed(ltt, ws):  # idea from Helix's write.rs
     app = open_file(ltt, ws, text="hello world\n")
     app.type("MINE ")
@@ -610,8 +606,6 @@ def test_a_rewrite_keeping_size_and_time_marks_a_dirty_tab_changed(ltt, ws):  # 
     assert app.press("ctrl+s").question.startswith("a.txt changed on disk since it was opened!")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a rewrite that keeps the size and the modification time goes unnoticed: "
-                                       "a clean tab goes on showing the old text")
 def test_a_rewrite_keeping_size_and_time_reloads_a_clean_tab(ltt, ws):
     app = open_file(ltt, ws, text="hello world\n")
     rewrite_keeping_time(ws, "proj/a.txt", "HELLO WORLD\n")

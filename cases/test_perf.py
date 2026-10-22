@@ -319,8 +319,6 @@ def test_moving_along_a_3mb_line(ltt):
 
 # ---------------------------------------------------------------- a run of 200,000 combining marks
 
-@pytest.mark.xfail(strict=True, reason="BUG: every mark of a long combining run is joined to its cell one at a time, "
-                                       "a quadratic cost on every frame, and all of them are sent to the terminal")
 @pytest.mark.parametrize("mark", ["\u0301", "\u200b"], ids=["acute", "zero-width space"])
 def test_typing_next_to_a_line_of_200000_marks(ltt, ws, mark):
     # Zalgo text (micro's line_array tests, Helix's adversarial_extreme_zalgo): ~2 s a key before

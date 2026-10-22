@@ -581,8 +581,6 @@ def test_dragging_along_the_title_copies_once(ltt, ws):  # C3: every mouse move 
     assert osc52_count(app, mark) == 1 and len(ws.clipboard_log) == 1
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a drag that outlives its tab (Alt+2 or Ctrl+W during it) moves the "
-                                       "cursor of the tab that takes over and selects there")
 @pytest.mark.parametrize("switch", ["alt+2", "ctrl+w"])
 def test_a_drag_that_outlives_its_tab_leaves_the_next_tab_alone(ltt, ws, switch):
     # Kakoune's regression 0-delete-buffer-while-dragging

@@ -302,8 +302,6 @@ def test_function_keys_do_nothing_in_the_editor(ltt, ws, name):
     assert s.mode == "EDITOR" and s.tab_names == ["a.txt"] and app.alive
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: function keys of other terminals type their last letter: the Linux "
-                                       "console's ESC [[A..E, and SS3 with a modifier (Konsole, old GNOME: ESC O 2 P)")
 @pytest.mark.parametrize("seq", [
     pytest.param(b"\x1b[[A", id="linux F1"), pytest.param(b"\x1b[[E", id="linux F5"),
     pytest.param(b"\x1bO2P", id="SS3 Shift+F1"), pytest.param(b"\x1bO1;2P", id="SS3 1;2 Shift+F1"),
@@ -361,24 +359,18 @@ OTHER_TERMINALS = {
 }
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: keys as rxvt, Konsole and xterm with modifyOtherKeys (or tmux with "
-                                       "extended keys) send them do nothing: Shift/Ctrl+arrows, Ctrl+PgUp, Ctrl+S…")
 @pytest.mark.parametrize("name", OTHER_TERMINALS)
 def test_keys_of_other_terminals_do_what_the_key_does(ltt, ws, name):
     seq, same_as = OTHER_TERMINALS[name]
     assert effect(ltt, ws, seq) == effect(ltt, ws, same_as)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a key typed right after rxvt's ESC [7$ is swallowed: "
-                                       "'$' is taken for the middle of a longer sequence")
 def test_a_key_right_after_an_rxvt_shift_home_counts(ltt, ws):  # dte's rxvt table
     app = open_file(ltt, ws)
     s = then_mark(app, b"\x1b[7$")
     assert s.editor_lines[0].startswith("|")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: kitty's Hyper and Meta modifiers are ignored, so Hyper+H or Meta+K "
-                                       "types the letter")
 @pytest.mark.parametrize("seq", [kitty(104, "17"), kitty(107, "33"), kitty(104, "17", "104")],
                          ids=["hyper+h", "meta+k", "hyper+h with text"])
 def test_kitty_hyper_and_meta_with_a_letter_type_nothing(ltt, ws, seq):  # Neovim's tui_spec, dte's sweep
@@ -387,15 +379,12 @@ def test_kitty_hyper_and_meta_with_a_letter_type_nothing(ltt, ws, seq):  # Neovi
     assert s.editor_lines[0] == "|START"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a kitty keypad digit without its text field types nothing")
 def test_kitty_keypad_digit_without_text_types_the_digit(ltt, ws):  # Neovim's tui_spec
     app = open_file(ltt, ws)
     s = then_mark(app, kitty(57399))  # KP_0, as a terminal that leaves the text out sends it
     assert s.editor_lines[0] == "0|START"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the application keypad's comma (ESC O l) and space (ESC O space) "
-                                       "are dropped")
 @pytest.mark.parametrize("seq, typed", [(b"\x1bOl", ","), (b"\x1bO ", " ")], ids=["comma", "space"])
 def test_application_keypad_comma_and_space_type_themselves(ltt, ws, seq, typed):  # dte's keypad table
     app = open_file(ltt, ws)
@@ -403,8 +392,6 @@ def test_application_keypad_comma_and_space_type_themselves(ltt, ws, seq, typed)
     assert s.editor_lines[0] == typed + "|START"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: an Esc that arrives together with a mouse report or a focus event "
-                                       "is lost (only a key after it makes it Alt+key)")
 @pytest.mark.parametrize("after", ["wheel", "focus"])
 def test_esc_followed_at_once_by_a_mouse_report_still_acts(ltt, ws, after):  # Neovim's #41763
     app = open_file(ltt, ws, text="".join(f"line {i}\n" for i in range(1, 200)))
@@ -416,8 +403,6 @@ def test_esc_followed_at_once_by_a_mouse_report_still_acts(ltt, ws, after):  # N
         assert s.editor_rows[0].number > s0.editor_rows[0].number
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the tail of a terminal reply over 64 KiB (an OSC 52 clipboard answer) "
-                                       "is typed into the file")
 def test_a_huge_terminal_reply_is_not_typed(ltt, ws):  # Neovim's 'does not crash on large inputs'
     app = open_file(ltt, ws)
     s = then_mark(app, b"\x1b]52;c;" + b"QUFB" * 20_000 + b"\x1b\\")

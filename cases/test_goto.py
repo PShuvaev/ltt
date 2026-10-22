@@ -573,8 +573,6 @@ def test_ctrl_l_by_the_physical_key_on_a_cyrillic_layout(ltt, ws):
     assert s.mode == "PROMPT" and prompt_line(s) == " Go to:"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a location followed by a colon, as gcc, Go and javac print it "
-                                       "(file:12:5: error…), is not found")
 @pytest.mark.parametrize("suffix, pos", [(":2:5:", (2, 4, 5)), (":2:", (2, 4, 1))], ids=["line_col", "line"])
 def test_a_location_with_a_colon_after_it_opens_there(ltt, ws, suffix, pos):  # dte's test/util.c
     p = ws.write("proj/b.txt", "one\ntwo two\nthree\n")
