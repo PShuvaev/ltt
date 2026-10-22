@@ -841,3 +841,27 @@ def test_the_wheel_over_the_tree_leaves_the_editor_focused(ltt, ws):
     app.press("enter")
     s = app.wheel(6, 5, notches=5)
     assert s.mode == "EDITOR" and s.tree_selected.name == "f03.txt"
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a name git reads as pathspec magic (':!odd.txt') makes git refuse "
+                                       "the folder's whole ignore check: its ignored files are no longer dimmed")
+def test_a_name_like_git_pathspec_magic_leaves_the_dimming_alone(ltt, ws):  # Emacs's vc-git tests: odd names
+    ws.repo("repo", files={"a.txt": "a\n"}, ignore="*.log\n")
+    ws.write("repo/debug.log", "l")
+    ws.write("repo/:!odd.txt", "o")
+    s = ltt(ws.path("repo")).snap()
+    assert s.tree_row(":!odd.txt").fg == "Gray" and s.tree_row("debug.log").fg == "DarkGray"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the tree under an expanded symlinked folder is never refreshed: "
+                                       "a file made in its target never shows")
+def test_an_expanded_symlinked_folder_shows_new_files(ltt, ws):  # Emacs's dired tests: links to folders
+    ws.write("outside/dir/one.txt", "1")
+    ws.mkdir("proj")
+    os.symlink(ws.path("outside/dir"), ws.path("proj/linked"))
+    app = ltt(ws.path("proj"))
+    select(app, "linked")
+    assert app.press("right").tree_row("one.txt") is not None
+    ws.write("outside/dir/two.txt", "2")
+    app.wait_tree("two.txt", timeout=5)

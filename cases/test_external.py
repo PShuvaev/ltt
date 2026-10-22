@@ -846,3 +846,43 @@ def test_writes_in_a_folded_folder_leave_the_status_alone(ltt, ws):
     ws.write("proj/marker.txt", "m\n")  # the watcher is alive, and those 30 writes went by on their own
     s = app.wait_status("External change: created marker.txt — left panel refreshed.")
     assert s.status == "External change: created marker.txt — left panel refreshed."
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a clean tab whose file could not be read for a moment (chmod 0, then "
+                                       "back) keeps its ⚠ for good, though the file is as it was")
+def test_a_file_readable_again_clears_the_changed_mark(ltt, ws):  # Textadept's file_io_test.lua: reloads
+    p = ws.write("proj/a.txt", "hello\n")
+    app = ltt(p, cols=W)
+    os.chmod(p, 0)
+    try:
+        app.wait(lambda s: s.tabs[0].changed, timeout=5, what="⚠ while it cannot be read")
+    finally:
+        os.chmod(p, 0o644)
+    s = app.wait(lambda s: not s.tabs[0].changed, timeout=5, what="the ⚠ gone once it can be read again")
+    assert s.editor_lines[0] == "hello" and not s.tabs[0].dirty
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a folder moved from one root to another leaves its open tab "
+                                       "behind as gone (✗); a file moved so is followed")
+def test_tab_follows_its_folder_moved_to_another_root(ltt, ws):  # Emacs's files-tests: renaming folders
+    ws.write("one/docs/x.txt", "x\n")
+    ws.mkdir("two")
+    app = ltt(ws.path("one"), ws.path("two"), ws.path("one/docs/x.txt"), cols=W)
+    watching(app, ws, "one")
+    watching(app, ws, "two")
+    ws.rename("one/docs", "two/docs")
+    s = app.wait(lambda s: s.title_path.endswith("/two/docs/x.txt"), timeout=5, what="the title on the new path")
+    assert s.tab_names == ["x.txt"] and not s.tabs[0].missing
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a folder renamed twice in a row (docs → docs2 → docs3) leaves its "
+                                       "open tab behind as gone (✗); a file renamed so is followed")
+def test_tab_follows_its_folder_renamed_twice_in_a_row(ltt, ws):  # Emacs's files-tests: renaming folders
+    ws.write("proj/docs/x.txt", "x\n")
+    app = ltt(ws.path("proj"), ws.path("proj/docs/x.txt"), cols=W)
+    watching(app, ws)
+    ws.rename("proj/docs", "proj/docs2")
+    ws.rename("proj/docs2", "proj/docs3")
+    s = app.wait(lambda s: s.title_path.endswith("/proj/docs3/x.txt"), timeout=5, what="the title on the new path")
+    assert s.tab_names == ["x.txt"] and not s.tabs[0].missing

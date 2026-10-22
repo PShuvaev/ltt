@@ -2,6 +2,7 @@
 in a git repository, against what was there when ltt started elsewhere."""
 import os
 import shutil
+import time
 
 import pytest
 
@@ -819,3 +820,38 @@ def test_a_symlink_in_a_repository_marks_only_the_lines_that_changed(ltt, ws):  
     ws.write("r/file.txt", "a\nB\nc\n")
     app = ltt(ws.path("r/link.txt"))
     wait_marks(app, {2: MODIFIED}, timeout=5)
+
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: in a git worktree (its .git is a file) the marks stay after an outside "
+                                       "commit: the folder that file points to is never looked at")
+def test_git_marks_clear_after_a_commit_in_a_worktree(ltt, ws):  # Textadept's and Emacs's vc tests: worktrees
+    ws.repo("main", {"a.txt": "one\n"})
+    ws.git("worktree", "add", "-q", ws.path("wt"), "-b", "side", cwd="main")
+    ws.write("wt/a.txt", "ONE\n")
+    app = ltt(ws.path("wt"))
+    row(app, "a.txt", "Yellow")
+    ws.git("commit", "-q", "-am", "agent", cwd="wt")
+    row(app, "a.txt", "Gray", timeout=5)
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: outside git a file is marked by its modification time alone: one "
+                                       "dated in the future is yellow from the start")
+def test_plain_file_dated_in_the_future_is_not_marked(ltt, ws):  # Emacs's files-tests: times from elsewhere
+    ws.write("p/a.txt", "a\n")
+    ws.write("p/future.txt", "f\n", mtime=time.time() + 3600)
+    app = ltt(ws.path("p"))
+    ws.write("p/marker.txt", "m\n")
+    s = row(app, "marker.txt", "Green")  # the tree has been refreshed since the start
+    assert s.tree_row("future.txt").fg == "Gray"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: outside git a file changed after the start but dated back "
+                                       "(cp -p, rsync -t, tar x) is not marked")
+def test_plain_file_changed_and_dated_back_is_yellow(ltt, ws):  # Emacs's files-tests: times from elsewhere
+    ws.write("p/a.txt", "one\n")
+    ws.write("p/b.txt", "two\n")
+    app = ltt(ws.path("p"))
+    ws.write("p/a.txt", "changed\n", mtime=time.time() - 3600)
+    s = row(app, "a.txt", "Yellow", timeout=5)
+    assert s.tree_row("b.txt").fg == "Gray"
