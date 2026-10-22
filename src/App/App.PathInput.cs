@@ -7,7 +7,7 @@ internal sealed partial class App
         PathPurpose.CreateFolder => " New folder: ",
         PathPurpose.Rename => " Rename: ",
         PathPurpose.GoTo => " Go to: ",
-        _ => PathPrompt,
+        _ => " Add folder: ",
     };
 
     private void OpenPathInput(PathPurpose purpose, string initial = "")
@@ -28,20 +28,13 @@ internal sealed partial class App
     private void UpdatePathCompletions()
     {
         string input = _pathInput.ToString();
-        // Rename takes a bare name; Go to takes a line number or a path (complete only the latter).
-        if (_pathPurpose == PathPurpose.Rename || (_pathPurpose == PathPurpose.GoTo && input.All(char.IsDigit)))
-        {
-            _pathCandidates.Clear();
-            _pathCommon = "";
-            _pathGhost = "";
-            _pathCandidateIndex = -1;
-            return;
-        }
-        var (candidates, ghost) = PathCompletion.Compute(input, _pathBaseDir, out string common);
-        _pathCandidates = candidates;
-        _pathCommon = common;
+        _pathCommon = "";
         _pathCandidateIndex = -1;
-        _pathGhost = ghost;
+        // Rename takes a bare name; Go to takes a line number or a path (complete only the latter).
+        (_pathCandidates, _pathGhost) =
+            _pathPurpose == PathPurpose.Rename || (_pathPurpose == PathPurpose.GoTo && input.All(char.IsDigit))
+                ? (new List<string>(), "")
+                : PathCompletion.Compute(input, _pathBaseDir, out _pathCommon);
     }
 
     private void SetPathInput(string value, bool keepCandidates = false)
@@ -55,19 +48,9 @@ internal sealed partial class App
     /// <summary>Tab: complete to the common prefix, then cycle through the candidates.</summary>
     private void CompletePath()
     {
-        if (_pathCandidates.Count == 0) return;
-        if (_pathCandidates.Count == 1)
-        {
-            SetPathInput(_pathCandidates[0]);
-            return;
-        }
-        string raw = _pathInput.ToString();
-        if (_pathCandidateIndex < 0 && _pathCommon.Length > raw.Length)
-        {
-            SetPathInput(_pathCommon);
-            return;
-        }
-        CycleCandidate(+1);
+        if (_pathCandidates.Count == 1) SetPathInput(_pathCandidates[0]);
+        else if (_pathCandidateIndex < 0 && _pathCommon.Length > _pathInput.Length) SetPathInput(_pathCommon);
+        else CycleCandidate(+1); // no candidates (and so no common prefix): nothing
     }
 
     private void CycleCandidate(int delta)

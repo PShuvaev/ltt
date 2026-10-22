@@ -21,6 +21,16 @@ internal sealed partial class App
             ? key.KeyChar
             : '\0';
 
+    /// <summary>A key on a prompt's line: Backspace (a whole character), Ctrl+U (all) or a typed character; false — another key.</summary>
+    private static bool EditLine(System.Text.StringBuilder line, ConsoleKeyInfo key)
+    {
+        if (key.Key == ConsoleKey.Backspace) line.Length = Cells.PrevBoundary(line.ToString(), line.Length);
+        else if (key.Key == ConsoleKey.U && Ctrl(key)) line.Clear();
+        else if (Typed(key) is var c and not '\0') line.Append(c);
+        else return false;
+        return true;
+    }
+
     /// <summary>Turn selected text into a search query: spaces instead of line breaks, trimmed, at most 120 characters.</summary>
     internal static string NormalizeSearchSeed(string text)
     {
@@ -34,45 +44,26 @@ internal sealed partial class App
     /// <summary>A search starts at two characters (an emoji is one), spaces around the query aside.</summary>
     private static bool Searchable(string query) => Cells.CharCount(query.AsSpan().Trim()) >= 2;
 
-    private string SelectionSearchSeed() =>
-        _focus == Focus.Editor && _editor.HasSelection
-            ? NormalizeSearchSeed(_editor.SelectedText())
-            : "";
-
     private void ApplySearchScope(SearchScope scope, string? targetPath)
     {
-        ResetLiveSearch();
+        ClearSearch();
         _searchScope = scope;
         _searchTargetPath = targetPath;
-        _hits = new List<SearchHit>();
-        _hitsTruncated = false;
-        _hitIndex = 0;
-        _hitScroll = 0;
-        _resultsVisible = false;
     }
 
-    private void OpenSearch(string initial, SearchScope scope, string? targetPath = null)
+    /// <summary>Ctrl+F: search from the focused target (selected file/folder or open file); text selected in the editor is the query.</summary>
+    private void OpenScopedSearch()
     {
-        if (scope != SearchScope.AllFolders && targetPath == null)
+        if (ResolveScopedSearchTarget() is not { } target)
         {
             _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
             return;
         }
-
-        ApplySearchScope(scope, targetPath);
+        ApplySearchScope(target.Scope, target.Path);
         _searchQuery.Clear();
-        if (initial.Length > 0) _searchQuery.Append(initial);
+        if (_focus == Focus.Editor && _editor.HasSelection) _searchQuery.Append(NormalizeSearchSeed(_editor.SelectedText()));
         _mode = UiMode.SearchInput;
         if (_searchQuery.Length > 0) RunLiveSearch();
-    }
-
-    /// <summary>Ctrl+F: search from the focused target (selected file/folder or open file).</summary>
-    private void OpenScopedSearch(string initial)
-    {
-        if (ResolveScopedSearchTarget() is { } target)
-            OpenSearch(initial, target.Scope, target.Path);
-        else
-            _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
     }
 
     /// <summary>Second Ctrl+F: widen to all folders (or narrow back to the focused target).</summary>
@@ -153,17 +144,7 @@ internal sealed partial class App
         if (IsCtrlKey(key, ConsoleKey.C))
         {
             if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasSelection) CopySelection();
-            else if (_mode != UiMode.Normal)
-            {
-                if (_mode is UiMode.SearchInput or UiMode.SearchResults)
-                {
-                    CancelSearch(); // a scan still running must not pop the panel up later
-                    _resultsVisible = false;
-                }
-                _mode = UiMode.Normal;
-                _confirm = null;
-                _status = "Cancelled (Ctrl+C).";
-            }
+            else if (_mode != UiMode.Normal) Cancel("Cancelled (Ctrl+C).");
             else if (_focus == Focus.Tree) PickUp(cut: false);
             else _status = "Ctrl+C copies a selection. Ctrl+Q quits.";
             return;
@@ -185,6 +166,19 @@ internal sealed partial class App
         else HandleEditorKey(key);
     }
 
+    /// <summary>Leave a prompt, a question or the search (whose scan stops and whose results hide).</summary>
+    private void Cancel(string status)
+    {
+        if (_mode is UiMode.SearchInput or UiMode.SearchResults)
+        {
+            CancelSearch(); // a scan still running must not pop the panel up later
+            _resultsVisible = false;
+        }
+        _mode = UiMode.Normal;
+        _confirm = null;
+        _status = status;
+    }
+
     /// <summary>The shortcuts that work everywhere outside prompts. True — the key was one of them.</summary>
     private bool HandleGlobalKey(ConsoleKeyInfo key)
     {
@@ -193,7 +187,7 @@ internal sealed partial class App
             && key.Key is >= ConsoleKey.D1 and <= ConsoleKey.D9)
         {
             int i = key.Key - ConsoleKey.D1;
-            if (i < _tabs.Tabs.Count) { ActivateTab(i, announce: true); _focus = Focus.Editor; _mode = UiMode.Normal; }
+            if (i < _tabs.Tabs.Count) { ActivateTab(i); _mode = UiMode.Normal; }
             return true;
         }
         if (!Ctrl(key)) return false;
@@ -205,7 +199,7 @@ internal sealed partial class App
             case ConsoleKey.R: StartRenameForCurrentFocus(); return true;
             // Ctrl+F — inside the selected file/folder (tree) or the open file (editor).
             // A second Ctrl+F in the input widens the same query to all folders.
-            case ConsoleKey.F: OpenScopedSearch(SelectionSearchSeed()); return true;
+            case ConsoleKey.F: OpenScopedSearch(); return true;
             case ConsoleKey.O: OpenPathInput(PathPurpose.AddRoot); return true;
             // Ctrl+N — new file; Ctrl+Shift+N — new folder (or a trailing / in the file prompt).
             case ConsoleKey.N: OpenPathInput(shift ? PathPurpose.CreateFolder : PathPurpose.CreateFile); return true;
@@ -235,8 +229,7 @@ internal sealed partial class App
         switch (key.Key)
         {
             case ConsoleKey.Escape:
-                _mode = UiMode.Normal;
-                _status = "Cancelled.";
+                Cancel("Cancelled.");
                 return;
             case ConsoleKey.Enter:
                 switch (_pathPurpose)
@@ -247,14 +240,6 @@ internal sealed partial class App
                     case PathPurpose.Rename: RenameFromInput(); break;
                     case PathPurpose.GoTo: GoToFromInput(); break;
                 }
-                return;
-            case ConsoleKey.Backspace:
-                if (_pathInput.Length > 0)
-                {
-                    string s = _pathInput.ToString();
-                    _pathInput.Remove(Cells.PrevBoundary(s, s.Length), s.Length - Cells.PrevBoundary(s, s.Length));
-                }
-                UpdatePathCompletions();
                 return;
             case ConsoleKey.Tab:
                 CompletePath();
@@ -268,16 +253,8 @@ internal sealed partial class App
             case ConsoleKey.RightArrow: // accept the suggestion, spelled as on disk
                 if (_pathGhost.Length > 0 && _pathCandidates.Count > 0) SetPathInput(_pathCandidates[0]);
                 return;
-            case ConsoleKey.U when Ctrl(key):
-                _pathInput.Clear();
-                UpdatePathCompletions();
-                return;
         }
-        if (Typed(key) is var c and not '\0')
-        {
-            _pathInput.Append(c);
-            UpdatePathCompletions();
-        }
+        if (EditLine(_pathInput, key)) UpdatePathCompletions();
     }
 
     private void HandleTreeKey(ConsoleKeyInfo key)
@@ -430,37 +407,14 @@ internal sealed partial class App
                     _mode = UiMode.SearchResults;
                     _status = $"Found: {_hits.Count}{(_hitsTruncated ? "+" : "")}. Enter opens above, Esc hides the panel.";
                 }
-                else
-                {
-                    CancelSearch(); // a scan still running must not pop the panel up later
-                    _mode = UiMode.Normal;
-                    _resultsVisible = false;
-                    _status = "Search cancelled.";
-                }
+                else Cancel("Search cancelled.");
                 return;
             case ConsoleKey.Enter: // open the current hit (the search already ran while typing)
                 if (Searchable(_searchQuery.ToString()) && _hits.Count > 0)
                     OpenHit(_hits[_hitIndex]);
                 return;
-            case ConsoleKey.Backspace:
-                if (_searchQuery.Length > 0)
-                {
-                    string s = _searchQuery.ToString();
-                    int from = Cells.PrevBoundary(s, s.Length);
-                    _searchQuery.Remove(from, s.Length - from);
-                }
-                RunLiveSearch();
-                return;
-            case ConsoleKey.U when Ctrl(key):
-                _searchQuery.Clear();
-                RunLiveSearch();
-                return;
         }
-        if (Typed(key) is var c and not '\0')
-        {
-            _searchQuery.Append(c);
-            RunLiveSearch();
-        }
+        if (EditLine(_searchQuery, key)) RunLiveSearch();
     }
 
     /// <summary>Keys of the focused results panel; false — not one of them (it then works as usual).</summary>
@@ -504,23 +458,12 @@ internal sealed partial class App
 
     private void HandleConfirm(ConsoleKeyInfo key)
     {
-        var confirm = _confirm;
-        if (confirm == null || key.Key == ConsoleKey.Escape)
-        {
-            _confirm = null;
-            _mode = UiMode.Normal;
-            _status = "Cancelled.";
-            return;
-        }
+        if (_confirm == null || key.Key == ConsoleKey.Escape) { Cancel("Cancelled."); return; }
         char answer = AnswerLetter(key);
-        foreach (var (k, act) in confirm.Choices)
-        {
-            if (k != answer) continue;
-            _confirm = null;
-            _mode = UiMode.Normal;
-            act(); // may ask the next question
-            return;
-        }
         // Any other key (Enter included) leaves the question standing: no destructive default.
+        if (_confirm.Choices.FirstOrDefault(c => c.Key == answer).Act is not { } act) return;
+        _confirm = null;
+        _mode = UiMode.Normal;
+        act(); // may ask the next question
     }
 }

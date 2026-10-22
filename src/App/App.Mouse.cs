@@ -68,9 +68,8 @@ internal sealed partial class App
                 if (m.IsMiddleClick || (m.IsLeftClick && m.X == cell.CloseX)) CloseTab(cell.Tab);
                 else if (m.IsLeftClick)
                 {
-                    ActivateTab(index, announce: true);
+                    ActivateTab(index);
                     _mode = UiMode.Normal;
-                    _focus = Focus.Editor;
                 }
                 return;
             }
@@ -80,16 +79,14 @@ internal sealed partial class App
         // Releasing the button ends a drag selection — in its own tab only (another may have taken over).
         if (!m.Pressed)
         {
-            if (_dragging != null)
+            if (_dragging == _editor)
             {
-                bool here = _dragging == _editor;
-                _dragging = null;
-                if (!here) return;
                 if (_editor.HasSelection)
                     _status = $"Selected: {_editor.SelectionCharCount()} chars. Ctrl+C copies, Ctrl+X cuts.";
                 else
                     _editor.ClearSelection();
             }
+            _dragging = null;
             return;
         }
 

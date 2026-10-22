@@ -23,21 +23,14 @@ internal static class Program
         var files = new List<(string Path, int Line)>();
         foreach (var arg in args)
         {
-            if (arg.StartsWith('-'))
-            {
-                TerminalModes.ResetKeys();
-                Console.Error.WriteLine($"Unknown option: {arg}. Usage: ltt [folder…] [file[:line]…]");
-                return 2;
-            }
+            if (arg.StartsWith('-')) return Fail($"Unknown option: {arg}. Usage: ltt [folder…] [file[:line]…]");
             if (Directory.Exists(arg)) { dirRoots.Add(Paths.Normalize(arg)); continue; }
             if (App.ParseLocation(arg) is { } loc && File.Exists(loc.Path))
             {
                 files.Add((Path.GetFullPath(loc.Path), loc.Line));
                 continue;
             }
-            TerminalModes.ResetKeys();
-            Console.Error.WriteLine($"Path not found: {arg}");
-            return 2;
+            return Fail($"Path not found: {arg}");
         }
         var roots = new List<string>();
         foreach (var r in dirRoots)
@@ -50,12 +43,7 @@ internal static class Program
         }
         if (roots.Count == 0) roots.Add(Paths.Normalize(Directory.GetCurrentDirectory()));
 
-        if (Console.IsInputRedirected || Console.IsOutputRedirected)
-        {
-            TerminalModes.ResetKeys();
-            Console.Error.WriteLine("The editor needs an interactive terminal.");
-            return 2;
-        }
+        if (Console.IsInputRedirected || Console.IsOutputRedirected) return Fail("The editor needs an interactive terminal.");
 
         // Raw input with the mouse on Unix; on Windows or on failure — plain ReadKey without the mouse.
         ITerminalInput input;
@@ -121,6 +109,14 @@ internal static class Program
     {
         try { Console.Error.WriteLine(line); }
         catch (IOException) { }
+    }
+
+    /// <summary>An exit before the session starts: the reason for the shell, exit code 2.</summary>
+    private static int Fail(string reason)
+    {
+        TerminalModes.ResetKeys();
+        Console.Error.WriteLine(reason);
+        return 2;
     }
 
     private static void OnSignal(PosixSignalContext ctx)
@@ -252,7 +248,7 @@ internal sealed partial class App
     private string _pathGhost = "";                    // grey ghost-text continuation after the typed text
     private int _promptCursorX;                        // where the prompt's cursor was drawn
     private List<SearchHit> _hits = new();
-    private bool _hitsTruncated;                       // more lines matched than the panel holds
+    private bool _hitsTruncated;                       // more lines matched than the panel holds: refining could miss some
     private int _hitsSkipped;                          // files too big for a folder search
     private SearchScope _searchScope = SearchScope.AllFolders;
     private string? _searchTargetPath; // file/folder while the search scope is not AllFolders
@@ -269,22 +265,16 @@ internal sealed partial class App
     private string _pathBaseDir = "";          // directory relative paths in a prompt start from
     private string? _pendingRenamePath;        // what is being renamed (Ctrl+R)
     private bool _pendingRenameIsDir;
-    private bool _renameFromEditor;            // rename came from the editor — return focus there
 
-    // Live search: the previous query and its results, for incremental refinement.
-    private string _liveQuery = "";
-    private List<SearchHit> _liveSource = new();
-    private bool _liveTruncated;   // _liveSource is capped: refining it could miss matches
-    private int _liveSkipped;      // files the scan left out for their size
-    private bool _liveSourceStale; // files changed since _liveSource was scanned
-    // Full folder scans run off the UI thread; a generation counter makes sure
-    // only the newest scan's results are ever applied.
-    private (Task<SearchResult> Task, int Gen, string Query, Dictionary<TextEditor, long> Tabs)? _pendingSearch;
+    // Live search: a query that only grew refines the hits of the one before.
+    private string _hitsQuery = "";  // the query the hits answer
+    private bool _hitsStale;         // files changed since the hits were found
+    // Full folder scans run off the UI thread; only the newest one is kept pending,
+    // so only its results are ever applied.
+    private (Task<SearchResult> Task, CancellationTokenSource Cts, string Query, Dictionary<TextEditor, long> Tabs)? _pendingSearch;
     // The open tabs as each scan found them (their TextEditor.LineShifts): hits in a tab edited since
     // then are where those edits moved them (HitLine).
-    private Dictionary<TextEditor, long> _liveTabs = new(), _hitTabs = new();
-    private CancellationTokenSource? _searchCts;
-    private int _searchGen;
+    private Dictionary<TextEditor, long> _hitTabs = new();
 
     // Background folder-size counting (see FileTree.TakeUnfinishedSizing).
     private (Task Task, TreeNode Parent, FolderSizer Sizer)? _pendingSizing;
@@ -301,7 +291,7 @@ internal sealed partial class App
     private int _lastW, _lastH;
     // Geometry of the last frame — needed for the cursor and mouse hit-testing.
     private int _editorTextX, _contentTop, _statusY;
-    private int _leftW, _editorX, _gutter = 4, _mainContentH = 1;
+    private int _leftW, _editorX, _mainContentH = 1;
     private int _treeTop = 1, _treeContentH = 1; // the tree starts right below the title
     private int _resultsTop, _resultsRowsTop, _resultsRowCount;
     private DateTime _lastClickAt = DateTime.MinValue;
@@ -569,7 +559,7 @@ internal sealed partial class App
     {
         if (_watcher == null || !_watcher.TryConsumeDue(out var batch)) return false;
         _diskCheckAt = 0; // compare open tabs with the disk right away
-        _liveSourceStale = true; // results can no longer be refined: lines may have changed
+        _hitsStale = true; // results can no longer be refined: lines may have changed
         bool redraw = FollowRenames(batch.Renames);
         if (!batch.Deep && FollowByIdentity(batch.Dirs)) redraw = true;
         _changes.Changed(batch.Dirs, _tree.RootPaths);
@@ -579,9 +569,8 @@ internal sealed partial class App
         FuzzySearch.InvalidateFileLists();
         var before = _tree.Visible.Select(v => v.FullPath + (v.IsDir ? "/" : "")).ToList();
         string? beforeSel = _tree.Selected?.FullPath;
-        if (batch.Overflow) _tree.Refresh();
+        if (batch.Overflow) { _tree.Refresh(); SyncWatcher(forceRecreate: batch.Restart); }
         else _tree.RefreshDirs(batch.Dirs, batch.Deep);
-        if (batch.Overflow) SyncWatcher(forceRecreate: batch.Restart);
         var after = _tree.Visible.Select(v => v.FullPath + (v.IsDir ? "/" : "")).ToList();
         bool changed = !before.SequenceEqual(after) || beforeSel != _tree.Selected?.FullPath;
         if (changed && batch.Summary.Length > 0)
@@ -679,18 +668,16 @@ internal sealed partial class App
                 case TextEditor.DiskState.Missing when !ed.MissingOnDisk:
                     ed.MissingOnDisk = true;
                     _status = $"{ed.DisplayName} was deleted on disk — the tab keeps its text; saving would recreate the file.";
-                    changed = true;
                     break;
                 case TextEditor.DiskState.Same when ed.MissingOnDisk || ed.ChangedOnDisk:
                     // As the tab knows it again (moved away and back; readable again after a chmod): no mark.
                     ed.MissingOnDisk = ed.ChangedOnDisk = false;
-                    changed = true;
                     break;
                 case TextEditor.DiskState.Changed when !ed.Dirty && !ed.Unreadable: // said once, not every second
                     try
                     {
                         ed.Reload();
-                        _liveSourceStale = true;
+                        _hitsStale = true;
                         _status = $"Reloaded {ed.DisplayName}: it changed on disk (Ctrl+Z brings back the previous text).";
                     }
                     catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
@@ -698,15 +685,15 @@ internal sealed partial class App
                         ed.ChangedOnDisk = true;
                         _status = $"{ed.DisplayName} changed on disk but cannot be read: {e.Message}";
                     }
-                    changed = true;
                     break;
                 case TextEditor.DiskState.Changed when !ed.ChangedOnDisk:
                     ed.ChangedOnDisk = true;
                     ed.MissingOnDisk = false;
                     _status = $"{ed.DisplayName} changed on disk — your unsaved edits are kept; saving will ask before overwriting.";
-                    changed = true;
                     break;
+                default: continue; // nothing new about this tab
             }
+            changed = true;
         }
         return changed;
     }
@@ -780,13 +767,13 @@ internal sealed partial class App
     /// </summary>
     private bool TryOpen(string path, int lineZeroBased, bool activateOnly = false, int column = -1)
     {
+        _mode = UiMode.Normal;
         string full = _tree.InPanel(Path.GetFullPath(path));
         int existing = _tabs.IndexOfPath(full);
         if (existing >= 0)
         {
             _tabs.Activate(existing);
             if (!activateOnly) _editor.GoToLine(lineZeroBased, column);
-            _mode = UiMode.Normal;
             _focus = Focus.Editor;
             _status = activateOnly
                 ? $"Tab: {_editor.DisplayName}"
@@ -805,12 +792,10 @@ internal sealed partial class App
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
                                        or ArgumentException or NotSupportedException)
         {
-            _mode = UiMode.Normal;
             _status = "Error: " + ex.Message;
             return false;
         }
         _tabs.Add(ed);
-        _mode = UiMode.Normal;
         _focus = Focus.Editor;
         string format = ed.Format.Describe();
         _status = $"Opened {ed.DisplayName} ({ed.LineCount} lines{(format.Length > 0 ? ", " + format : "")}), " +
@@ -818,10 +803,12 @@ internal sealed partial class App
         return true;
     }
 
-    private void ActivateTab(int index, bool announce = false)
+    /// <summary>Activate a tab, with the focus in the editor; the status names the tab.</summary>
+    private void ActivateTab(int index)
     {
         _tabs.Activate(index);
-        if (announce && _tabs.Active is { } t)
+        _focus = Focus.Editor;
+        if (_tabs.Active is { } t)
             _status = $"Tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}: {t.DisplayName}{(t.Dirty ? " ●" : "")}";
     }
 
@@ -829,8 +816,7 @@ internal sealed partial class App
     {
         if (_tabs.Tabs.Count == 0) { _status = "No open tabs."; return; }
         _tabs.ActivateRelative(delta);
-        _focus = Focus.Editor;
-        ActivateTab(_tabs.ActiveIndex, announce: true);
+        ActivateTab(_tabs.ActiveIndex);
     }
 
     private void CloseTab(TextEditor tab)
@@ -927,45 +913,29 @@ internal sealed partial class App
 
     // ============================ Search ============================
 
-    private void ResetLiveSearch()
+    /// <summary>No hits, nothing to refine, no scan running.</summary>
+    private void ClearSearch()
     {
         CancelSearch();
-        _liveQuery = "";
-        _liveSource = new List<SearchHit>();
-        _liveTruncated = false;
-        _liveSkipped = 0;
+        ShowHits(SearchResult.Empty, "", new());
     }
 
     /// <summary>Drop any in-flight folder scan; its results will never be applied.</summary>
     private void CancelSearch()
     {
-        _searchGen++;
+        if (_pendingSearch is { } p) { p.Cts.Cancel(); p.Cts.Dispose(); }
         _pendingSearch = null;
-        _searchCts?.Cancel();
-        _searchCts?.Dispose();
-        _searchCts = null;
     }
 
-    /// <summary>Apply a finished background scan, if it is still the current one.</summary>
+    /// <summary>Apply a finished background scan (the pending one is always the newest).</summary>
     private bool PollSearch()
     {
         if (_pendingSearch is not { } p || !p.Task.IsCompleted) return false;
         _pendingSearch = null;
-        _searchCts?.Dispose();
-        _searchCts = null;
-        if (p.Gen != _searchGen || p.Task.Status != TaskStatus.RanToCompletion) return false;
-        SetLive(p.Task.Result, p.Query, p.Tabs);
-        ApplyHits();
+        p.Cts.Dispose();
+        if (p.Task.Status != TaskStatus.RanToCompletion) return false;
+        ShowHits(p.Task.Result, p.Query, p.Tabs);
         return true;
-    }
-
-    private void SetLive(SearchResult result, string query, Dictionary<TextEditor, long> tabs)
-    {
-        _liveSource = result.Hits;
-        _liveTruncated = result.Truncated;
-        _liveSkipped = result.SkippedLarge;
-        _liveQuery = query;
-        _liveTabs = tabs;
     }
 
     private Dictionary<TextEditor, long> TabMarks() => _tabs.Tabs.ToDictionary(t => t, t => t.LineShifts);
@@ -982,12 +952,14 @@ internal sealed partial class App
         return now < 0 ? line : now;
     }
 
-    private void ApplyHits()
+    /// <summary>Show a search's results from the first hit; a longer query that starts with `query` refines them.</summary>
+    private void ShowHits(SearchResult result, string query, Dictionary<TextEditor, long> tabs)
     {
-        _hitTabs = _liveTabs;
-        _hits = _liveSource;
-        _hitsTruncated = _liveTruncated;
-        _hitsSkipped = _liveSkipped;
+        _hits = result.Hits;
+        _hitsTruncated = result.Truncated;
+        _hitsSkipped = result.SkippedLarge;
+        _hitsQuery = query;
+        _hitTabs = tabs;
         _hitIndex = 0;
         _hitScroll = 0;
         _openedHitIndex = -1;
@@ -1011,19 +983,10 @@ internal sealed partial class App
     private void RunLiveSearch()
     {
         string query = _searchQuery.ToString().Trim();
-        if (!Searchable(query))
-        {
-            ResetLiveSearch();
-            _hits = new List<SearchHit>();
-            _hitsTruncated = false;
-            _hitIndex = 0;
-            _hitScroll = 0;
-            _resultsVisible = false;
-            return;
-        }
+        if (!Searchable(query)) { ClearSearch(); return; }
 
-        bool canRefine = !_liveTruncated && !_liveSourceStale && _liveQuery.Length >= 2
-            && query.StartsWith(_liveQuery, StringComparison.OrdinalIgnoreCase);
+        bool canRefine = !_hitsTruncated && !_hitsStale && _hitsQuery.Length >= 2
+            && query.StartsWith(_hitsQuery, StringComparison.OrdinalIgnoreCase);
         var scope = _searchScope;
         string? target = _searchTargetPath == null ? null : Path.GetFullPath(_searchTargetPath);
         var buffer = scope == SearchScope.CurrentFile && target != null && _tabs.IndexOfPath(target) is >= 0 and var t
@@ -1032,31 +995,28 @@ internal sealed partial class App
         if (canRefine || buffer != null)
         {
             // Refining ≤500 known hits and scanning one open file are instant: stay synchronous.
-            SetLive(scope != SearchScope.CurrentFile ? new SearchResult(FuzzySearch.Refine(_liveSource, query), false, _liveSkipped)
-                : canRefine ? new SearchResult(FuzzySearch.RefineInOrder(_liveSource, query), false)
+            ShowHits(scope != SearchScope.CurrentFile ? new SearchResult(FuzzySearch.Refine(_hits, query), false, _hitsSkipped)
+                : canRefine ? new SearchResult(FuzzySearch.RefineInOrder(_hits, query), false)
                 : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query), query,
-                canRefine ? _liveTabs : TabMarks());
-            if (!canRefine) _liveSourceStale = false;
-            ApplyHits();
+                canRefine ? _hitTabs : TabMarks());
+            if (!canRefine) _hitsStale = false;
             return;
         }
 
         // A folder scan (or a file on disk, which may be huge) can take seconds,
         // so it runs in the background and is cancelled by the next keystroke.
-        _liveSourceStale = false;
-        int gen = _searchGen;
-        _searchCts = new CancellationTokenSource();
-        var ct = _searchCts.Token;
+        _hitsStale = false;
+        var cts = new CancellationTokenSource();
+        var ct = cts.Token;
         var roots = _tree.RootPaths;
         var buffers = DirtyBuffers();
         var task = Task.Run(() => scope switch
         {
-            _ when target == null && scope != SearchScope.AllFolders => SearchResult.Empty,
             SearchScope.CurrentFile => FuzzySearch.SearchFile(target!, Path.GetFileName(target!), query, ct: ct),
             SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers),
             _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers),
         });
-        _pendingSearch = (task, gen, query, TabMarks());
+        _pendingSearch = (task, cts, query, TabMarks());
     }
 
     /// <summary>

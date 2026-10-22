@@ -231,7 +231,6 @@ internal sealed partial class App
         SearchScope.SelectedFolder => " Search folder: ",
         _ => " Search all folders: ",
     };
-    private const string PathPrompt = " Add folder: ";
 
     private void DrawPanels(int w, int contentH)
     {
@@ -248,7 +247,6 @@ internal sealed partial class App
         _tree.ViewHeight = _treeContentH;
         _tree.EnsureVisible();
         int gutter = Math.Max(4, _editor.LineCount.ToString().Length + 1);
-        _gutter = gutter;
         int viewW = Math.Max(1, editorW - gutter);
         // Pull the view to the cursor only when this tab's view size changed, else
         // the wheel cannot scroll away from the cursor. The size is per tab, so a

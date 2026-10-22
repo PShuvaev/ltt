@@ -38,7 +38,7 @@ internal sealed partial class App
     /// <summary>After our own file operation: search must look again.</summary>
     private void FilesChanged()
     {
-        _liveSourceStale = true;
+        _hitsStale = true;
         FuzzySearch.InvalidateFileLists();
         _changes.RefreshAll();
     }
@@ -98,7 +98,6 @@ internal sealed partial class App
         }
         _pendingRenamePath = Paths.Normalize(fullPath);
         _pendingRenameIsDir = isDir;
-        _renameFromEditor = _focus == Focus.Editor;
         OpenPathInput(PathPurpose.Rename, Path.GetFileName(_pendingRenamePath));
     }
 
@@ -109,8 +108,8 @@ internal sealed partial class App
         bool isDir = _pendingRenameIsDir;
         _pendingRenamePath = null;
         _mode = UiMode.Normal;
-        _focus = _renameFromEditor && _editor.HasFile ? Focus.Editor : Focus.Tree;
-        _renameFromEditor = false;
+        // The focus stays where Ctrl+R was pressed (nothing moves it during a prompt) — in the tree once no file is open.
+        if (!_editor.HasFile) _focus = Focus.Tree;
         if (oldPath == null) return;
         // Spaces around the typed name go, but not where the name itself has them (" notes.txt ").
         string oldName = Path.GetFileName(oldPath);
