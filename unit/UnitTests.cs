@@ -25,7 +25,7 @@ internal static class UnitTests
         Environment.SetEnvironmentVariable("LTT_RECOVERY_DIR", TempDir("recovery"));
         var groups = new (string Name, Action Test)[]
         {
-            ("scoring", TestScoring), ("highlight", TestHighlight), ("input", TestInput), ("key sweep", TestKeySweep),
+            ("scoring", TestScoring), ("colours", TestColours), ("input", TestInput), ("key sweep", TestKeySweep),
             ("cells", TestCells), ("screen", TestScreen), ("round-trip", TestRoundTrip),
             ("save", TestSaveSafety), ("editing", TestEditing), ("undo", TestUndo),
             ("edit vectors", TestEditVectors), ("edit walk", TestEditWalk),
@@ -156,109 +156,96 @@ internal static class UnitTests
                                        && App.NormalizeSearchSeed(" \n\t ") == "";
     }
 
-    private static void TestHighlight()
+    private static void TestColours()
     {
-        var cs = Syntax.For("x.cs");
-        bool inBlock = false;
-        const string srcLine = "class Foo { string s = \"hi\"; int n = 42; } // note";
-        var toks = Highlighter.Tokenize(srcLine, cs, ref inBlock);
-        string Txt(Token t) => srcLine.Substring(t.Start, t.Length);
-        Check(toks.Any(t => t.Kind == TokenKind.Keyword && Txt(t) == "class")
-              && toks.Any(t => t.Kind == TokenKind.Str && Txt(t).Contains("hi"))
-              && toks.Any(t => t.Kind == TokenKind.Number && Txt(t) == "42")
-              && toks.Any(t => t.Kind == TokenKind.Comment && Txt(t).Contains("note")),
-            "highlight: keywords, strings, numbers and // comments");
-        Check(string.Concat(toks.Select(Txt)) == srcLine, "highlight: token ranges add up to the original line");
-        inBlock = false;
-        Highlighter.Tokenize("int a; /* start", cs, ref inBlock);
-        var mid = Highlighter.Tokenize("middle of the comment", cs, ref inBlock);
-        Check(inBlock && mid.All(t => t.Kind == TokenKind.Comment), "highlight: multi-line /* */ comment");
+        // What vim is given: a vim string, the bytes vim counts, only the start of a long line.
+        Check(VimSyntax.Quote("a\\b\"c\0d\x01\x7f é|") == "\"a\\\\b\\\"c\\nd\\x01\\x7f é|\"",
+            "colours: a vim string escapes \\ and \", a NUL is \\n there, other control characters \\x..");
+        Check(VimSyntax.Utf8("aé中👀", 0, 5) == 10 && VimSyntax.Utf8("\ud800x", 0, 2) == 4,
+            "colours: bytes are counted as vim gets them (a lone surrogate goes as U+FFFD)");
+        string longLine = new string('a', VimSyntax.MaxLine - 1) + "👀b";
+        Check(VimSyntax.Cut(longLine).Length == VimSyntax.MaxLine - 1 && VimSyntax.Cut("abc").SequenceEqual("abc"),
+            "colours: vim gets the start of a long line, never half of a surrogate pair");
 
-        var md = Syntax.For("README.md");
-        bool b = false;
-        var prose = Highlighter.Tokenize("Don't panic: see https://x.dev/a, it's fine. /* not a comment", md, ref b);
-        Check(md.IsPlain && prose.Count == 1 && prose[0].Kind == TokenKind.Normal && !b,
-            "highlight: Markdown and other unknown files are plain text — no strings or comments from prose");
-        b = false;
-        Highlighter.Tokenize("clean:\n\trm -rf build/*", Syntax.For("Makefile"), ref b);
-        Check(!b && Syntax.For("Dockerfile").HashComments && !Syntax.For(".gitignore").SlashComments,
-            "highlight: a /* glob in a Makefile never opens a comment");
-        var c = Syntax.For("x.c");
-        Check(Highlighter.EndState("/*/ still a comment", c, false), "highlight: \"/*/\" does not close itself");
-        Check(Highlighter.EndState("#define X 1 /* starts here", c, false),
-            "highlight: a comment opened on a #define line carries on");
-        b = false;
-        const string verbatim = "var p = @\"C:\\dir\\\"; /* c */ x";
-        var vt = Highlighter.Tokenize(verbatim, cs, ref b);
-        Check(!b && vt.Any(t => t.Kind == TokenKind.Str && verbatim.Substring(t.Start, t.Length) == "@\"C:\\dir\\\"")
-              && vt.Any(t => t.Kind == TokenKind.Comment && verbatim.Substring(t.Start, t.Length) == "/* c */"),
-            "highlight: a C# verbatim string ends at its quote; a backslash does not escape it");
+        // vim's answer — a byte offset and the kind that starts there — as a kind per character.
+        const string text = "\"é中👀\" x";
+        Check(Letters(SyntaxColours.Decode("0s12k", text, 0, text.Length, 0)) == "sssssssk",
+            "colours: runs at byte offsets land on their characters (wide ones, surrogate pairs)");
+        Check(Letters(SyntaxColours.Decode("10s12k", text, 5, text.Length, 10)) == "ssk",
+            "colours: runs of a part of a line");
 
-        // Fuzz: tokenizing always terminates, tiles the line, and agrees with the fast state scan.
-        var rnd = new Random(12345);
-        const string alphabet = "/*\"'`#@$\\ ab1_.\t";
-        bool tiles = true, agrees = true;
-        foreach (var syntax in new[] { cs, c, Syntax.For("x.py"), Syntax.For("x.sh"), md, Syntax.For("x.css") })
-            for (int n = 0; n < 2000; n++)
-            {
-                var chars = new char[rnd.Next(0, 24)];
-                for (int i = 0; i < chars.Length; i++) chars[i] = alphabet[rnd.Next(alphabet.Length)];
-                string line = new(chars);
-                bool start = rnd.Next(2) == 0, s1 = start;
-                var t = Highlighter.Tokenize(line, syntax, ref s1);
-                int pos = 0;
-                foreach (var tok in t) { tiles &= tok.Start == pos; pos += tok.Length; }
-                tiles &= pos == line.Length;
-                agrees &= s1 == (syntax.SlashComments && Highlighter.EndState(line, syntax, start));
-            }
-        Check(tiles, "highlight fuzz: tokens always tile the line (and tokenizing terminates)");
-        Check(agrees, "highlight fuzz: the fast comment-state scan agrees with full tokenizing");
-        foreach (var tricky in new[] { "@docs/agents/rules-all-agents.md", "@", "@@", "a@b", "@\"verbatim\"", "$@\"x\"", "@class @if x = @" })
+        // The colours move with edits until vim answers again.
+        string dir = TempDir("colours");
+        var ed = Open(Put(dir, "a.c", "alpha \"str\" beta\nplain"), 40, 10);
+        var colours = new VimSyntax().Attach(ed); // never started: nothing here asks vim
+        Seed(colours, ed, "0k5n6s11n12k|");
+        Check(Shown(colours, ed, 0) == "kkkkknsssssnkkkk" && Shown(colours, ed, 1) == "nnnnn", "colours: vim's answer is shown");
+        ed.SetCursor(0, 0);
+        ed.InsertNewline();
+        Check(Shown(colours, ed, 0) == "" && Shown(colours, ed, 1) == "kkkkknsssssnkkkk" && Shown(colours, ed, 2) == "nnnnn",
+            "colours: lines pushed down keep their colours");
+        ed.SetCursor(1, 8);
+        ed.InsertChar('X');
+        Check(Shown(colours, ed, 1) == "kkkkknssssssnkkkk", "colours: typed text takes the colour before it");
+        ed.SetCursor(1, 13);
+        ed.InsertNewline();
+        Check(Shown(colours, ed, 1) == "kkkkknssssssn" && Shown(colours, ed, 2) == "kkkk",
+            "colours: a line split in two keeps the colours of both halves");
+        ed.Backspace();
+        Check(ed.LineCount == 3 && Shown(colours, ed, 1) == "kkkkknssssssnkkkk", "colours: lines joined keep the colours of both");
+
+        // An answer to a question asked before an edit: its lines are found where they went, edited ones are left.
+        var asked = Question(ed);
+        ed.SetCursor(0, 0);
+        ed.InsertNewline();
+        ed.SetCursor(2, 0);
+        ed.InsertChar('Z');
+        colours.Answer(asked, "|0c|0c");
+        Check(Shown(colours, ed, 3) == "ccccc" && Shown(colours, ed, 2) == "nkkkkknssssssnkkkk",
+            "colours: a late answer lands on the lines where they went, not on the ones edited since");
+        colours.Answer(Question(ed), "!");
+        Check(Shown(colours, ed, 3) == "ccccc", "colours: an answer vim could not give changes nothing");
+    }
+
+    /// <summary>vim's answer for every line of the editor, as it is now.</summary>
+    private static void Seed(SyntaxColours colours, TextEditor ed, string answer) => colours.Answer(Question(ed), answer);
+
+    /// <summary>A question to vim about every line of the editor, whole lines, as they are now.</summary>
+    private static SyntaxColours.Query Question(TextEditor ed)
+    {
+        var texts = Enumerable.Range(0, ed.LineCount).Select(ed.LineText).ToArray();
+        return new SyntaxColours.Query(1, 0, texts, new int[texts.Length], texts.Select(t => t.Length).ToArray(),
+            new int[texts.Length], texts.Select(t => VimSyntax.Utf8(t, 0, t.Length)).ToArray(), ed.LineShifts, ed.Version, default);
+    }
+
+    /// <summary>The kind of each character of a line as drawn: n plain, k keyword, s string, c comment…; "plain" — no colours.</summary>
+    private static string Shown(SyntaxColours colours, TextEditor ed, int line)
+    {
+        var tokens = new List<Token>();
+        return colours.Fill(line, ed.LineText(line), tokens)
+            ? string.Concat(tokens.Select(t => new string("nkscmpahr"[(int)t.Kind], t.Length)))
+            : "plain";
+    }
+
+    private static string Letters(byte[] kinds) => string.Concat(kinds.Select(k => "nkscmpahr"[k]));
+
+    /// <summary>Every line with colours has runs that tile it exactly.</summary>
+    private static bool ColoursFit(SyntaxColours colours, TextEditor ed)
+    {
+        var tokens = new List<Token>();
+        for (int i = 0; i < ed.LineCount; i++)
         {
-            bool s = false;
-            var tt = Highlighter.Tokenize(tricky, cs, ref s);
-            Check(string.Concat(tt.Select(t => tricky.Substring(t.Start, t.Length))) == tricky,
-                $"highlight: tokenization terminates and tiles \"{tricky}\"");
-        }
-
-        // JavaScript's regular expressions and `…` strings over lines (Textadept's lexer tests); Go's raw strings.
-        var js = Syntax.For("x.js");
-        var st = LineState.Code;
-        const string regex = "const re = /\\/*$/g; let x = 1;";
-        var rt = Highlighter.Tokenize(regex, js, ref st);
-        Check(st == LineState.Code && rt.Any(t => t.Kind == TokenKind.Str && regex.Substring(t.Start, t.Length) == "/\\/*$/g")
-              && rt.Any(t => t.Kind == TokenKind.Keyword && regex.Substring(t.Start, t.Length) == "let"),
-            "highlight: a JavaScript regular expression is a string, and its /* opens no comment");
-        st = LineState.Code;
-        Check(Highlighter.Tokenize("let a = b / c, d = (e) / f / g[0] / 2;", js, ref st).All(t => t.Kind != TokenKind.Str)
-              && st == LineState.Code,
-            "highlight: a slash after a name, a number or a bracket divides");
-        st = LineState.Code;
-        Highlighter.Tokenize("const help = `", js, ref st);
-        var inside = Highlighter.Tokenize("usage: lint src/*.js", js, ref st);
-        var after = Highlighter.Tokenize("`; let y;", js, ref st);
-        Check(inside.All(t => t.Kind == TokenKind.Str) && st == LineState.Code && after[0].Kind == TokenKind.Str
-              && after.Any(t => t.Kind == TokenKind.Keyword),
-            "highlight: a JavaScript template string runs over lines, and a /* in it opens no comment");
-        st = LineState.Code;
-        Highlighter.Tokenize("s := `C:\\`", Syntax.For("x.go"), ref st);
-        Check(st == LineState.Code, "highlight: a backslash in a Go raw string escapes nothing");
-        bool tilesJs = true, agreesJs = true;
-        foreach (var syntax in new[] { js, Syntax.For("x.go") })
-            for (int n = 0; n < 2000; n++)
+            string text = ed.LineText(i);
+            if (!colours.Fill(i, text, tokens)) continue;
+            int pos = 0;
+            foreach (var t in tokens)
             {
-                var chars = new char[rnd.Next(0, 24)];
-                for (int i = 0; i < chars.Length; i++) chars[i] = alphabet[rnd.Next(alphabet.Length)];
-                string line = new(chars);
-                var start = (LineState)rnd.Next(3);
-                var s1 = start;
-                var t = Highlighter.Tokenize(line, syntax, ref s1);
-                int pos = 0;
-                foreach (var tok in t) { tilesJs &= tok.Start == pos; pos += tok.Length; }
-                tilesJs &= pos == line.Length;
-                agreesJs &= s1 == Highlighter.EndState(line, syntax, start);
+                if (t.Start != pos || t.Length <= 0) return false;
+                pos += t.Length;
             }
-        Check(tilesJs && agreesJs, "highlight fuzz: JavaScript and Go tokens tile the line; the fast state scan agrees");
+            if (pos != text.Length) return false;
+        }
+        return true;
     }
 
     private static void TestInput()
@@ -1451,6 +1438,8 @@ internal static class UnitTests
         for (int run = 0; run < 30 && problem == null; run++)
         {
             var ed = Open(Put(dir, $"walk{run}.c", Random(rnd.Next(40))), 40, 10);
+            var colours = new VimSyntax().Attach(ed); // colours for every line, moved along by the edits
+            Seed(colours, ed, string.Join("|", Enumerable.Range(0, ed.LineCount).Select(i => ed.LineText(i).Length > 0 ? "0k" : "")));
             string opened = Text(ed), model = opened;
             for (int step = 0; step < 120 && problem == null; step++, steps++)
             {
@@ -1529,13 +1518,11 @@ internal static class UnitTests
                 else if (Cells.FloorBoundary(ed.LineText(ed.Cy), ed.Cx) != ed.Cx)
                     problem = $"run {run} step {step} ({op}): the cursor sits inside a character";
                 model = Text(ed);
-                ed.BlockCommentStateBefore(ed.LineCount - 1); // fill the cache, for the edits to cut back
+                if (problem == null && !ColoursFit(colours, ed))
+                    problem = $"run {run} step {step} ({op}): colours that do not fit their lines";
             }
             if (problem != null) break;
             string final = model;
-            var fresh = Open(Put(dir, $"walk{run}-fresh.c", final), 40, 10);
-            if (Enumerable.Range(0, ed.LineCount).Any(i => ed.BlockCommentStateBefore(i) != fresh.BlockCommentStateBefore(i)))
-                problem = $"run {run}: the block-comment cache disagrees with a fresh read";
             int undone = 0;
             for (; ed.CanUndo; undone++) ed.Undo();
             if (problem == null && (Text(ed) != opened || ed.Dirty || Enumerable.Range(0, ed.LineCount).Any(i => ed.ChangeMark(i) != 0)))

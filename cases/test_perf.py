@@ -91,9 +91,9 @@ def code_session(ltt, ws):
 def test_typing_a_character_sends_only_the_changed_cells(ltt, ws):
     # U6: every frame used to redraw the whole screen
     app = code_session(ltt, ws)
-    whole = app.output_mark()  # the first frame: ~12.8 KB
+    whole = app.output_mark()  # the first frame: ~9.4 KB
     out = sent(app, "x", lambda s: s.pos[2] == 2)
-    assert whole > 10_000 and len(out) < 400, out  # ~140 bytes: the line, the title and tab ● marks, the column
+    assert whole > 8_000 and len(out) < 400, out  # ~140 bytes: the line, the title and tab ● marks, the column
 
 
 def test_cursor_down_sends_two_line_numbers_and_the_status(ltt, ws):
@@ -166,7 +166,7 @@ def test_ctrl_l_repaints_the_whole_screen(ltt, ws):
     # the one deliberate full repaint: it mends a garbled screen
     app = code_session(ltt, ws)
     out = sent(app, "ctrl+l", lambda s: s.mode == "PROMPT")
-    assert b"\x1b[2J" in out and len(out) > 10_000
+    assert b"\x1b[2J" in out and len(out) > 8_000
 
 
 # ---------------------------------------------------------------- a million lines
@@ -202,7 +202,7 @@ def test_ctrl_end_in_a_million_lines(ltt):
     app = million_session(ltt)
     t, s = answer(app, "ctrl+end", at_last_line)
     assert s.editor_lines[-1] == million_line(MILLION)
-    assert t < secs(1.5), f"Ctrl+End answered after {t:.3f} s"  # ~0.2 s: the comment state of every line, once
+    assert t < secs(1.5), f"Ctrl+End answered after {t:.3f} s"  # ~10 ms
 
 
 def test_typing_at_the_end_of_a_million_lines(ltt):
@@ -231,10 +231,10 @@ def test_keys_at_the_end_of_a_million_lines_answer_while_vim_works(ltt, ws):
     assert t < secs(0.5), f"Ctrl+Home answered after {t:.3f} s"
 
 
-def test_undo_at_the_end_of_a_million_lines_keeps_the_comment_state(ltt):
-    # D10: undo and redo threw away the comment state of every line (~0.6 s each near the end)
+def test_undo_at_the_end_of_a_million_lines(ltt):
+    # D10: undo and redo near the end took ~0.6 s each (they threw away the colours' state of every line)
     app = million_session(ltt)
-    whole, _ = answer(app, "ctrl+end", at_last_line)  # works out the state of all lines once
+    answer(app, "ctrl+end", at_last_line)
     undo = redo = None
     for _ in range(3):
         app.press("x")
@@ -243,8 +243,7 @@ def test_undo_at_the_end_of_a_million_lines_keeps_the_comment_state(ltt):
         t, _ = answer(app, "ctrl+y", lambda s: s.title_dirty)
         redo = t if redo is None else min(redo, t)
         app.press("ctrl+z")
-    limit = max(whole / 4, secs(0.05))  # ~3 ms each against ~200 ms for all the lines
-    assert undo < limit and redo < limit, f"undo {undo:.3f} s, redo {redo:.3f} s, all lines {whole:.3f} s"
+    assert undo < secs(0.05) and redo < secs(0.05), f"undo {undo:.3f} s, redo {redo:.3f} s"  # ~3 ms each
 
 
 def test_go_to_a_line_in_a_million_lines(ltt):
@@ -252,7 +251,7 @@ def test_go_to_a_line_in_a_million_lines(ltt):
     app.press("ctrl+l")
     app.type("500000")
     t, s = answer(app, "enter", lambda s: s.pos[0] == 500_000)
-    assert t < secs(1.0), f"answered after {t:.3f} s"  # ~0.1 s: the comment state of the 500,000 lines above, once
+    assert t < secs(1.0), f"answered after {t:.3f} s"  # ~2 ms
 
 
 def test_search_in_an_open_million_line_file(ltt):
