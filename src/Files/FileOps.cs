@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 /// <summary>Moving and copying files and folders on disk.</summary>
 internal static class FileOps
 {
@@ -90,7 +92,7 @@ internal static class FileOps
     /// <summary>
     /// Copy a file or folder to a path that does not exist yet. Links are copied
     /// as links, never followed; pipes and devices are skipped; an entry that
-    /// fails is counted and the rest goes on.
+    /// fails is counted and the rest goes on. Files and folders keep their modes.
     /// </summary>
     internal static void Copy(string from, string to, CopyProgress progress, CancellationToken ct)
     {
@@ -103,14 +105,21 @@ internal static class FileOps
         if (ct.IsCancellationRequested) return;
         try
         {
-            if (from.LinkTarget is { } link)
-            {
-                if (from is DirectoryInfo) Directory.CreateSymbolicLink(to, link);
-                else File.CreateSymbolicLink(to, link);
-            }
+            if (from.LinkTarget is { } link) CopyLink(from, to, link);
             else if (from is DirectoryInfo dir)
             {
-                Directory.CreateDirectory(to);
+                if (OperatingSystem.IsWindows()) Directory.CreateDirectory(to);
+                else
+                {
+                    // Private from the start, as the original (0700 stays 0700); its exact mode once it is
+                    // filled, so that a read-only folder still takes what goes in it.
+                    var mode = File.GetUnixFileMode(from.FullName);
+                    Directory.CreateDirectory(to, mode | UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+                    foreach (var entry in dir.EnumerateFileSystemInfos())
+                        CopyEntry(entry, Path.Combine(to, entry.Name), progress, ct);
+                    File.SetUnixFileMode(to, mode);
+                    return;
+                }
                 foreach (var entry in dir.EnumerateFileSystemInfos())
                     CopyEntry(entry, Path.Combine(to, entry.Name), progress, ct);
                 return;
@@ -128,6 +137,33 @@ internal static class FileOps
             progress.Failed++;
             progress.FirstError ??= e.Message;
         }
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern nint readlink(string path, byte[] buf, nint size);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int symlink(byte[] target, string linkPath);
+
+    /// <summary>A link copied as the bytes it holds: a target that is not UTF-8 would not survive a string.</summary>
+    private static void CopyLink(FileSystemInfo from, string to, string link)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            var buf = new byte[4097]; // PATH_MAX and the closing NUL
+            nint n;
+            try { n = readlink(from.FullName, buf, 4096); }
+            catch (EntryPointNotFoundException) { n = -1; }
+            if (n >= 0)
+            {
+                buf[n] = 0;
+                if (symlink(buf, to) != 0)
+                    throw new IOException($"Cannot make the link {to}: {Marshal.GetLastPInvokeErrorMessage()}");
+                return;
+            }
+        }
+        if (from is DirectoryInfo) Directory.CreateSymbolicLink(to, link);
+        else File.CreateSymbolicLink(to, link);
     }
 
     /// <summary>

@@ -32,12 +32,14 @@ internal sealed partial class App
         if (_pathPurpose == PathPurpose.Rename || (_pathPurpose == PathPurpose.GoTo && input.All(char.IsDigit)))
         {
             _pathCandidates.Clear();
+            _pathCommon = "";
             _pathGhost = "";
             _pathCandidateIndex = -1;
             return;
         }
-        var (candidates, ghost) = PathCompletion.Compute(input, _pathBaseDir);
+        var (candidates, ghost) = PathCompletion.Compute(input, _pathBaseDir, out string common);
         _pathCandidates = candidates;
+        _pathCommon = common;
         _pathCandidateIndex = -1;
         _pathGhost = ghost;
     }
@@ -60,10 +62,9 @@ internal sealed partial class App
             return;
         }
         string raw = _pathInput.ToString();
-        string lcp = PathCompletion.CommonPrefix(_pathCandidates);
-        if (_pathCandidateIndex < 0 && lcp.Length > raw.Length)
+        if (_pathCandidateIndex < 0 && _pathCommon.Length > raw.Length)
         {
-            SetPathInput(lcp);
+            SetPathInput(_pathCommon);
             return;
         }
         CycleCandidate(+1);

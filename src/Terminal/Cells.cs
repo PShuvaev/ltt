@@ -180,4 +180,23 @@ internal static class Cells
 
     /// <summary>Start of the text element (grapheme) before index i.</summary>
     public static int PrevBoundary(string s, int i) => i <= 0 ? 0 : FloorBoundary(s, Math.Min(i, s.Length) - 1);
+
+    /// <summary>i itself when it is a boundary, else the end of the text element (grapheme) that contains it.</summary>
+    public static int CeilBoundary(string s, int i) => FloorBoundary(s, i) is var f && f < i ? NextBoundary(s, f) : i;
+
+    /// <summary>Characters as the cursor steps over them: an emoji, or a letter with its marks, counts once.</summary>
+    public static long CharCount(ReadOnlySpan<char> s)
+    {
+        long n = 0;
+        while (s.Length > 0)
+        {
+            // Below U+0300 every character stands alone, unless a mark after it joins it.
+            int other = s.IndexOfAnyInRange('\u0300', '\uFFFF');
+            if (other < 0) return n + s.Length;
+            if (other > 1) { n += other - 1; s = s[(other - 1)..]; }
+            n++;
+            s = s[Math.Max(1, StringInfo.GetNextTextElementLength(s))..];
+        }
+        return n;
+    }
 }

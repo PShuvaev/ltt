@@ -10,4 +10,10 @@
     <UseAppHost>false</UseAppHost>
   </PropertyGroup>
 
+  <ItemGroup>
+    <!-- .NET takes a shared flock on every file it opens: a file another program holds under an
+         exclusive one (vis, a script) could not be read. ltt locks nothing, as other editors. -->
+    <RuntimeHostConfigurationOption Include="System.IO.DisableFileLocking" Value="true" />
+  </ItemGroup>
+
 </Project>

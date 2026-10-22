@@ -121,10 +121,10 @@ public sealed class TextEditor
 
     private int _wheelNumerator; // accumulated fifths of a line (see WheelScroll)
 
-    // _blockState[i]: whether line i starts inside a /* */ comment. Filled
+    // _blockState[i]: what line i starts inside (a /* */ comment, a `…` string). Filled
     // lazily front to back and cut back to the first changed line by edits,
     // so rendering a deep window never re-tokenizes the file from the top.
-    private readonly List<bool> _blockState = new() { false };
+    private readonly List<LineState> _blockState = new() { LineState.Code };
 
     private void InvalidateHighlightFrom(int line)
     {
@@ -132,10 +132,10 @@ public sealed class TextEditor
         if (_blockState.Count > keep) _blockState.RemoveRange(keep, _blockState.Count - keep);
     }
 
-    /// <summary>Whether `line` starts inside a /* */ block comment.</summary>
-    public bool BlockCommentStateBefore(int line)
+    /// <summary>What `line` starts inside: code, a /* */ comment or a `…` string.</summary>
+    public LineState LineStateBefore(int line)
     {
-        if (line <= 0 || !Syntax.SlashComments) return false;
+        if (line <= 0 || !Highlighter.CarriesState(Syntax)) return LineState.Code;
         line = Math.Min(line, _lines.Count);
         while (_blockState.Count <= line)
         {
@@ -144,6 +144,9 @@ public sealed class TextEditor
         }
         return _blockState[line];
     }
+
+    /// <summary>Whether `line` starts inside a /* */ block comment.</summary>
+    public bool BlockCommentStateBefore(int line) => LineStateBefore(line) == LineState.Comment;
 
     public bool HasFile => FilePath != null;
     public string DisplayName => FilePath == null ? "(no file)" : Path.GetFileName(FilePath);
@@ -214,7 +217,7 @@ public sealed class TextEditor
         ScrollY = Math.Clamp(ScrollY, 0, MaxScrollY);
         _open = null;
         _blockState.Clear();
-        _blockState.Add(false);
+        _blockState.Add(LineState.Code);
         while (Monitor.IsEntered(_changeLock)) Monitor.Exit(_changeLock); // an edit that threw never finished
     }
 
@@ -222,7 +225,7 @@ public sealed class TextEditor
     {
         Syntax = syntax;
         _blockState.Clear();
-        _blockState.Add(false);
+        _blockState.Add(LineState.Code);
     }
 
     /// <summary>Tabs for Makefiles and Go, and for files whose indented lines mostly start with a tab.</summary>
@@ -235,6 +238,7 @@ public sealed class TextEditor
         for (int i = 0; i < lines.Count && i < 10_000; i++)
         {
             string l = lines[i];
+            if (l.AsSpan().TrimStart(" \t").IsEmpty) continue; // a blank line says nothing about indentation
             if (l.StartsWith('\t')) tabs++;
             else if (l.StartsWith("  ")) spaces++;
         }
@@ -252,6 +256,7 @@ public sealed class TextEditor
         FilePath = Path.GetFullPath(newPath);
         var syntax = Syntax.For(FilePath);
         if (!ReferenceEquals(syntax, Syntax)) SetSyntax(syntax); // the language may have changed
+        IndentWithTabs = DetectTabIndent(_lines, FilePath); // so may the indentation: a Makefile takes tabs
         var stamp = TextFile.Stamp(FilePath);
         MissingOnDisk = stamp == null;
         if (wasInSync && stamp != null) DiskStamp = stamp;
@@ -393,8 +398,43 @@ public sealed class TextEditor
 
     private void SetLine(int i, string text) => Splice(i, 1, text);
 
+    // Lines inserted and deleted, oldest first (a bounded window): FollowLine moves a line number over them.
+    private readonly List<(int At, int Old, int New)> _shifts = new();
+    private long _shiftsDropped;
+
+    /// <summary>How many times lines were inserted or deleted so far: a mark for FollowLine.</summary>
+    public long LineShifts => _shiftsDropped + _shifts.Count;
+
+    /// <summary>
+    /// Where a line (0-based) that was there at mark `since` is now: lines below an insertion or a
+    /// deletion move with it, a deleted line becomes the one that took its place. -1 — too long ago.
+    /// </summary>
+    public int FollowLine(int line, long since)
+    {
+        if (since < _shiftsDropped) return -1;
+        for (int i = (int)(since - _shiftsDropped); i < _shifts.Count; i++)
+        {
+            var (at, old, @new) = _shifts[i];
+            if (line >= at + old) line += @new - old;
+            else if (line >= at) line = at + Math.Min(line - at, Math.Max(0, @new - 1));
+        }
+        return Math.Clamp(line, 0, _lines.Count - 1);
+    }
+
+    private void RecordShift(int at, int count, string[] lines)
+    {
+        // The lines a block kept at either end keep their places: Enter at a line's start pushes
+        // that line down, a deleted selection that ends at a line start takes the lines above it.
+        int head = 0, tail = 0, both = Math.Min(count, lines.Length);
+        while (head < both && _lines[at + head] == lines[head]) head++;
+        while (tail < both - head && _lines[at + count - 1 - tail] == lines[^(tail + 1)]) tail++;
+        _shifts.Add((at + head, count - head - tail, lines.Length - head - tail));
+        if (_shifts.Count > 8192) { _shifts.RemoveRange(0, 4096); _shiftsDropped += 4096; }
+    }
+
     private void Apply(int at, int count, string[] lines)
     {
+        if (count != lines.Length) RecordShift(at, count, lines);
         if (count == lines.Length)
             for (int i = 0; i < count; i++) _lines[at + i] = lines[i];
         else
@@ -443,6 +483,8 @@ public sealed class TextEditor
     private void EndEdit()
     {
         EndChange();
+        // A join or a letter typed before a lone mark makes one character of two: the cursor goes after it.
+        Cx = Cells.CeilBoundary(_lines[Cy], Cx);
         if (_open != null)
         {
             _open.After = (Cy, Cx);
@@ -591,7 +633,7 @@ public sealed class TextEditor
     /// Insert pasted text (possibly multi-line) at the cursor as one undo step,
     /// replacing any selection; no auto-indent. CRLF/CR become line breaks,
     /// tabs stay, other control characters are dropped.
-    /// Returns the number of inserted (normalized) characters.
+    /// Returns the number of inserted (normalized) characters, as the cursor steps over them.
     /// </summary>
     public int InsertText(string text)
     {
@@ -619,7 +661,7 @@ public sealed class TextEditor
         Cy += parts.Length - 1;
         Cx = endCx;
         EndEdit();
-        return clean.Length;
+        return (int)Math.Min(Cells.CharCount(clean.ToString()), int.MaxValue);
     }
 
     public void Delete()
@@ -818,14 +860,21 @@ public sealed class TextEditor
         EnsureCursorVisible();
     }
 
+    private ((int, int, int, int) Range, int Version, int Count) _charCount; // drawn every frame: counted once
+
+    /// <summary>Characters selected, as the cursor steps over them; a line break counts one.</summary>
     public int SelectionCharCount()
     {
         if (!HasSelection) return 0;
-        var (sl, sc, el, ec) = SelectionRange();
-        if (sl == el) return ec - sc;
-        long n = _lines[sl].Length - sc + 1 + ec; // +1 for the line break
-        for (int i = sl + 1; i < el; i++) n += _lines[i].Length + 1;
-        return (int)Math.Min(n, int.MaxValue);
+        var range = SelectionRange();
+        if (_charCount.Range == range && _charCount.Version == _version) return _charCount.Count;
+        var (sl, sc, el, ec) = range;
+        long n = sl == el
+            ? Cells.CharCount(_lines[sl].AsSpan(sc, ec - sc))
+            : Cells.CharCount(_lines[sl].AsSpan(sc)) + 1 + Cells.CharCount(_lines[el].AsSpan(0, ec));
+        for (int i = sl + 1; i < el; i++) n += Cells.CharCount(_lines[i]) + 1;
+        _charCount = (range, _version, (int)Math.Min(n, int.MaxValue));
+        return _charCount.Count;
     }
 
     public string SelectedText()
@@ -946,6 +995,8 @@ public sealed class TextEditor
             int col = CursorColumn;
             bool onScreen = col >= (ScrollX > 0 ? ScrollX + 1 : 0) && col <= ScrollX + CursorRightCol;
             if (!onScreen) ScrollX = Math.Max(0, col - CursorRightCol);
+            // A wide character at the cursor shows whole: its right half never goes under the ›.
+            if (col + CursorCells - 1 > ScrollX + CursorRightCol) ScrollX = col + CursorCells - 1 - CursorRightCol;
         }
         ScrollY = Math.Clamp(ScrollY, 0, MaxScrollY);
         ScrollX = Math.Max(0, ScrollX);
@@ -954,4 +1005,8 @@ public sealed class TextEditor
 
     /// <summary>The rightmost view column the cursor takes: the last one is for the › marker.</summary>
     private int CursorRightCol => Math.Max(0, ViewWidth - 2);
+
+    /// <summary>Cells of the character at the cursor: 2 for a wide one, else 1 (a tab, the line end).</summary>
+    public int CursorCells =>
+        Cx < _lines[Cy].Length && _lines[Cy][Cx] != '\t' && Cells.WidthAt(_lines[Cy], Cx, 0, out _) == 2 ? 2 : 1;
 }

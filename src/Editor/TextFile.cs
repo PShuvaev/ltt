@@ -252,11 +252,8 @@ internal static class TextFile
             }
 
         string target = path;
-        try
-        {
-            if (new FileInfo(path).ResolveLinkTarget(returnFinalTarget: true) is { } link) target = link.FullName;
-        }
-        catch (IOException) { /* a dangling or looping link: write the path itself */ }
+        try { target = Paths.Final(path); }
+        catch (IOException) { /* a looping link: write the path itself */ }
         var kind = File.Exists(target) ? Stat(target) : null;
         if (kind is { Regular: false }) throw new IOException($"Not a regular file: {target}");
         if (File.Exists(target) && !IsWritable(target))
@@ -298,8 +295,26 @@ internal static class TextFile
                 if (kind is { } k && chown(temp, k.Uid, k.Gid) != 0) chown(temp, uint.MaxValue, k.Gid);
                 try { File.SetUnixFileMode(temp, File.GetUnixFileMode(target)); }
                 catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+                CopyMacFlags(target, temp);
             }
-            File.Move(temp, target, overwrite: true);
+            // The ACL goes on once the copy has taken the file's place: one that denies deleting would stop the move.
+            IntPtr acl = OperatingSystem.IsMacOS() && File.Exists(target) ? GetAcl(target) : IntPtr.Zero;
+            try
+            {
+                File.Move(temp, target, overwrite: true);
+                if (acl != IntPtr.Zero) acl_set_file(target, AclTypeExtended, acl);
+            }
+            catch (UnauthorizedAccessException) when (File.Exists(target))
+            {
+                // The file may not be replaced (an ACL that denies deleting it, a sticky folder that is not
+                // ours) though it may be written: it is overwritten in place, keeping all it has.
+                File.Delete(temp);
+                WriteInPlace(target, lines, format, encoding);
+            }
+            finally
+            {
+                if (acl != IntPtr.Zero) acl_free(acl);
+            }
         }
         catch
         {
@@ -412,6 +427,36 @@ internal static class TextFile
         catch (Exception e) when (e is EntryPointNotFoundException or DllNotFoundException) { }
     }
 
+    // macOS: a file's ACL (chmod +a), kept over a save as it is.
+    private const int AclTypeExtended = 0x100; // ACL_TYPE_EXTENDED
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern IntPtr acl_get_file(string path, int type);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int acl_set_file(string path, int type, IntPtr acl);
+
+    [DllImport("libc")]
+    private static extern int acl_free(IntPtr obj);
+
+    private static IntPtr GetAcl(string path)
+    {
+        try { return acl_get_file(path, AclTypeExtended); } // none: IntPtr.Zero
+        catch (Exception e) when (e is EntryPointNotFoundException or DllNotFoundException) { return IntPtr.Zero; }
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int chflags(string path, uint flags);
+
+    /// <summary>macOS: the flags a user sets on a file (hidden, nodump) onto its replacement; never ones the system keeps.</summary>
+    private static void CopyMacFlags(string from, string to)
+    {
+        const uint Kept = 0x1 /* UF_NODUMP */ | 0x8000 /* UF_HIDDEN */;
+        if (!OperatingSystem.IsMacOS() || (Stat(from)?.Flags & Kept) is not (> 0 and var flags)) return;
+        try { chflags(to, flags); }
+        catch (EntryPointNotFoundException) { }
+    }
+
     private static bool IsWritable(string path) => OperatingSystem.IsWindows()
         ? (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0
         : access(path, 2 /* W_OK */) == 0;
@@ -429,9 +474,10 @@ internal static class TextFile
 
     /// <summary>
     /// Whether path is a regular file, how many names it has, which file it is (the device and the
-    /// inode), its owner and group, and when its inode last changed (ns); null when unknown. Links are followed.
+    /// inode), its owner and group, when its inode last changed (ns), and its flags (macOS: hidden…;
+    /// 0 elsewhere); null when unknown. Links are followed.
     /// </summary>
-    internal static (bool Regular, long Links, long Dev, long Ino, uint Uid, uint Gid, long ChangeNs)? Stat(string path)
+    internal static (bool Regular, long Links, long Dev, long Ino, uint Uid, uint Gid, long ChangeNs, uint Flags)? Stat(string path)
     {
         var arch = RuntimeInformation.ProcessArchitecture;
         bool mac = OperatingSystem.IsMacOS(), linux = OperatingSystem.IsLinux();
@@ -463,8 +509,9 @@ internal static class TextFile
         };
         long dev = mac ? BitConverter.ToInt32(buf, 0) : BitConverter.ToInt64(buf, 0);
         long changeNs = BitConverter.ToInt64(buf, ctime) * 1_000_000_000 + BitConverter.ToInt64(buf, ctime + 8);
+        uint flags = mac ? BitConverter.ToUInt32(buf, 116) : 0; // st_flags
         return ((BitConverter.ToUInt16(buf, mode) & 0xF000) == 0x8000, count, dev, BitConverter.ToInt64(buf, 8),
-            BitConverter.ToUInt32(buf, uid), BitConverter.ToUInt32(buf, uid + 4), changeNs);
+            BitConverter.ToUInt32(buf, uid), BitConverter.ToUInt32(buf, uid + 4), changeNs, flags);
     }
 
     /// <summary>
@@ -488,6 +535,6 @@ internal static class TextFile
     private static FileInfo Followed(string path)
     {
         var fi = new FileInfo(path);
-        return fi.LinkTarget != null && fi.ResolveLinkTarget(returnFinalTarget: true) is FileInfo target ? target : fi;
+        return fi.LinkTarget != null ? new FileInfo(Paths.Final(path)) : fi;
     }
 }

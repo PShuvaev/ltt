@@ -356,6 +356,11 @@ internal sealed class RawTerminalInput : ITerminalInput
             int c;
             while ((c = ReadByte(40)) is >= '0' and <= '9' or ';' && mods.Length < 16) mods.Append((char)c);
             if (c < 0) return null;
+            if (c is < 0x20 or > 0x7E)
+            {
+                _unread.Push(c); // cut short by the next key (ESC O, then ESC [B or Enter): that key counts
+                return null;
+            }
             var ev = ParseSs3((char)c);
             if (mods.Length == 0 || ev is not KeyInput { Key: var k }) return ev;
             string m = mods.ToString();
@@ -372,6 +377,9 @@ internal sealed class RawTerminalInput : ITerminalInput
         // Alt+Backspace (Esc then DEL) — delete-word in the editor.
         if (b2 is 0x7F or 0x08)
             return new KeyInput(MakeKey('\b', ConsoleKey.Backspace, alt: true));
+        // Alt+Enter and Alt+Tab as legacy terminals send them: what the kitty protocol's do.
+        if (b2 is 0x0D or 0x0A) return new KeyInput(MakeKey('\r', ConsoleKey.Enter, alt: true));
+        if (b2 == 0x09) return new KeyInput(MakeKey('\t', ConsoleKey.Tab, alt: true));
 
         // Alt+character
         if (b2 >= 0x20 && b2 < 0x7F)
@@ -491,6 +499,9 @@ internal sealed class RawTerminalInput : ITerminalInput
                 return new MouseInput(btn, Math.Max(0, mx - 1), Math.Max(0, my - 1), final == 'M');
             return null;
         }
+        // A private marker opens a terminal's reply (device attributes ESC [?62;22c and
+        // ESC [>0;276;0c, mode reports), never a key.
+        if (p.Length > 0 && p[0] is '?' or '>' or '=') return null;
 
         int Arg(int i, int def) => int.TryParse(Field(p, i), out int v) ? v : def;
         var (shift, alt, ctrl, super) = DecodeModifiers(SubInt(Field(p, 1), 0));
@@ -613,7 +624,7 @@ internal sealed class RawTerminalInput : ITerminalInput
             27 => ConsoleKey.Escape,
             13 => ConsoleKey.Enter,
             9 => ConsoleKey.Tab,
-            127 => ConsoleKey.Backspace,
+            127 or 8 => ConsoleKey.Backspace, // 8: where Backspace sends ^H (CSI 27;5;8~ is Ctrl+Backspace)
             32 => ConsoleKey.Spacebar,
             57414 => ConsoleKey.Enter, // keypad Enter
             >= 'a' and <= 'z' => ConsoleKey.A + (id - 'a'),

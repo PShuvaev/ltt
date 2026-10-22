@@ -21,13 +21,18 @@ internal sealed partial class App
             ? key.KeyChar
             : '\0';
 
-    /// <summary>Turn selected text into a search query: spaces instead of line breaks, trimmed.</summary>
+    /// <summary>Turn selected text into a search query: spaces instead of line breaks, trimmed, at most 120 characters.</summary>
     internal static string NormalizeSearchSeed(string text)
     {
         string cleaned = string.Join(" ",
             text.Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries));
-        return cleaned.Length > 120 ? cleaned[..120] : cleaned;
+        int end = 0;
+        for (int n = 0; n < 120 && end < cleaned.Length; n++) end = Cells.NextBoundary(cleaned, end); // whole characters
+        return cleaned[..end];
     }
+
+    /// <summary>A search starts at two characters (an emoji is one), spaces around the query aside.</summary>
+    private static bool Searchable(string query) => Cells.CharCount(query.AsSpan().Trim()) >= 2;
 
     private string SelectionSearchSeed() =>
         _focus == Focus.Editor && _editor.HasSelection
@@ -97,7 +102,7 @@ internal sealed partial class App
         string text = _editor.SelectedText();
         if (text.Length == 0) return;
         Clipboard.Copy(text);
-        _status = $"Copied to the clipboard: {text.Length} chars";
+        _status = $"Copied to the clipboard: {Cells.CharCount(text)} chars";
     }
 
     /// <summary>Ctrl+V: paste the system clipboard into the editor at the cursor.</summary>
@@ -113,7 +118,10 @@ internal sealed partial class App
         _status = inserted > 0 ? $"Pasted: {inserted} chars" : "Nothing pasteable on the clipboard.";
     }
 
-    /// <summary>A paste through the terminal (bracketed paste): one edit, no auto-indent; a prompt takes one line.</summary>
+    /// <summary>
+    /// A paste through the terminal (bracketed paste): one edit, no auto-indent; a prompt takes one
+    /// line (a path prompt without NULs, which no path can hold).
+    /// </summary>
     private void HandlePaste(string text)
     {
         string oneLine = string.Join(" ", text.Split(new[] { "\r\n", "\n", "\r" }, StringSplitOptions.None)).Trim();
@@ -124,7 +132,7 @@ internal sealed partial class App
                 RunLiveSearch();
                 return;
             case UiMode.PathInput:
-                _pathInput.Append(oneLine);
+                _pathInput.Append(oneLine.Replace("\0", ""));
                 UpdatePathCompletions();
                 return;
             case UiMode.Normal when _focus == Focus.Editor && _editor.HasFile:
@@ -431,7 +439,7 @@ internal sealed partial class App
                 }
                 return;
             case ConsoleKey.Enter: // open the current hit (the search already ran while typing)
-                if (_searchQuery.ToString().Trim().Length >= 2 && _hits.Count > 0)
+                if (Searchable(_searchQuery.ToString()) && _hits.Count > 0)
                     OpenHit(_hits[_hitIndex]);
                 return;
             case ConsoleKey.Backspace:

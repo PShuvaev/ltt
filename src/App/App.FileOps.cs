@@ -73,16 +73,14 @@ internal sealed partial class App
             if (File.Exists(p))
             {
                 ShowInTree(p);
-                TryOpen(p, 0);
-                _status = $"The file already existed — opened it: {Tilde(p)}";
+                if (TryOpen(p, 0)) _status = $"The file already existed — opened it: {Tilde(p)}"; // else its error stays
                 return;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(p)!);
             using (new FileStream(p, FileMode.CreateNew, FileAccess.Write)) { }
             _changes.Created(p);
             ShowInTree(p);
-            TryOpen(p, 0);
-            _status = $"File created and opened: {Tilde(p)}";
+            if (TryOpen(p, 0)) _status = $"File created and opened: {Tilde(p)}";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -106,7 +104,7 @@ internal sealed partial class App
 
     private void RenameFromInput()
     {
-        string newName = _pathInput.ToString().Trim();
+        string typed = _pathInput.ToString();
         string? oldPath = _pendingRenamePath;
         bool isDir = _pendingRenameIsDir;
         _pendingRenamePath = null;
@@ -114,6 +112,10 @@ internal sealed partial class App
         _focus = _renameFromEditor && _editor.HasFile ? Focus.Editor : Focus.Tree;
         _renameFromEditor = false;
         if (oldPath == null) return;
+        // Spaces around the typed name go, but not where the name itself has them (" notes.txt ").
+        string oldName = Path.GetFileName(oldPath);
+        string newName = oldName.Length > 0 && char.IsWhiteSpace(oldName[0]) ? typed : typed.TrimStart();
+        newName = oldName.Length > 0 && char.IsWhiteSpace(oldName[^1]) ? newName : newName.TrimEnd();
         if (newName.Length == 0 || newName is "." or ".."
             || newName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0
             || newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)

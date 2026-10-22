@@ -246,6 +246,7 @@ internal sealed partial class App
     private readonly StringBuilder _searchQuery = new();
     private readonly StringBuilder _pathInput = new();
     private List<string> _pathCandidates = new();      // path completion candidates (full input lines)
+    private string _pathCommon = "";                   // what every match shares, the first 50 or not
     private int _pathCandidateIndex = -1;              // candidate selected while cycling with Tab/↑↓
     private string _pathGhost = "";                    // grey ghost-text continuation after the typed text
     private int _promptCursorX;                        // where the prompt's cursor was drawn
@@ -277,7 +278,10 @@ internal sealed partial class App
     private bool _liveSourceStale; // files changed since _liveSource was scanned
     // Full folder scans run off the UI thread; a generation counter makes sure
     // only the newest scan's results are ever applied.
-    private (Task<SearchResult> Task, int Gen, string Query)? _pendingSearch;
+    private (Task<SearchResult> Task, int Gen, string Query, Dictionary<TextEditor, long> Tabs)? _pendingSearch;
+    // The open tabs as each scan found them (their TextEditor.LineShifts): hits in a tab edited since
+    // then are where those edits moved them (HitLine).
+    private Dictionary<TextEditor, long> _liveTabs = new(), _hitTabs = new();
     private CancellationTokenSource? _searchCts;
     private int _searchGen;
 
@@ -287,6 +291,7 @@ internal sealed partial class App
 
     // Open tabs are compared with the disk this often.
     private long _diskCheckAt;
+    private Dictionary<string, DateTime> _linkedFolders = new(Paths.Comparer); // as CheckLinkedFolders last saw them
     private const int DiskCheckIntervalMs = 1000;
 
     // Tab-bar cells of the last frame — for mouse clicks.
@@ -324,16 +329,18 @@ internal sealed partial class App
     public App(IReadOnlyList<string> roots, IReadOnlyList<(string Path, int Line)> initialFiles)
     {
         _tree = new FileTree(roots);
+        string? error = null; // a file that does not open says so, whichever one it is
         foreach (var (f, line) in initialFiles)
         {
             _tree.SelectPath(f);
-            TryOpen(f, line);
+            if (!TryOpen(f, line)) error ??= _status;
         }
         if (initialFiles.Count > 0) // keep the first of them active
         {
             _tree.SelectPath(initialFiles[0].Path);
             TryOpen(initialFiles[0].Path, 0, activateOnly: true);
         }
+        if (error != null) _status = error;
         RestoreRecovered();
     }
 
@@ -388,6 +395,7 @@ internal sealed partial class App
                 {
                     _diskCheckAt = Environment.TickCount64;
                     if (CheckOpenTabsOnDisk()) dirty = true;
+                    if (CheckLinkedFolders()) dirty = true;
                     _changes.CheckGitDirs(_tree.RootPaths);
                 }
                 if (dirty && _running) SafeDraw();
@@ -403,6 +411,27 @@ internal sealed partial class App
             _watcher = null;
             _emergencyDone.Set();
         }
+    }
+
+    /// <summary>
+    /// Expanded folders reached through a symlinked folder get no watcher events: they are looked at
+    /// with the disk checks, and re-read when their entries changed (the folder's time moved) — and
+    /// once when first seen, for what changed between their listing and that first look.
+    /// </summary>
+    private bool CheckLinkedFolders()
+    {
+        var seen = new Dictionary<string, DateTime>(Paths.Comparer);
+        var changed = new List<string>();
+        foreach (var node in _tree.ExpandedThroughLinks())
+        {
+            DateTime t;
+            try { t = Directory.GetLastWriteTimeUtc(node.IsLink ? Paths.Real(node.FullPath) : node.FullPath); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { continue; }
+            seen[node.FullPath] = t;
+            if (!_linkedFolders.TryGetValue(node.FullPath, out var before) || before != t) changed.Add(node.FullPath);
+        }
+        _linkedFolders = seen;
+        return changed.Count > 0 && _tree.RefreshDirs(changed);
     }
 
     private void SafeDispatch(InputEvent? ev)
@@ -557,38 +586,43 @@ internal sealed partial class App
         return true; // even with the same rows: a size or a change colour may be new
     }
 
-    /// <summary>Tabs of a file (or of files in a folder) renamed outside follow it to the new path.</summary>
+    /// <summary>
+    /// Tabs of a file (or of files in a folder) renamed outside follow it to the new path — through
+    /// every rename of the batch in turn (docs → docs2 → docs3).
+    /// </summary>
     private bool FollowRenames(IReadOnlyList<(string Old, string New)> renames)
     {
+        // Only real moves: "rename to a backup, write a new file" leaves the old path in place.
+        var moves = renames.Where(r => !File.Exists(r.Old) && !Directory.Exists(r.Old)).ToList();
+        if (moves.Count == 0) return false;
         bool any = false;
-        foreach (var (oldPath, newPath) in renames)
+        foreach (var tab in _tabs.Tabs)
         {
-            // Only a real move: "rename to a backup, write a new file" leaves the old path in place.
-            if (File.Exists(oldPath) || Directory.Exists(oldPath)) continue;
-            foreach (var tab in _tabs.Tabs)
-            {
-                string? fp = tab.Editor.FilePath;
-                if (fp == null) continue;
-                string? moved = Paths.Same(fp, oldPath) ? newPath
-                    : Paths.IsInside(fp, oldPath) ? newPath + fp[oldPath.Length..]
-                    : null;
-                if (moved == null || !File.Exists(moved)) continue;
-                // Moved over a file open in another tab: that tab sees the change, this one its file gone.
-                if (_tabs.IndexOfPath(moved) >= 0) continue;
-                tab.Editor.RenameTo(moved);
-                tab.Editor.SetBaseline(Baseline(moved));
-                _status = $"{Path.GetFileName(fp)} was moved to {moved} — its tab follows.";
-                any = true;
-            }
+            string? fp = tab.Editor.FilePath;
+            if (fp == null) continue;
+            string moved = fp;
+            foreach (var (oldPath, newPath) in moves)
+                moved = Paths.Same(moved, oldPath) ? newPath
+                    : Paths.IsInside(moved, oldPath) ? newPath + moved[oldPath.Length..]
+                    : moved;
+            if (ReferenceEquals(moved, fp) || !File.Exists(moved)) continue;
+            // Moved over a file open in another tab: that tab sees the change, this one its file gone.
+            if (_tabs.IndexOfPath(moved) >= 0) continue;
+            tab.Editor.RenameTo(moved);
+            tab.Editor.SetBaseline(Baseline(moved));
+            _status = $"{Path.GetFileName(fp)} was moved to {moved} — its tab follows.";
+            any = true;
         }
         return any;
     }
 
     /// <summary>
-    /// A rename the watcher saw as one file gone and another one new — FSEvents reports a rename
-    /// with a write right after it so: a tab whose file just went follows the name in a changed
-    /// folder that is the same file. macOS only, where a file's number is never handed to another
-    /// file (Linux reuses inode numbers at once, and inotify reports every rename anyway).
+    /// A rename the watcher saw as one entry gone and another one new — FSEvents reports a rename
+    /// with a write right after it so, and a move between two roots as a deletion in one and a
+    /// creation in the other: a tab whose file went follows it to a changed folder where the same
+    /// file is — moved itself, or inside the folder that moved (docs/x.txt under another root).
+    /// macOS only, where a file's number is never handed to another file (Linux reuses inode
+    /// numbers at once, and inotify reports every rename anyway).
     /// </summary>
     private bool FollowByIdentity(IReadOnlyCollection<string> dirs)
     {
@@ -599,9 +633,14 @@ internal sealed partial class App
             var ed = tab.Editor;
             if (ed.FilePath is not { } fp || ed.MissingOnDisk || ed.DiskStamp is not { Ino: not 0 } known
                 || File.Exists(fp)) continue;
-            var disk = TextFile.Stat(Path.GetDirectoryName(fp)!)?.Dev; // numbers are per disk
-            string? found = dirs.SelectMany(FilesIn).FirstOrDefault(f =>
-                TextFile.Stat(f) is { } st && st.Ino == known.Ino && (disk == null || st.Dev == disk) && _tabs.IndexOfPath(f) < 0);
+            // What went: the file, or the topmost of its folders that is gone, with the file below it.
+            string gone = fp;
+            while (Path.GetDirectoryName(gone) is { } up && !Directory.Exists(up)) gone = up;
+            string below = fp[gone.Length..];
+            var disk = TextFile.Stat(Path.GetDirectoryName(gone)!)?.Dev; // numbers are per disk
+            string? found = dirs.SelectMany(d => EntriesIn(d, folders: below.Length > 0)).Select(e => e + below)
+                .FirstOrDefault(f => TextFile.Stat(f) is { } st && st.Ino == known.Ino && (disk == null || st.Dev == disk)
+                                     && _tabs.IndexOfPath(f) < 0);
             if (found == null) continue;
             ed.RenameTo(found);
             ed.SetBaseline(Baseline(found));
@@ -610,9 +649,15 @@ internal sealed partial class App
         }
         return any;
 
-        static IEnumerable<string> FilesIn(string dir) // no links: a link would lead to the same file under another name
+        // No links: a link would lead to the same file under another name.
+        static IEnumerable<string> EntriesIn(string dir, bool folders)
         {
-            try { return new DirectoryInfo(dir).GetFiles().Where(f => f.LinkTarget == null).Select(f => f.FullName).ToList(); }
+            try
+            {
+                var info = new DirectoryInfo(dir);
+                return (folders ? info.GetDirectories().Cast<FileSystemInfo>() : info.GetFiles())
+                    .Where(e => e.LinkTarget == null).Select(e => e.FullName).ToList();
+            }
             catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
         }
     }
@@ -635,8 +680,9 @@ internal sealed partial class App
                     _status = $"{ed.DisplayName} was deleted on disk — the tab keeps its text; saving would recreate the file.";
                     changed = true;
                     break;
-                case TextEditor.DiskState.Same when ed.MissingOnDisk:
-                    ed.MissingOnDisk = false;
+                case TextEditor.DiskState.Same when ed.MissingOnDisk || ed.ChangedOnDisk:
+                    // As the tab knows it again (moved away and back; readable again after a chmod): no mark.
+                    ed.MissingOnDisk = ed.ChangedOnDisk = false;
                     changed = true;
                     break;
                 case TextEditor.DiskState.Changed when !ed.Dirty && !ed.Unreadable: // said once, not every second
@@ -729,8 +775,9 @@ internal sealed partial class App
     /// <summary>
     /// Open a file in a tab, or activate its tab (activateOnly — without jumping
     /// to the line). A column (a search hit's index into the line) places the cursor.
+    /// false — the file cannot be opened; the status says why.
     /// </summary>
-    private void TryOpen(string path, int lineZeroBased, bool activateOnly = false, int column = -1)
+    private bool TryOpen(string path, int lineZeroBased, bool activateOnly = false, int column = -1)
     {
         string full = _tree.InPanel(Path.GetFullPath(path));
         int existing = _tabs.IndexOfPath(full);
@@ -743,7 +790,7 @@ internal sealed partial class App
             _status = activateOnly
                 ? $"Tab: {_editor.DisplayName}"
                 : $"Line {_editor.Cy + 1}."; // the one reached: a short file ends before the line asked for
-            return;
+            return true;
         }
 
         var ed = new TextEditor();
@@ -759,7 +806,7 @@ internal sealed partial class App
         {
             _mode = UiMode.Normal;
             _status = "Error: " + ex.Message;
-            return;
+            return false;
         }
         _tabs.Add(ed);
         _mode = UiMode.Normal;
@@ -767,6 +814,7 @@ internal sealed partial class App
         string format = ed.Format.Describe();
         _status = $"Opened {ed.DisplayName} ({ed.LineCount} lines{(format.Length > 0 ? ", " + format : "")}), " +
                   $"tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}. Ctrl+W closes.";
+        return true;
     }
 
     private void ActivateTab(int index, bool announce = false)
@@ -906,21 +954,37 @@ internal sealed partial class App
         _searchCts?.Dispose();
         _searchCts = null;
         if (p.Gen != _searchGen || p.Task.Status != TaskStatus.RanToCompletion) return false;
-        SetLive(p.Task.Result, p.Query);
+        SetLive(p.Task.Result, p.Query, p.Tabs);
         ApplyHits();
         return true;
     }
 
-    private void SetLive(SearchResult result, string query)
+    private void SetLive(SearchResult result, string query, Dictionary<TextEditor, long> tabs)
     {
         _liveSource = result.Hits;
         _liveTruncated = result.Truncated;
         _liveSkipped = result.SkippedLarge;
         _liveQuery = query;
+        _liveTabs = tabs;
+    }
+
+    private Dictionary<TextEditor, long> TabMarks() => _tabs.Tabs.ToDictionary(t => t.Editor, t => t.Editor.LineShifts);
+
+    /// <summary>
+    /// Where a hit's line is now (0-based): edits in its tab since the scan read the file move it.
+    /// A tab opened after the scan counts from its own start.
+    /// </summary>
+    private int HitLine(SearchHit hit)
+    {
+        int line = hit.LineNumber - 1;
+        if (_tabs.Tabs.Find(t => Paths.Same(t.Editor.FilePath, hit.FilePath))?.Editor is not { } ed) return line;
+        int now = ed.FollowLine(line, _hitTabs.GetValueOrDefault(ed));
+        return now < 0 ? line : now;
     }
 
     private void ApplyHits()
     {
+        _hitTabs = _liveTabs;
         _hits = _liveSource;
         _hitsTruncated = _liveTruncated;
         _hitsSkipped = _liveSkipped;
@@ -947,7 +1011,7 @@ internal sealed partial class App
     private void RunLiveSearch()
     {
         string query = _searchQuery.ToString().Trim();
-        if (query.Length < 2)
+        if (!Searchable(query))
         {
             ResetLiveSearch();
             _hits = new List<SearchHit>();
@@ -970,7 +1034,8 @@ internal sealed partial class App
             // Refining ≤500 known hits and scanning one open file are instant: stay synchronous.
             SetLive(scope != SearchScope.CurrentFile ? new SearchResult(FuzzySearch.Refine(_liveSource, query), false, _liveSkipped)
                 : canRefine ? new SearchResult(FuzzySearch.RefineInOrder(_liveSource, query), false)
-                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query), query);
+                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query), query,
+                canRefine ? _liveTabs : TabMarks());
             if (!canRefine) _liveSourceStale = false;
             ApplyHits();
             return;
@@ -991,7 +1056,7 @@ internal sealed partial class App
             SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers),
             _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers),
         });
-        _pendingSearch = (task, gen, query);
+        _pendingSearch = (task, gen, query, TabMarks());
     }
 
     /// <summary>
@@ -1010,12 +1075,14 @@ internal sealed partial class App
             : null;
     }
 
-    private void OpenHit(SearchHit hit)
+    /// <summary>Open a hit's file at the match; false — it could not be opened (the status says why).</summary>
+    private bool OpenHit(SearchHit hit)
     {
         _tree.SelectPath(hit.FilePath);
         // The bottom panel stays visible; the cursor lands on the match itself.
-        TryOpen(hit.FilePath, hit.LineNumber - 1, column: hit.MatchStart);
+        bool opened = TryOpen(hit.FilePath, HitLine(hit), column: hit.MatchStart);
         _openedHitIndex = _hits.IndexOf(hit);
+        return opened;
     }
 
     /// <summary>
@@ -1028,8 +1095,8 @@ internal sealed partial class App
         _resultsVisible = true;
         if (_openedHitIndex == _hitIndex)
             _hitIndex = Math.Clamp(_hitIndex + delta, 0, _hits.Count - 1);
-        OpenHit(_hits[_hitIndex]);
-        if (_mode == UiMode.Normal)
-            _status = $"Hit {_hitIndex + 1}/{_hits.Count}: {_hits[_hitIndex].RelativePath}:{_hits[_hitIndex].LineNumber} · Ctrl+G/Ctrl+Shift+G — next/prev";
+        var hit = _hits[_hitIndex];
+        if (OpenHit(hit) && _mode == UiMode.Normal)
+            _status = $"Hit {_hitIndex + 1}/{_hits.Count}: {hit.RelativePath}:{HitLine(hit) + 1} · Ctrl+G/Ctrl+Shift+G — next/prev";
     }
 }

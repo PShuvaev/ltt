@@ -60,13 +60,39 @@ internal static class Paths
     {
         string full = Normalize(path);
         if (OperatingSystem.IsWindows()) return full;
+        return Resolved(full)
+            ?? (Path.GetDirectoryName(full) is { } parent ? Path.Combine(Real(parent), Path.GetFileName(full)) : full);
+    }
+
+    /// <summary>realpath(3) of a full path: every link in it resolved; null when that leads nowhere (a part is missing).</summary>
+    private static string? Resolved(string full)
+    {
         var buf = new byte[4096]; // PATH_MAX
         try
         {
-            if (realpath(full, buf) != IntPtr.Zero) return Encoding.UTF8.GetString(buf, 0, Array.IndexOf(buf, (byte)0));
+            return realpath(full, buf) != IntPtr.Zero ? Encoding.UTF8.GetString(buf, 0, Array.IndexOf(buf, (byte)0)) : null;
         }
         catch (EntryPointNotFoundException) { return full; }
-        return Path.GetDirectoryName(full) is { } parent ? Path.Combine(Real(parent), Path.GetFileName(full)) : full;
+    }
+
+    /// <summary>
+    /// The file a path leads to when its last part is a link: through every link as the system
+    /// follows them — a relative target counts from the folder the link really is in, so a ".."
+    /// through a linked folder is that folder's real parent; a dangling link gives the path it
+    /// points to. Else the path itself.
+    /// </summary>
+    public static string Final(string path)
+    {
+        string full = Normalize(path);
+        if (OperatingSystem.IsWindows()) return new FileInfo(full).ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? full;
+        for (int hops = 0; hops < 40 && new FileInfo(full).LinkTarget is { } link; hops++) // 40: as the kernel's ELOOP
+        {
+            if (Resolved(full) is { } real) return real; // (.NET's Exists is true for a dangling link itself)
+            // Dangling: where the link points, from the folder it really is in.
+            string folder = Real(Path.GetDirectoryName(full) ?? full);
+            full = Path.GetFullPath(link, folder);
+        }
+        return full;
     }
 
     /// <summary>Whether two paths name one file or folder, symlinks resolved.</summary>

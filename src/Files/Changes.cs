@@ -26,6 +26,7 @@ internal sealed class Changes
         List<string> NewDirs, (DateTime, DateTime, DateTime) Git = default);
 
     private readonly DateTime _since = DateTime.UtcNow;
+    private long SinceNs => (_since - DateTime.UnixEpoch).Ticks * 100; // as inode change times go
     private readonly List<Repo> _repos = new();
     private readonly HashSet<string> _asked = new(Paths.Comparer);   // folders already looked up
     private readonly HashSet<string> _wanted = new(Paths.Comparer);  // to look up or re-read next
@@ -78,7 +79,8 @@ internal sealed class Changes
     {
         foreach (var r in _repos)
         {
-            string git = Path.Combine(r.Root, ".git");
+            // A worktree's .git is a file: its own git folder lies elsewhere, beyond the watcher's reach.
+            string git = GitDir(Path.Combine(r.Root, ".git"));
             if (panelRoots.Any(p => Paths.IsSameOrInside(git, p))) continue;
             var stamp = GitStamp(git);
             if (r.GitStamp == stamp) continue;
@@ -87,13 +89,23 @@ internal sealed class Changes
         }
     }
 
-    /// <summary>When .git (or the folder a worktree's .git file points to), its index and HEAD last changed.</summary>
+    /// <summary>A repository's git folder: .git itself, or the one a worktree's (a submodule's) .git file points to.</summary>
+    private static string GitDir(string dotGit)
+    {
+        try
+        {
+            if (File.Exists(dotGit) && File.ReadAllText(dotGit) is var link && link.StartsWith("gitdir:", StringComparison.Ordinal))
+                return Path.GetFullPath(Path.Combine(Path.GetDirectoryName(dotGit)!, link[7..].Trim()));
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+        return dotGit;
+    }
+
+    /// <summary>When a git folder, its index and HEAD last changed.</summary>
     private static (DateTime, DateTime, DateTime) GitStamp(string git)
     {
         try
         {
-            if (File.Exists(git) && File.ReadAllText(git) is var link && link.StartsWith("gitdir:", StringComparison.Ordinal))
-                git = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(git)!, link[7..].Trim()));
             return (Directory.GetLastWriteTimeUtc(git), File.GetLastWriteTimeUtc(Path.Combine(git, "index")),
                 File.GetLastWriteTimeUtc(Path.Combine(git, "HEAD")));
         }
@@ -146,7 +158,18 @@ internal sealed class Changes
             return repo.Entries.TryGetValue(node.FullPath, out var kind) ? kind : InNewDir(repo, node.FullPath);
         }
         if (node.IsNew || IsCreated(node.FullPath)) return Kind.Added;
-        return (node.IsDir ? _touched.Contains(node.FullPath) : node.WriteUtc > _since) ? Kind.Modified : Kind.None;
+        if (node.IsDir) return _touched.Contains(node.FullPath) ? Kind.Modified : Kind.None;
+        // A file changed since the start: its time moved since it was first listed or is past the start,
+        // and its inode changed since then too — a time set back (cp -p, rsync -t) cannot hide a change,
+        // nor a time in the future make one.
+        return (node.WriteUtc > _since || node.WriteUtc != node.FirstWriteUtc) && InodeChangedSince(node)
+            ? Kind.Modified : Kind.None;
+    }
+
+    private bool InodeChangedSince(TreeNode node)
+    {
+        if (node.ChangeNs < 0) node.ChangeNs = TextFile.Stat(node.FullPath)?.ChangeNs ?? long.MaxValue; // unknown: the time alone
+        return node.ChangeNs > SinceNs;
     }
 
     /// <summary>
@@ -205,7 +228,7 @@ internal sealed class Changes
             foreach (var _ in prefix.Trim().Split('/', StringSplitOptions.RemoveEmptyEntries))
                 root = Path.GetDirectoryName(root) ?? root;
         }
-        var git = GitStamp(Path.Combine(root, ".git")); // before the status: a commit after it shows as a change
+        var git = GitStamp(GitDir(Path.Combine(root, ".git"))); // before the status: a commit after it shows as a change
         string? status = Proc.Run("git", "--no-optional-locks status --porcelain=v2 -z --branch --untracked-files=normal",
             root, timeoutMs: 15_000);
         if (status == null) return none;

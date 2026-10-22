@@ -20,7 +20,23 @@ public sealed class TreeNode
     public bool SizeExact { get; set; }
 
     /// <summary>Modification time when listed: a folder's size stays cached while it stands.</summary>
-    public DateTime WriteUtc { get; set; }
+    public DateTime WriteUtc
+    {
+        get => _writeUtc;
+        set
+        {
+            if (_writeUtc == default) FirstWriteUtc = value;
+            else if (_writeUtc != value) ChangeNs = -1;
+            _writeUtc = value;
+        }
+    }
+    private DateTime _writeUtc;
+
+    /// <summary>Modification time when first listed.</summary>
+    public DateTime FirstWriteUtc { get; private set; }
+
+    /// <summary>When the inode last changed (ns since the epoch), as last asked (Changes); -1 — ask again.</summary>
+    internal long ChangeNs = -1;
 
     /// <summary>Appeared after its folder was first read (outside git: a new entry).</summary>
     public bool IsNew { get; init; }
@@ -58,6 +74,17 @@ public sealed class FileTree
     /// <summary>The path as the panel spells it (see Paths.Within); as it is outside every root.</summary>
     public string InPanel(string fullPath) => Paths.Within(fullPath, RootPaths) ?? fullPath;
     public List<TreeNode> Visible { get; private set; } = new();
+
+    /// <summary>Expanded folders that are, or lie inside, a symlinked folder: a watcher does not follow links.</summary>
+    public List<TreeNode> ExpandedThroughLinks()
+    {
+        var list = new List<TreeNode>();
+        foreach (var n in Visible)
+            if (n is { IsDir: true, Expanded: true, ChildrenLoaded: true })
+                for (var a = n; a != null; a = a.Parent)
+                    if (a.IsLink) { list.Add(n); break; }
+        return list;
+    }
     public int SelectedIndex { get; private set; }
     public int ScrollOffset { get; private set; }
 
@@ -249,6 +276,10 @@ public sealed class FileTree
         if (selected != null) SelectNode(selected);
     }
 
+    // A name is never pathspec magic: one that starts with ":" (":!x") would make git refuse the whole batch,
+    // and check-ignore takes no --literal-pathspecs. Spelled "./:!x", it is a name (git answers in the same spelling).
+    private static string Literal(string query) => query.StartsWith(':') ? "./" + query : query;
+
     /// <summary>
     /// Mark children that git ignores, asking git itself (`git check-ignore`) so
     /// nested .gitignore files, negations and global excludes count; outside a
@@ -261,7 +292,7 @@ public sealed class FileTree
         if (dir.Children.Count == 0) return;
         // A folder is asked about as "name/"; a symlink as the link itself — a path
         // through it would make git refuse the whole batch ("beyond a symbolic link").
-        static string Query(TreeNode c) => c.Name + (c.IsDir && !c.IsLink ? "/" : "");
+        static string Query(TreeNode c) => Literal(c.Name + (c.IsDir && !c.IsLink ? "/" : ""));
         string? output = Proc.Run("git", "check-ignore --stdin -z", dir.FullPath,
             string.Concat(dir.Children.Select(c => Query(c) + "\0")), timeoutMs: 2000, okExitCodes: new[] { 0, 1 });
         if (output == null) return;
@@ -286,7 +317,7 @@ public sealed class FileTree
             foreach (var c in dir.Children)
             {
                 c.Ignored = IsService(c);
-                queries.Add((c, prefix + c.Name + (c.IsDir && !c.IsLink ? "/" : "")));
+                queries.Add((c, Literal(prefix + c.Name + (c.IsDir && !c.IsLink ? "/" : ""))));
             }
         }
         if (queries.Count == 0) return true;

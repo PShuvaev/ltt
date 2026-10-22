@@ -202,12 +202,15 @@ internal sealed partial class App
         }
         else if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasFile)
         {
-            int x = _editorTextX + (_editor.CursorColumn - _editor.ScrollX);
+            int col = _editor.CursorColumn - _editor.ScrollX, viewW = _editor.ViewWidth;
             int y = _contentTop + (_editor.Cy - _editor.ScrollY);
-            // Sideways scrolling can leave the cursor out of view on either side.
-            if (x >= _editorTextX && x < _editorTextX + _editor.ViewWidth
-                && y >= _contentTop && y < _contentTop + _mainContentH)
-                _screen.Cursor = (x, y);
+            // Sideways scrolling (the wheel) can leave the cursor out of view on either side, or
+            // its character under a ‹ › marker, which hides it: the cursor is not drawn then.
+            bool underMarker = (col == 0 && _editor.ScrollX > 0)
+                || (col + _editor.CursorCells - 1 >= viewW - 1
+                    && Cells.WidthOf(_editor.LineText(_editor.Cy)) > _editor.ScrollX + viewW);
+            if (col >= 0 && col < viewW && !underMarker && y >= _contentTop && y < _contentTop + _mainContentH)
+                _screen.Cursor = (_editorTextX + col, y);
         }
     }
 
@@ -325,16 +328,16 @@ internal sealed partial class App
                             (mark & LineDiff.Added) != 0 ? ConsoleColor.Green : (mark & LineDiff.Modified) != 0 ? ConsoleColor.Yellow : ConsoleColor.Red,
                             ConsoleColor.Black, 1);
                     string lineText = _editor.LineText(lineNo);
-                    // Only the visible part is tokenized; the comment state comes from the editor's cache.
+                    // Only the visible part is tokenized; the state it starts in comes from the editor's cache.
                     // A very long line (minified code, a log) is drawn without colours.
-                    bool inBlock = _editor.BlockCommentStateBefore(lineNo);
+                    var lineState = _editor.LineStateBefore(lineNo);
                     if (lineText.Length > MaxHighlightedLine)
                     {
                         _tokens.Clear();
                         _tokens.Add(new Token(0, lineText.Length, TokenKind.Normal));
                     }
                     else
-                        Highlighter.TokenizeInto(_tokens, lineText, syntax, ref inBlock,
+                        Highlighter.TokenizeInto(_tokens, lineText, syntax, ref lineState,
                             Cells.IndexAt(lineText, _editor.ScrollX + viewW) + 1);
                     int sFrom = -1, sTo = -1;
                     bool sEol = false;
@@ -456,7 +459,7 @@ internal sealed partial class App
             var hit = _hits[idx];
             bool sel = idx == _hitIndex;
             var bg = sel ? ConsoleColor.DarkCyan : ConsoleColor.Black;
-            string prefix = $" {hit.RelativePath}:{hit.LineNumber} ";
+            string prefix = $" {hit.RelativePath}:{HitLine(hit) + 1} ";
             int prefixW = Math.Min(w, _screen.Put(0, y, prefix, sel ? ConsoleColor.White : ConsoleColor.Cyan, bg,
                 w, out _, pad: false));
             int avail = Math.Max(1, w - prefixW);
@@ -547,7 +550,7 @@ internal sealed partial class App
         {
             string suffix = _pendingSearch != null // until its results are applied, not merely ready
                 ? "   · searching…"
-                : _searchQuery.ToString().Trim().Length >= 2
+                : Searchable(_searchQuery.ToString())
                     ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"
                     : "   · search starts at 2 characters";
             _promptCursorX = DrawPrompt(w, CurrentSearchPrompt(), _searchQuery.ToString(), "", suffix);

@@ -5,6 +5,9 @@ public enum TokenKind { Normal, Keyword, Str, Comment, Number, Preproc }
 /// <summary>A highlighted range of the source line (no text is copied).</summary>
 public readonly record struct Token(int Start, int Length, TokenKind Kind);
 
+/// <summary>What a line starts inside, carried over from the line before it: code, a /* */ comment, a `…` string.</summary>
+public enum LineState : byte { Code, Comment, Backticks }
+
 /// <summary>
 /// What a language looks like to the highlighter, chosen once per file by
 /// its name. Files of unknown kinds (Markdown, plain text, logs…) are Plain:
@@ -23,6 +26,9 @@ public sealed class Syntax
     public bool RawSingleQuotes { get; init; } // '…' takes no \ escapes (shell, YAML)
     public bool Lifetimes { get; init; }       // Rust: 'a is a lifetime or a label, not a character
     public bool VerbatimStrings { get; init; } // C#: @"…" — "" is a quote, \ is literal
+    public bool MultiLineBackticks { get; init; } // `…` may run over lines: JS template literals, Go raw strings
+    public bool RawBackticks { get; init; }    // `…` takes no \ escapes (Go)
+    public bool RegexLiterals { get; init; }   // JS: /…/ where an operand may stand is a regular expression
     public bool Numbers { get; init; }
     public bool IsPlain => Keywords == null && !SlashComments && !HashComments && !Strings && !Numbers;
 
@@ -91,6 +97,16 @@ public sealed class Syntax
         Name = "C-like", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
         Strings = true, Numbers = true,
     };
+    private static readonly Syntax JavaScript = new()
+    {
+        Name = "JavaScript", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
+        Strings = true, Numbers = true, MultiLineBackticks = true, RegexLiterals = true,
+    };
+    private static readonly Syntax Go = new()
+    {
+        Name = "Go", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
+        Strings = true, Numbers = true, MultiLineBackticks = true, RawBackticks = true,
+    };
     private static readonly Syntax Rust = new()
     {
         Name = "Rust", Keywords = CLikeWords, SlashComments = true, Preprocessor = true,
@@ -134,9 +150,10 @@ public sealed class Syntax
         return Path.GetExtension(name).ToLowerInvariant() switch
         {
             ".cs" or ".csx" => CSharp,
+            ".js" or ".mjs" or ".cjs" or ".ts" or ".mts" or ".cts" or ".tsx" or ".jsx" => JavaScript,
+            ".go" => Go,
             ".c" or ".h" or ".cpp" or ".hpp" or ".cc" or ".cxx" or ".hh" or ".hxx" or ".ino"
-                or ".m" or ".mm" or ".java" or ".js" or ".mjs" or ".cjs" or ".ts" or ".mts" or ".cts"
-                or ".tsx" or ".jsx" or ".go" or ".swift" or ".kt" or ".kts" or ".php"
+                or ".m" or ".mm" or ".java" or ".swift" or ".kt" or ".kts" or ".php"
                 or ".scala" or ".dart" or ".groovy" or ".gradle" or ".proto" or ".zig" or ".sol"
                 or ".json" or ".jsonc" or ".json5" => CLike,
             ".rs" => Rust,
@@ -155,8 +172,8 @@ public sealed class Syntax
 
 /// <summary>
 /// Simple line-based syntax highlighting: keywords, strings, comments
-/// (//, /* */, #), numbers, preprocessor.
-/// Multi-line /* */ is supported via inBlockComment carried between lines.
+/// (//, /* */, #), numbers, preprocessor, JavaScript's regular expressions.
+/// Multi-line /* */ comments and `…` strings are supported via a LineState carried between lines.
 /// Works on spans and returns ranges, so tokenizing allocates nothing
 /// per token — important because it runs on every rendered frame.
 /// </summary>
@@ -176,44 +193,60 @@ public static class Highlighter
     // when only the state is wanted (EndState), so long lines are scanned vectorized.
     private static readonly SearchValues<char> StateChars = SearchValues.Create("/\"'`#@$");
 
-    public static List<Token> Tokenize(ReadOnlySpan<char> line, Syntax syntax, ref bool inBlockComment)
+    public static List<Token> Tokenize(ReadOnlySpan<char> line, Syntax syntax, ref LineState state)
     {
         var tokens = new List<Token>();
-        TokenizeInto(tokens, line, syntax, ref inBlockComment);
+        TokenizeInto(tokens, line, syntax, ref state);
         return tokens;
     }
 
-    /// <summary>Whether the line ends inside a /* */ comment, given the state it starts in.</summary>
-    public static bool EndState(ReadOnlySpan<char> line, Syntax syntax, bool inBlockComment)
+    /// <summary>Tokenize a line that starts inside a /* */ comment or not (in no `…` string).</summary>
+    public static List<Token> Tokenize(ReadOnlySpan<char> line, Syntax syntax, ref bool inBlockComment)
     {
-        if (!syntax.SlashComments) return false;
-        Scan(null, line, syntax, ref inBlockComment, line.Length);
-        return inBlockComment;
+        var state = inBlockComment ? LineState.Comment : LineState.Code;
+        var tokens = Tokenize(line, syntax, ref state);
+        inBlockComment = state == LineState.Comment;
+        return tokens;
     }
+
+    /// <summary>What the line ends inside, given what it starts inside.</summary>
+    public static LineState EndState(ReadOnlySpan<char> line, Syntax syntax, LineState state)
+    {
+        if (!CarriesState(syntax)) return LineState.Code;
+        Scan(null, line, syntax, ref state, line.Length);
+        return state;
+    }
+
+    /// <summary>Whether the line ends inside a /* */ comment, given whether it starts in one.</summary>
+    public static bool EndState(ReadOnlySpan<char> line, Syntax syntax, bool inBlockComment) =>
+        EndState(line, syntax, inBlockComment ? LineState.Comment : LineState.Code) == LineState.Comment;
+
+    /// <summary>Only languages with /* */ comments or multi-line `…` strings carry a state from line to line.</summary>
+    public static bool CarriesState(Syntax syntax) => syntax.SlashComments || syntax.MultiLineBackticks;
 
     /// <summary>
     /// Tokenize into a caller-owned list (cleared first) to avoid per-line allocation.
     /// Tokens cover [0, line.Length); past `limit` (the visible part) the rest is one plain run.
     /// </summary>
     public static void TokenizeInto(List<Token> tokens, ReadOnlySpan<char> line, Syntax syntax,
-        ref bool inBlockComment, int limit = int.MaxValue)
+        ref LineState state, int limit = int.MaxValue)
     {
         tokens.Clear();
-        if (!syntax.SlashComments) inBlockComment = false; // only /* */ languages carry a state
+        if (!CarriesState(syntax)) state = LineState.Code;
         if (syntax.IsPlain)
         {
             tokens.Add(new Token(0, line.Length, TokenKind.Normal));
             return;
         }
-        Scan(tokens, line, syntax, ref inBlockComment, Math.Min(limit, line.Length));
+        Scan(tokens, line, syntax, ref state, Math.Min(limit, line.Length));
         if (tokens.Count == 0) tokens.Add(new Token(0, 0, TokenKind.Normal));
     }
 
-    /// <summary>The tokenizer proper; with tokens == null it only tracks the comment state.</summary>
+    /// <summary>The tokenizer proper; with tokens == null it only tracks the state carried to the next line.</summary>
     private static void Scan(List<Token>? tokens, ReadOnlySpan<char> line, Syntax syntax,
-        ref bool inBlockComment, int limit)
+        ref LineState state, int limit)
     {
-        if (!syntax.SlashComments) inBlockComment = false;
+        if (!CarriesState(syntax)) state = LineState.Code;
         bool hasKeywords = syntax.Keywords != null;
         var kwLookup = hasKeywords ? syntax.Keywords!.GetAlternateLookup<ReadOnlySpan<char>>() : default;
         int i = 0;
@@ -232,7 +265,7 @@ public static class Highlighter
 
         // A preprocessor directive (#include, #if, #region …): the line keeps the
         // directive colour, but strings and comments in it are still recognised.
-        if (syntax.Preprocessor && !inBlockComment)
+        if (syntax.Preprocessor && state == LineState.Code)
         {
             int lead = line.Length - line.TrimStart().Length;
             if (lead < line.Length && line[lead] == '#')
@@ -245,7 +278,7 @@ public static class Highlighter
 
         while (i < limit)
         {
-            if (inBlockComment)
+            if (state == LineState.Comment)
             {
                 int end = line[i..].IndexOf("*/");
                 FlushNormal(i);
@@ -257,7 +290,17 @@ public static class Highlighter
                 }
                 Emit(TokenKind.Comment, i, end + 2);
                 i = pend = i + end + 2;
-                inBlockComment = false;
+                state = LineState.Code;
+                continue;
+            }
+            if (state == LineState.Backticks)
+            {
+                FlushNormal(i);
+                int start = i;
+                if (BackticksEnd(line, i, syntax) is var end and >= 0) { i = end; state = LineState.Code; }
+                else i = line.Length; // the string goes on into the next line
+                Emit(TokenKind.Str, start, i - start);
+                pend = i;
                 continue;
             }
 
@@ -284,7 +327,7 @@ public static class Highlighter
                 if (end < 0)
                 {
                     Emit(TokenKind.Comment, i, line.Length - i);
-                    inBlockComment = true;
+                    state = LineState.Comment;
                     i = pend = line.Length;
                     return;
                 }
@@ -298,6 +341,16 @@ public static class Highlighter
                 Emit(TokenKind.Comment, i, line.Length - i);
                 i = pend = line.Length;
                 return;
+            }
+
+            // JavaScript: /…/ where an operand may stand (after = ( , return…) is a regular expression,
+            // and a /* inside it opens no comment.
+            if (syntax.RegexLiterals && c == '/' && RegexMayStart(line, i) && RegexEnd(line, i) is var regexEnd and >= 0)
+            {
+                FlushNormal(i);
+                Emit(TokenKind.Str, i, regexEnd - i);
+                i = pend = regexEnd;
+                continue;
             }
 
             // Rust: 'a, 'static, 'outer: — a lifetime or a label; 'a' is a character.
@@ -325,6 +378,14 @@ public static class Highlighter
                     FlushNormal(i);
                     int start = i;
                     char quote = line[q];
+                    if (quote == '`' && syntax.MultiLineBackticks)
+                    {
+                        if (BackticksEnd(line, q + 1, syntax) is var end and >= 0) i = end;
+                        else { i = line.Length; state = LineState.Backticks; } // on into the next line
+                        Emit(TokenKind.Str, start, i - start);
+                        pend = i;
+                        continue;
+                    }
                     bool escapes = !verbatim && !(quote == '\'' && syntax.RawSingleQuotes);
                     i = q + 1;
                     while (i < line.Length)
@@ -376,5 +437,60 @@ public static class Highlighter
         if (tokens == null) return;
         FlushNormal(Math.Min(i, limit));
         if (pend < line.Length) Emit(TokenKind.Normal, pend, line.Length - pend); // past the visible part
+    }
+
+    /// <summary>Just past the ` that closes a `…` string whose text starts at i; -1 — it goes on past the line.</summary>
+    private static int BackticksEnd(ReadOnlySpan<char> line, int i, Syntax syntax)
+    {
+        for (; i < line.Length; i++)
+        {
+            if (line[i] == '\\' && !syntax.RawBackticks) i++;
+            else if (line[i] == '`') return i + 1;
+        }
+        return -1;
+    }
+
+    /// <summary>
+    /// Whether a / at i may start a regular expression rather than divide: at the line start, after
+    /// an operator, an opening bracket or a keyword such as return; not after a name, a number, ) or ].
+    /// </summary>
+    private static bool RegexMayStart(ReadOnlySpan<char> line, int i)
+    {
+        int p = i - 1;
+        while (p >= 0 && line[p] is ' ' or '\t') p--;
+        if (p < 0) return true;
+        char prev = line[p];
+        if (char.IsLetterOrDigit(prev) || prev is '_' or '$')
+        {
+            int s = p;
+            while (s > 0 && (char.IsLetterOrDigit(line[s - 1]) || line[s - 1] is '_' or '$')) s--;
+            return line[s..(p + 1)] is "return" or "typeof" or "instanceof" or "in" or "of" or "case" or "delete"
+                or "void" or "throw" or "new" or "else" or "do" or "yield" or "await";
+        }
+        return prev is not (')' or ']' or '}' or '.' or '<' or '"' or '\'' or '`');
+    }
+
+    /// <summary>
+    /// Just past a regular expression that starts with the / at i (and its flags); -1 — none ends on
+    /// this line, or not within MaxRegex characters (so a long minified line stays quick to scan).
+    /// </summary>
+    private static int RegexEnd(ReadOnlySpan<char> line, int i)
+    {
+        const int MaxRegex = 2000;
+        bool inClass = false; // a / inside [...] does not end it
+        for (int j = i + 1; j < line.Length && j - i <= MaxRegex; j++)
+        {
+            char ch = line[j];
+            if (ch == '\\') j++;
+            else if (ch == '[') inClass = true;
+            else if (ch == ']') inClass = false;
+            else if (ch == '/' && !inClass)
+            {
+                if (j == i + 1) return -1; // "//" is a comment
+                for (j++; j < line.Length && char.IsAsciiLetter(line[j]); j++) { } // flags: g, i, m…
+                return j;
+            }
+        }
+        return -1;
     }
 }
