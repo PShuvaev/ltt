@@ -48,12 +48,10 @@ internal sealed partial class App
         string raw = _pathInput.ToString().Trim();
         _mode = UiMode.Normal;
         _focus = Focus.Tree;
-        if (raw.Length == 0) { _status = "Creation cancelled."; return; }
 
-        bool makeFolder = makeFolderRequested
-            || raw.EndsWith(Path.DirectorySeparatorChar) || raw.EndsWith(Path.AltDirectorySeparatorChar);
+        bool makeFolder = makeFolderRequested || Path.EndsInDirectorySeparator(raw);
         string trimmed = raw.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        if (trimmed.Length == 0) { _status = "Creation cancelled."; return; }
+        if (trimmed.Length == 0) { _status = "Creation cancelled."; return; } // nothing typed, or only separators
         string p = ResolveInputPath(trimmed);
 
         try
@@ -116,8 +114,7 @@ internal sealed partial class App
         string newName = oldName.Length > 0 && char.IsWhiteSpace(oldName[0]) ? typed : typed.TrimStart();
         newName = oldName.Length > 0 && char.IsWhiteSpace(oldName[^1]) ? newName : newName.TrimEnd();
         if (newName.Length == 0 || newName is "." or ".."
-            || newName.IndexOfAny(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }) >= 0
-            || newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+            || newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) // the separators are among them
         {
             _status = "Enter just the new name, with no path or special characters.";
             return;

@@ -17,9 +17,7 @@ internal sealed partial class App
         while (v >= 1024 && u < 5) { v /= 1024; u++; }
         double mag = Math.Pow(10, Math.Floor(Math.Log10(v)) - 1);
         double r = Math.Round(v / mag) * mag; // two significant digits
-        string num = r == Math.Floor(r)
-            ? r.ToString("0", System.Globalization.CultureInfo.InvariantCulture)
-            : r.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture);
+        string num = r.ToString("0.#", System.Globalization.CultureInfo.InvariantCulture); // a whole number has no point
         if (num == "1000" && u < 5) { num = "1"; u++; } // 999 B rounds to 1K, 1000K to 1M
         string core = u < 0 ? num : num + "KMGTPE"[u];
         return exact ? core : "≥" + core;
@@ -87,6 +85,7 @@ internal sealed partial class App
     /// syntax colours and the selection [selFrom, selTo) (indexes into the line)
     /// white on dark blue; selEol — the selected line break shows as one cell.
     /// Text cut off at an edge is flagged in that edge cell with a dim ‹ or ›.
+    /// The cells after the text stay as a new frame has them (Screen.Begin).
     /// </summary>
     internal static void WriteHighlighted(Screen screen, int x, int y, string line, List<Token> tokens,
         int scrollX, int width, int selFrom = -1, int selTo = -1, bool selEol = false)
@@ -129,7 +128,6 @@ internal sealed partial class App
         }
         if (sx < end && selEol && i >= line.Length) // a selected line break — one cell in the selection colour
             sx += screen.Put(sx, y, " ", ConsoleColor.White, ConsoleColor.DarkBlue, 1);
-        if (sx < end) screen.Put(sx, y, "", ConsoleColor.Gray, ConsoleColor.Black, end - sx);
 
         // A marker keeps the selection colours of the cell it covers; a line hidden
         // entirely to the left has its selected line break drawn in that cell.
@@ -142,8 +140,6 @@ internal sealed partial class App
     private void Draw()
     {
         int w = Console.WindowWidth, h = Console.WindowHeight;
-        _lastW = w;
-        _lastH = h;
         _screen.Begin(w, h);
 
         if (w < 42 || h < 10)
@@ -157,61 +153,35 @@ internal sealed partial class App
         _statusY = h - 2;
         int helpY = h - 1;
 
-        // The bottom results panel takes ~30% of the height from the main panels.
-        int resultsTotal = _resultsVisible ? Math.Clamp(h * 30 / 100, 4, 10) : 0;
+        // The bottom results panel takes ~30% of the height from the main panels, which keep 3 rows.
+        int resultsTotal = _resultsVisible ? Math.Min(Math.Clamp(h * 30 / 100, 4, 10), Math.Max(0, _statusY - _contentTop - 3)) : 0;
         int contentH = _statusY - _contentTop - resultsTotal;
-        if (contentH < 3)
-        {
-            resultsTotal = Math.Max(0, _statusY - _contentTop - 3);
-            contentH = _statusY - _contentTop - resultsTotal;
-        }
         _mainContentH = contentH;
         _resultsTop = _contentTop + contentH;
-        _resultsRowsTop = _resultsTop + 1;
         _resultsRowCount = Math.Max(0, resultsTotal - 1);
 
-        string activeLabel; // see BuildTitle
-        bool showDirty = false;
-        string activeTabLabel = "";
-        if (_mode == UiMode.SearchResults && _hits.Count > 0)
-        {
-            activeLabel = _hits[Math.Clamp(_hitIndex, 0, _hits.Count - 1)].FilePath;
-            _titlePath = activeLabel;
-        }
-        else if (_focus == Focus.Tree)
-        {
-            activeLabel = _tree.Selected?.FullPath ?? _tree.Roots[0].FullPath;
-            _titlePath = activeLabel;
-        }
-        else if (_editor.HasFile)
-        {
-            activeLabel = _editor.FilePath!;
-            _titlePath = activeLabel;
-            showDirty = _editor.Dirty;
-            activeTabLabel = _tabs.Tabs.Count > 1 ? $" [tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}]" : "";
-        }
-        else
-        {
-            activeLabel = "no file open";
-            _titlePath = null;
-        }
-        WriteAt(0, 0, BuildTitle(activeLabel, showDirty, activeTabLabel, w), ConsoleColor.White, ConsoleColor.DarkBlue, w);
+        // The title (see BuildTitle): the picked hit's file, the tree's selection, or the open file with its ● and tab.
+        bool onHit = _mode == UiMode.SearchResults && _hits.Count > 0;
+        bool onFile = !onHit && _focus == Focus.Editor && _editor.HasFile;
+        _titlePath = onHit ? _hits[Math.Clamp(_hitIndex, 0, _hits.Count - 1)].FilePath
+            : _focus == Focus.Tree ? _tree.Selected?.FullPath ?? _tree.Roots[0].FullPath
+            : _editor.FilePath; // null: no file open
+        string tabNo = onFile && _tabs.Tabs.Count > 1 ? $" [tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}]" : "";
+        WriteAt(0, 0, BuildTitle(_titlePath ?? "no file open", onFile && _editor.Dirty, tabNo, w),
+            ConsoleColor.White, ConsoleColor.DarkBlue, w);
 
         DrawPanels(w, contentH);
         if (_resultsVisible) DrawResultsPanel(w);
 
         DrawStatusAndHelp(w, helpY);
-        PlaceCursor(w);
+        PlaceCursor();
         _screen.Flush();
     }
 
-    private void PlaceCursor(int w)
+    /// <summary>The cursor at the editor's edit point; a prompt places its own (DrawPrompt).</summary>
+    private void PlaceCursor()
     {
-        if (_mode is UiMode.SearchInput or UiMode.PathInput)
-        {
-            _screen.Cursor = (Math.Min(w - 1, _promptCursorX), _statusY);
-        }
-        else if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasFile)
+        if (_mode == UiMode.Normal && _focus == Focus.Editor && _editor.HasFile)
         {
             int col = _editor.CursorColumn - _editor.ScrollX, viewW = _editor.ViewWidth;
             int y = _contentTop + (_editor.Cy - _editor.ScrollY);
@@ -225,22 +195,29 @@ internal sealed partial class App
         }
     }
 
-    private string CurrentSearchPrompt() => _searchScope switch
+    /// <summary>What the search prompt, the results header and the help line say about the scope.</summary>
+    private (string Prompt, string Header, string Help) ScopeTexts()
     {
-        SearchScope.CurrentFile => " Search file: ",
-        SearchScope.SelectedFolder => " Search folder: ",
-        _ => " Search all folders: ",
-    };
+        string target = _searchTargetPath == null
+            ? ""
+            : Path.GetFileName(_searchTargetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (target.Length == 0) target = _searchTargetPath ?? "";
+        return _searchScope switch
+        {
+            SearchScope.CurrentFile => (" Search file: ", $"file {target}",
+                " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results"),
+            SearchScope.SelectedFolder => (" Search folder: ", $"folder {target}",
+                " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results"),
+            _ => (" Search all folders: ", "all folders",
+                " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results"),
+        };
+    }
 
     private void DrawPanels(int w, int contentH)
     {
-        int leftW = Math.Clamp(w * 32 / 100, 22, Math.Max(22, w - 24));
-        int dividerX = leftW;
-        int editorX = leftW + 1;
+        int leftW = _leftW = Math.Clamp(w * 32 / 100, 22, Math.Max(22, w - 24)); // the divider stands at leftW
+        int editorX = _editorX = leftW + 1;
         int editorW = w - editorX;
-
-        _leftW = leftW;
-        _editorX = editorX;
 
         _treeTop = 1;
         _treeContentH = contentH + 1;
@@ -251,14 +228,10 @@ internal sealed partial class App
         // Pull the view to the cursor only when this tab's view size changed, else
         // the wheel cannot scroll away from the cursor. The size is per tab, so a
         // tab that was hidden while the layout changed catches up when shown.
-        if (_editor.HasFile && (_editor.ViewWidth != viewW || _editor.ViewHeight != contentH))
-        {
-            _editor.ViewWidth = viewW;
-            _editor.ViewHeight = contentH;
-            _editor.EnsureCursorVisible();
-        }
+        bool resized = _editor.ViewWidth != viewW || _editor.ViewHeight != contentH;
         _editor.ViewWidth = viewW;
         _editor.ViewHeight = contentH;
+        if (resized && _editor.HasFile) _editor.EnsureCursorVisible();
         _editorTextX = editorX + gutter;
 
         DrawTabBar(editorX, editorW);
@@ -293,18 +266,13 @@ internal sealed partial class App
                     };
                 // Size hugs the right edge in a dim colour; roots have no size of their own.
                 const int sizeColW = 8;
-                if (leftW >= 20)
-                {
-                    string size = node.IsRoot ? "" : FormatSize(node.Size, node.SizeExact);
-                    WriteAt(0, y, text, fg, bg, leftW - sizeColW);
-                    WriteAt(leftW - sizeColW, y, size.PadLeft(sizeColW),
-                        sel ? ConsoleColor.Gray : ConsoleColor.DarkGray, bg, sizeColW);
-                }
-                else WriteAt(0, y, text, fg, bg, leftW);
+                string size = node.IsRoot ? "" : FormatSize(node.Size, node.SizeExact);
+                WriteAt(0, y, text, fg, bg, leftW - sizeColW);
+                WriteAt(leftW - sizeColW, y, size.PadLeft(sizeColW),
+                    sel ? ConsoleColor.Gray : ConsoleColor.DarkGray, bg, sizeColW);
             }
-            else WriteAt(0, y, "", ConsoleColor.Gray, ConsoleColor.Black, leftW);
 
-            WriteAt(dividerX, y, "│", ConsoleColor.DarkGray, ConsoleColor.Black, 1);
+            WriteAt(leftW, y, "│", ConsoleColor.DarkGray, ConsoleColor.Black, 1);
 
             // Right panel: the editor (nothing to draw on the tab-bar row)
             int r = tr - (_contentTop - _treeTop);
@@ -387,7 +355,6 @@ internal sealed partial class App
                 edFocused ? ConsoleColor.DarkCyan : ConsoleColor.Black, editorW);
             return;
         }
-        WriteAt(editorX, 1, "", ConsoleColor.Gray, ConsoleColor.Black, editorW);
 
         var nameCounts = _tabs.Tabs.GroupBy(t => t.DisplayName).ToDictionary(g => g.Key, g => g.Count());
         var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.DisplayName] > 1)).ToList();
@@ -402,7 +369,6 @@ internal sealed partial class App
         }
 
         int x = editorX;
-        int lastDrawn = start - 1;
         for (int i = start; i < labels.Count; i++)
         {
             int remaining = editorX + editorW - x;
@@ -414,14 +380,12 @@ internal sealed partial class App
                 : ConsoleColor.Black;
             var fg = active ? ConsoleColor.White : ConsoleColor.Gray;
             WriteAt(x, 1, labels[i], fg, bg, cellW);
-            int closeAt = labels[i].LastIndexOf('×');
-            int closeRel = closeAt >= 0 ? Cells.ColumnOf(labels[i], closeAt) : -1;
-            _tabCells.Add((_tabs.Tabs[i], x, x + cellW - 1, closeRel >= 0 && closeRel < cellW ? x + closeRel : -1));
+            int closeRel = widths[i] - 2; // every label ends with " × "
+            _tabCells.Add((_tabs.Tabs[i], x, x + cellW - 1, closeRel < cellW ? x + closeRel : -1));
             x += cellW;
-            lastDrawn = i;
         }
         if (start > 0) WriteAt(editorX, 1, "‹", ConsoleColor.Yellow, ConsoleColor.Black, 1);
-        if (lastDrawn < labels.Count - 1)
+        if (start + _tabCells.Count < labels.Count) // tabs past the right edge
             WriteAt(editorX + editorW - 1, 1, "›", ConsoleColor.Yellow, ConsoleColor.Black, 1);
     }
 
@@ -429,20 +393,10 @@ internal sealed partial class App
     private void DrawResultsPanel(int w)
     {
         bool focused = _mode is UiMode.SearchResults or UiMode.SearchInput;
-        string targetName = _searchTargetPath == null
-            ? ""
-            : Path.GetFileName(_searchTargetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (targetName.Length == 0) targetName = _searchTargetPath ?? "";
-        string scopeLabel = _searchScope switch
-        {
-            SearchScope.CurrentFile => $"file {targetName}",
-            SearchScope.SelectedFolder => $"folder {targetName}",
-            _ => "all folders",
-        };
         string count = $"{_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count}{(_hitsTruncated ? "+" : "")}"
                        + (_hitsSkipped > 0 ? $" ({_hitsSkipped} files over 8 MB skipped)" : "");
         WriteAt(0, _resultsTop,
-            $" Search results ({scopeLabel}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides",
+            $" Search results ({ScopeTexts().Header}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides",
             focused ? ConsoleColor.White : ConsoleColor.Magenta,
             focused ? ConsoleColor.DarkMagenta : ConsoleColor.Black, w);
 
@@ -453,13 +407,9 @@ internal sealed partial class App
 
         for (int r = 0; r < rows; r++)
         {
-            int y = _resultsRowsTop + r;
+            int y = _resultsTop + 1 + r; // the rows below the header
             int idx = _hitScroll + r;
-            if (idx >= _hits.Count)
-            {
-                WriteAt(0, y, "", ConsoleColor.Gray, ConsoleColor.Black, w);
-                continue;
-            }
+            if (idx >= _hits.Count) break; // the rows after the last hit stay blank
             var hit = _hits[idx];
             bool sel = idx == _hitIndex;
             var bg = sel ? ConsoleColor.DarkCyan : ConsoleColor.Black;
@@ -480,21 +430,22 @@ internal sealed partial class App
         }
     }
 
-    /// <summary>The input line of a prompt; returns where the cursor goes. The text scrolls to keep its end in view.</summary>
-    private int DrawPrompt(int w, string label, string input, string ghost, string suffix)
+    /// <summary>Text at x in row y up to the line end w, not padded; x moves on past it.</summary>
+    private void PutRun(ref int x, int y, string text, ConsoleColor fg, ConsoleColor bg, int w, bool joinBefore = false)
     {
-        int labelW = Cells.WidthOf(label);
-        int room = Math.Max(1, w - labelW - 1 - Cells.WidthOf(suffix)); // one cell for the cursor
-        string shown = FitTail(input, room);
-        int x = _screen.Put(0, _statusY, label + shown, ConsoleColor.White, ConsoleColor.DarkBlue, w, out _, pad: false);
-        int cursorX = x;
-        if (ghost.Length > 0 && x < w)
-            x += _screen.Put(x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w - x, out _, pad: false,
-                joinBefore: true); // the ghost goes on from the typed text
-        if (suffix.Length > 0 && x < w)
-            x += _screen.Put(x, _statusY, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w - x, out _, pad: false);
+        if (x < w) x += _screen.Put(x, y, text, fg, bg, w - x, out _, pad: false, joinBefore: joinBefore);
+    }
+
+    /// <summary>The input line of a prompt, the cursor right after the typed text. The text scrolls to keep its end in view.</summary>
+    private void DrawPrompt(int w, string label, string input, string ghost, string suffix)
+    {
+        int room = Math.Max(1, w - Cells.WidthOf(label) - 1 - Cells.WidthOf(suffix)); // one cell for the cursor
+        int x = 0;
+        PutRun(ref x, _statusY, label + FitTail(input, room), ConsoleColor.White, ConsoleColor.DarkBlue, w);
+        _screen.Cursor = (Math.Min(w - 1, x), _statusY);
+        PutRun(ref x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w, joinBefore: true); // the ghost goes on from the typed text
+        PutRun(ref x, _statusY, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
         if (x < w) WriteAt(x, _statusY, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - x);
-        return cursorX;
     }
 
     private void DrawStatusAndHelp(int w, int helpY)
@@ -502,52 +453,34 @@ internal sealed partial class App
         if (_mode == UiMode.PathInput)
         {
             // Typed text in white, the ghost suggestion trailing in grey.
-            _promptCursorX = DrawPrompt(w, CurrentPathPrompt(), _pathInput.ToString(), _pathGhost, "");
+            DrawPrompt(w, CurrentPathPrompt(), _pathInput.ToString(), _pathGhost, "");
 
             // The help line shows live completion candidates (the chosen one highlighted).
-            if (_pathPurpose == PathPurpose.Rename)
-            {
-                WriteAt(0, helpY, " Enter renames · Esc cancels · type just the new name (no path); open tabs update themselves",
-                    ConsoleColor.DarkGray, ConsoleColor.Black, w);
-            }
-            else if (_pathCandidates.Count > 0)
+            if (_pathPurpose != PathPurpose.Rename && _pathCandidates.Count > 0)
             {
                 WriteAt(0, helpY, "", ConsoleColor.DarkGray, ConsoleColor.Black, w);
                 int hx = 0;
-                void Seg(string text, ConsoleColor fg, ConsoleColor bg)
-                {
-                    if (hx >= w) return;
-                    hx += _screen.Put(hx, helpY, text, fg, bg, w - hx, out _, pad: false);
-                }
-                Seg(" Tab ▸ ", ConsoleColor.DarkGray, ConsoleColor.Black);
+                PutRun(ref hx, helpY, " Tab ▸ ", ConsoleColor.DarkGray, ConsoleColor.Black, w);
                 for (int i = 0; i < _pathCandidates.Count && hx < w; i++)
                 {
                     string cand = _pathCandidates[i];
-                    string name = Path.GetFileName(cand.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                    if (cand.EndsWith(Path.DirectorySeparatorChar) || cand.EndsWith(Path.AltDirectorySeparatorChar))
-                        name += "/";
+                    string name = Path.GetFileName(cand.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                                  + (Path.EndsInDirectorySeparator(cand) ? "/" : "");
                     bool sel = i == _pathCandidateIndex;
-                    Seg(name, sel ? ConsoleColor.White : ConsoleColor.Gray,
-                        sel ? ConsoleColor.DarkBlue : ConsoleColor.Black);
-                    Seg("  ", ConsoleColor.Gray, ConsoleColor.Black);
+                    PutRun(ref hx, helpY, name, sel ? ConsoleColor.White : ConsoleColor.Gray,
+                        sel ? ConsoleColor.DarkBlue : ConsoleColor.Black, w);
+                    PutRun(ref hx, helpY, "  ", ConsoleColor.Gray, ConsoleColor.Black, w);
                 }
             }
-            else if (_pathInput.Length > 0)
+            else WriteAt(0, helpY, _pathPurpose switch
             {
-                WriteAt(0, helpY, " No matches · Enter uses it as-is · Esc cancels · ~ and relative paths are supported",
-                    ConsoleColor.DarkGray, ConsoleColor.Black, w);
-            }
-            else
-            {
-                string pathHelp = _pathPurpose switch
-                {
-                    PathPurpose.CreateFile => " Enter creates the file and opens it · Tab/↑↓ completion · a trailing / creates a folder · Esc cancels",
-                    PathPurpose.CreateFolder => " Enter creates the folder · Tab/↑↓ completion · Esc cancels",
-                    PathPurpose.GoTo => " Enter jumps: 120 — a line, file.cs:120 — a file at a line · Esc cancels",
-                    _ => " Enter adds the folder to the left panel · Tab/↑↓ completion · Esc cancels · a file path (file:line too) opens the file",
-                };
-                WriteAt(0, helpY, pathHelp, ConsoleColor.DarkGray, ConsoleColor.Black, w);
-            }
+                PathPurpose.Rename => " Enter renames · Esc cancels · type just the new name (no path); open tabs update themselves",
+                _ when _pathInput.Length > 0 => " No matches · Enter uses it as-is · Esc cancels · ~ and relative paths are supported",
+                PathPurpose.CreateFile => " Enter creates the file and opens it · Tab/↑↓ completion · a trailing / creates a folder · Esc cancels",
+                PathPurpose.CreateFolder => " Enter creates the folder · Tab/↑↓ completion · Esc cancels",
+                PathPurpose.GoTo => " Enter jumps: 120 — a line, file.cs:120 — a file at a line · Esc cancels",
+                _ => " Enter adds the folder to the left panel · Tab/↑↓ completion · Esc cancels · a file path (file:line too) opens the file",
+            }, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
         }
         if (_mode == UiMode.SearchInput)
@@ -557,17 +490,9 @@ internal sealed partial class App
                 : Searchable(_searchQuery.ToString())
                     ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"
                     : "   · search starts at 2 characters";
-            _promptCursorX = DrawPrompt(w, CurrentSearchPrompt(), _searchQuery.ToString(), "", suffix);
-            string scopeHelp = _searchScope switch
-            {
-                SearchScope.CurrentFile =>
-                    " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results",
-                SearchScope.SelectedFolder =>
-                    " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results",
-                _ =>
-                    " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results",
-            };
-            WriteAt(0, helpY, scopeHelp, ConsoleColor.DarkGray, ConsoleColor.Black, w);
+            var scope = ScopeTexts();
+            DrawPrompt(w, scope.Prompt, _searchQuery.ToString(), "", suffix);
+            WriteAt(0, helpY, scope.Help, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
         }
         if (_mode == UiMode.Confirm)

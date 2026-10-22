@@ -246,7 +246,6 @@ internal sealed partial class App
     private string _pathCommon = "";                   // what every match shares, the first 50 or not
     private int _pathCandidateIndex = -1;              // candidate selected while cycling with Tab/↑↓
     private string _pathGhost = "";                    // grey ghost-text continuation after the typed text
-    private int _promptCursorX;                        // where the prompt's cursor was drawn
     private List<SearchHit> _hits = new();
     private bool _hitsTruncated;                       // more lines matched than the panel holds: refining could miss some
     private int _hitsSkipped;                          // files too big for a folder search
@@ -288,12 +287,11 @@ internal sealed partial class App
     // Tab-bar cells of the last frame — for mouse clicks.
     private readonly List<(TextEditor Tab, int X0, int X1, int CloseX)> _tabCells = new();
 
-    private int _lastW, _lastH;
     // Geometry of the last frame — needed for the cursor and mouse hit-testing.
     private int _editorTextX, _contentTop, _statusY;
     private int _leftW, _editorX, _mainContentH = 1;
     private int _treeTop = 1, _treeContentH = 1; // the tree starts right below the title
-    private int _resultsTop, _resultsRowsTop, _resultsRowCount;
+    private int _resultsTop, _resultsRowCount; // the results header's row, and the rows of hits below it
     private DateTime _lastClickAt = DateTime.MinValue;
     private int _lastClickX = -1, _lastClickY = -1;
     private TreeNode? _lastClickedNode; // the tree entry under the last click (double-click check)
@@ -359,7 +357,7 @@ internal sealed partial class App
                         SafeDispatch(extra);
                 }
                 if (_emergency != null) { EmergencyStop(); break; }
-                if (Console.WindowWidth != _lastW || Console.WindowHeight != _lastH)
+                if (Console.WindowWidth != _screen.Width || Console.WindowHeight != _screen.Height)
                     dirty = true; // the terminal was resized while we waited for input
                 if (Resized)
                 {

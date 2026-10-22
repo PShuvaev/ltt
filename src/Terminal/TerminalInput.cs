@@ -198,6 +198,11 @@ internal sealed class RawTerminalInput : ITerminalInput
     private static ConsoleKeyInfo MakeKey(char ch, ConsoleKey key, bool shift = false, bool alt = false, bool ctrl = false) =>
         new(ch, key, shift, alt, ctrl);
 
+    /// <summary>The key with these modifiers added to its own.</summary>
+    private static KeyInput WithMods(ConsoleKeyInfo k, bool shift = false, bool alt = false, bool ctrl = false) =>
+        new(MakeKey(k.KeyChar, k.Key, shift || k.Modifiers.HasFlag(ConsoleModifiers.Shift),
+            alt || k.Modifiers.HasFlag(ConsoleModifiers.Alt), ctrl || k.Modifiers.HasFlag(ConsoleModifiers.Control)));
+
     /// <summary>
     /// The next event within timeoutMs. Bytes that mean nothing (a stray
     /// control byte, an unknown sequence) are skipped without blocking past
@@ -287,11 +292,8 @@ internal sealed class RawTerminalInput : ITerminalInput
             int b3 = ReadByte(40);
             if (b3 is '[' or 'O')
             {
-                _unread.Push(b3);
-                var inner = ReadEscapeAfterEsc();
-                if (inner is KeyInput { Key: var k })
-                    return new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift),
-                        alt: true, k.Modifiers.HasFlag(ConsoleModifiers.Control)));
+                var inner = ReadEscapeAfterEsc(b3);
+                if (inner is KeyInput { Key: var k }) return WithMods(k, alt: true);
                 // A mouse report, a paste or a terminal reply right behind it (Esc pressed while a
                 // trackpad still scrolls): the Esc was a key of its own.
                 if (inner != null) _pending.Enqueue(inner);
@@ -301,15 +303,12 @@ internal sealed class RawTerminalInput : ITerminalInput
             _unread.Push(0x1B);
             return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape));
         }
-        _unread.Push(b2);
-        return ReadEscapeAfterEsc();
+        return ReadEscapeAfterEsc(b2);
     }
 
-    /// <summary>The rest of an escape sequence after its ESC.</summary>
-    private InputEvent? ReadEscapeAfterEsc()
+    /// <summary>The rest of an escape sequence after its ESC, from its second byte b2.</summary>
+    private InputEvent? ReadEscapeAfterEsc(int b2)
     {
-        int b2 = ReadByte(40);
-        if (b2 < 0) return new KeyInput(MakeKey('\u001b', ConsoleKey.Escape));
         if (b2 == '[')
         {
             var p = new StringBuilder();
@@ -365,8 +364,7 @@ internal sealed class RawTerminalInput : ITerminalInput
             if (mods.Length == 0 || ev is not KeyInput { Key: var k }) return ev;
             string m = mods.ToString();
             var (sh, al, ct, _) = DecodeModifiers(int.TryParse(m[(m.LastIndexOf(';') + 1)..], out int code) ? code : 1);
-            return new KeyInput(MakeKey(k.KeyChar, k.Key, sh || k.Modifiers.HasFlag(ConsoleModifiers.Shift), al,
-                ct || k.Modifiers.HasFlag(ConsoleModifiers.Control)));
+            return WithMods(k, sh, al, ct);
         }
         // OSC, DCS, APC, PM, SOS: a terminal's reply to someone's query (a colour, a version), never typed.
         if (b2 is ']' or 'P' or '_' or '^' or 'X')
@@ -374,19 +372,10 @@ internal sealed class RawTerminalInput : ITerminalInput
             SkipString();
             return null;
         }
-        // Alt+Backspace (Esc then DEL) — delete-word in the editor.
-        if (b2 is 0x7F or 0x08)
-            return new KeyInput(MakeKey('\b', ConsoleKey.Backspace, alt: true));
-        // Alt+Enter and Alt+Tab as legacy terminals send them: what the kitty protocol's do.
-        if (b2 is 0x0D or 0x0A) return new KeyInput(MakeKey('\r', ConsoleKey.Enter, alt: true));
-        if (b2 == 0x09) return new KeyInput(MakeKey('\t', ConsoleKey.Tab, alt: true));
-
-        // Alt+character
-        if (b2 >= 0x20 && b2 < 0x7F)
-        {
-            var k = CharKey((char)b2);
-            return new KeyInput(MakeKey(k.KeyChar, k.Key, k.Modifiers.HasFlag(ConsoleModifiers.Shift), alt: true));
-        }
+        // Esc, then the key: Alt+character, Alt+Backspace (Esc then DEL — delete-word in the editor), and
+        // Alt+Enter and Alt+Tab as legacy terminals send them (what the kitty protocol's do).
+        if (b2 is 0x7F or 0x08 or 0x0D or 0x0A or 0x09 or (>= 0x20 and < 0x7F))
+            return DispatchFirstByte(b2) is KeyInput { Key: var key } ? WithMods(key, alt: true) : null;
         if (b2 >= 0x80) return ReadUtf8(b2, alt: true); // Alt+ö, Alt+ф: the whole character
         return null;
     }
@@ -471,14 +460,9 @@ internal sealed class RawTerminalInput : ITerminalInput
     /// <summary>The index-th `sep`-separated field of a CSI parameter string (empty when absent).</summary>
     private static ReadOnlySpan<char> Field(ReadOnlySpan<char> s, int index, char sep = ';')
     {
-        for (int i = 0; i < index; i++)
-        {
-            int at = s.IndexOf(sep);
-            if (at < 0) return default;
-            s = s[(at + 1)..];
-        }
-        int end = s.IndexOf(sep);
-        return end < 0 ? s : s[..end];
+        foreach (var r in s.Split(sep))
+            if (index-- == 0) return s[r];
+        return default;
     }
 
     private static int SubInt(ReadOnlySpan<char> field, int index) =>
@@ -601,23 +585,13 @@ internal sealed class RawTerminalInput : ITerminalInput
         bool latin = cp is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9';
         int id = latin || baseCp <= 0 ? cp : baseCp;
 
-        string text = "";
+        var sb = new StringBuilder();
         var textField = Field(p, 2);
-        if (!textField.IsEmpty && !ct && !su)
-        {
-            var sb = new StringBuilder();
-            var rest = textField;
-            while (true)
-            {
-                int at = rest.IndexOf(':');
-                var part = at < 0 ? rest : rest[..at];
-                if (int.TryParse(part, out int tcp) && tcp >= 0x20 && tcp <= 0x10FFFF && tcp is not (>= 0xD800 and <= 0xDFFF))
+        if (!ct && !su)
+            foreach (var r in textField.Split(':'))
+                if (int.TryParse(textField[r], out int tcp) && tcp >= 0x20 && tcp <= 0x10FFFF && tcp is not (>= 0xD800 and <= 0xDFFF))
                     sb.Append(char.ConvertFromUtf32(tcp));
-                if (at < 0) break;
-                rest = rest[(at + 1)..];
-            }
-            text = sb.ToString();
-        }
+        string text = sb.ToString();
 
         ConsoleKey key = id switch
         {

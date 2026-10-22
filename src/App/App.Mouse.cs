@@ -131,9 +131,9 @@ internal sealed partial class App
         }
 
         if (_resultsVisible && m.Y == _resultsTop) { _mode = UiMode.SearchResults; return; }
-        if (_resultsVisible && m.Y >= _resultsRowsTop && m.Y < _resultsRowsTop + _resultsRowCount)
+        if (_resultsVisible && m.Y > _resultsTop && m.Y <= _resultsTop + _resultsRowCount)
         {
-            int idx = _hitScroll + (m.Y - _resultsRowsTop);
+            int idx = _hitScroll + (m.Y - _resultsTop - 1);
             if (idx < _hits.Count)
             {
                 _mode = UiMode.SearchResults;
