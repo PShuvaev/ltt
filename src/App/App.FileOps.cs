@@ -138,7 +138,7 @@ internal sealed partial class App
         }
         if (DirtyTabInTheWay(oldPath, newPath, isDir) is { } held)
         {
-            _status = $"Name held by unsaved edits in the tab {held.Name} — save or close it first.";
+            _status = $"Name held by unsaved edits in the tab {held.DisplayName} — save or close it first.";
             return;
         }
 
@@ -170,20 +170,20 @@ internal sealed partial class App
         {
             if (TabAt(to, besides: tab) is { } gone)
             {
-                if (gone.Editor.Dirty) continue;
+                if (gone.Dirty) continue;
                 _tabs.Close(gone);
             }
-            tab.Editor.RenameTo(to, inSync?.Contains(tab.Editor) == true);
-            tab.Editor.SetBaseline(Baseline(to));
+            tab.RenameTo(to, inSync?.Contains(tab) == true);
+            tab.SetBaseline(Baseline(to));
         }
     }
 
     /// <summary>The tabs a move takes along, and where each one lands.</summary>
-    private List<(EditorTab Tab, string To)> Followers(string oldPath, string newPath, bool isDir)
+    private List<(TextEditor Tab, string To)> Followers(string oldPath, string newPath, bool isDir)
     {
-        var list = new List<(EditorTab, string)>();
+        var list = new List<(TextEditor, string)>();
         foreach (var tab in _tabs.Tabs)
-            if (tab.Editor.FilePath is { } fp)
+            if (tab.FilePath is { } fp)
             {
                 if (Paths.Same(fp, oldPath)) list.Add((tab, newPath));
                 else if (isDir && Paths.IsInside(fp, oldPath)) list.Add((tab, newPath + fp[oldPath.Length..]));
@@ -191,12 +191,12 @@ internal sealed partial class App
         return list;
     }
 
-    private EditorTab? TabAt(string path, EditorTab besides) =>
-        _tabs.Tabs.FirstOrDefault(t => t != besides && t.Editor.FilePath is { } p && Paths.SameReal(p, path));
+    private TextEditor? TabAt(string path, TextEditor besides) =>
+        _tabs.Tabs.FirstOrDefault(t => t != besides && t.FilePath is { } p && Paths.SameReal(p, path));
 
     /// <summary>A tab with unsaved edits where a move would bring another tab: a name in use, though not on disk.</summary>
-    private EditorTab? DirtyTabInTheWay(string oldPath, string newPath, bool isDir) =>
-        Followers(oldPath, newPath, isDir).Select(f => TabAt(f.To, f.Tab)).FirstOrDefault(t => t is { Editor.Dirty: true });
+    private TextEditor? DirtyTabInTheWay(string oldPath, string newPath, bool isDir) =>
+        Followers(oldPath, newPath, isDir).Select(f => TabAt(f.To, f.Tab)).FirstOrDefault(t => t is { Dirty: true });
 
     // ---- Copy and move: Ctrl+C / Ctrl+X picks an entry up, Ctrl+V pastes it into a folder of any root ----
 
@@ -259,7 +259,7 @@ internal sealed partial class App
             alsoTaken: what.Cut ? p => DirtyTabInTheWay(what.Path, p, what.IsDir) != null : null);
         // A tab that matches its file now still does after the move, even where another disk rounds the time.
         var inSync = what.Cut
-            ? _tabs.Tabs.Select(t => t.Editor).Where(e => e.FilePath is { } fp && Paths.IsSameOrInside(fp, what.Path)
+            ? _tabs.Tabs.Where(e => e.FilePath is { } fp && Paths.IsSameOrInside(fp, what.Path)
                 && e.CheckDisk() == TextEditor.DiskState.Same).ToHashSet()
             : new HashSet<TextEditor>();
         var progress = new FileOps.CopyProgress();
@@ -350,7 +350,7 @@ internal sealed partial class App
         }
         string path = node.FullPath;
         bool isDir = node.IsDir;
-        int unsaved = _tabs.Tabs.Count(t => t.Editor.Dirty && t.Editor.FilePath is { } fp && Paths.IsSameOrInside(fp, path));
+        int unsaved = _tabs.Tabs.Count(t => t.Dirty && t.FilePath is { } fp && Paths.IsSameOrInside(fp, path));
         string loss = unsaved > 0 ? $" {unsaved} open tab(s) there have unsaved edits — they go too!" : "";
         Ask($"Delete {(isDir ? "folder with all its contents" : "file")} \"{node.Name}\" from disk forever?{loss}  D deletes · Esc cancels",
             ('d', () => ExecuteDelete(path, isDir)),
@@ -376,7 +376,7 @@ internal sealed partial class App
             return;
         }
 
-        var doomed = _tabs.Tabs.Where(t => t.Editor.FilePath is { } fp && Paths.IsSameOrInside(fp, path)).ToList();
+        var doomed = _tabs.Tabs.Where(t => t.FilePath is { } fp && Paths.IsSameOrInside(fp, path)).ToList();
         foreach (var t in doomed) _tabs.Close(t);
         if (_tabs.Tabs.Count == 0) _focus = Focus.Tree;
 

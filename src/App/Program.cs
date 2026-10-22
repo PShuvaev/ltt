@@ -225,7 +225,7 @@ internal sealed partial class App
     private readonly TabManager _tabs = new();
     private readonly VimSyntax _vim = new(); // syntax colours
     private readonly TextEditor _emptyEditor = new();
-    private TextEditor _editor => _tabs.Active?.Editor ?? _emptyEditor;
+    private TextEditor _editor => _tabs.Active ?? _emptyEditor;
 
     private Focus _focus = Focus.Tree;
     private UiMode _mode = UiMode.Normal;
@@ -296,7 +296,7 @@ internal sealed partial class App
     private const int DiskCheckIntervalMs = 1000;
 
     // Tab-bar cells of the last frame — for mouse clicks.
-    private readonly List<(EditorTab Tab, int X0, int X1, int CloseX)> _tabCells = new();
+    private readonly List<(TextEditor Tab, int X0, int X1, int CloseX)> _tabCells = new();
 
     private int _lastW, _lastH;
     // Geometry of the last frame — needed for the cursor and mouse hit-testing.
@@ -455,7 +455,7 @@ internal sealed partial class App
             // unsaved edits, put the state back in range and carry on.
             int saved = SaveRecovery();
             string log = Recovery.LogCrash(ex);
-            foreach (var t in _tabs.Tabs) t.Editor.ClampState();
+            foreach (var t in _tabs.Tabs) t.ClampState();
             _mode = UiMode.Normal;
             _confirm = null;
             _status = $"Internal error ({ex.GetType().Name}: {ex.Message})"
@@ -473,7 +473,7 @@ internal sealed partial class App
         }
         catch (Exception ex) when (ex is not OutOfMemoryException && ++_drawFailures < 3)
         {
-            foreach (var t in _tabs.Tabs) t.Editor.ClampState();
+            foreach (var t in _tabs.Tabs) t.ClampState();
             _screen.Invalidate();
             _status = $"Internal drawing error ({ex.GetType().Name}: {ex.Message}); details in {Recovery.LogCrash(ex)}";
         }
@@ -485,8 +485,8 @@ internal sealed partial class App
     /// </summary>
     public int SaveRecovery()
     {
-        List<TextEditor> editors;
-        try { editors = _tabs.Tabs.Select(t => t.Editor).ToList(); }
+        TextEditor[] editors;
+        try { editors = CollectionsMarshal.AsSpan(_tabs.Tabs).ToArray(); } // the list as it is at one moment
         catch (Exception) { return 0; } // the tab list changed under the copy
         return Recovery.Save(editors);
     }
@@ -523,7 +523,7 @@ internal sealed partial class App
             {
                 int existing = _tabs.IndexOfPath(Path.GetFullPath(path));
                 TextEditor ed;
-                if (existing >= 0) ed = _tabs.Tabs[existing].Editor;
+                if (existing >= 0) ed = _tabs.Tabs[existing];
                 else
                 {
                     ed = new TextEditor();
@@ -601,7 +601,7 @@ internal sealed partial class App
         bool any = false;
         foreach (var tab in _tabs.Tabs)
         {
-            string? fp = tab.Editor.FilePath;
+            string? fp = tab.FilePath;
             if (fp == null) continue;
             string moved = fp;
             foreach (var (oldPath, newPath) in moves)
@@ -611,8 +611,8 @@ internal sealed partial class App
             if (ReferenceEquals(moved, fp) || !File.Exists(moved)) continue;
             // Moved over a file open in another tab: that tab sees the change, this one its file gone.
             if (_tabs.IndexOfPath(moved) >= 0) continue;
-            tab.Editor.RenameTo(moved);
-            tab.Editor.SetBaseline(Baseline(moved));
+            tab.RenameTo(moved);
+            tab.SetBaseline(Baseline(moved));
             _status = $"{Path.GetFileName(fp)} was moved to {moved} — its tab follows.";
             any = true;
         }
@@ -631,9 +631,8 @@ internal sealed partial class App
     {
         if (!OperatingSystem.IsMacOS()) return false;
         bool any = false;
-        foreach (var tab in _tabs.Tabs)
+        foreach (var ed in _tabs.Tabs)
         {
-            var ed = tab.Editor;
             if (ed.FilePath is not { } fp || ed.MissingOnDisk || ed.DiskStamp is not { Ino: not 0 } known
                 || File.Exists(fp)) continue;
             // What went: the file, or the topmost of its folders that is gone, with the file below it.
@@ -673,9 +672,8 @@ internal sealed partial class App
     private bool CheckOpenTabsOnDisk()
     {
         bool changed = false;
-        foreach (var tab in _tabs.Tabs)
+        foreach (var ed in _tabs.Tabs)
         {
-            var ed = tab.Editor;
             switch (ed.CheckDisk())
             {
                 case TextEditor.DiskState.Missing when !ed.MissingOnDisk:
@@ -727,7 +725,7 @@ internal sealed partial class App
         }
         if (!_changes.Poll()) return false;
         foreach (var t in _tabs.Tabs)
-            if (t.Editor.FilePath is { } fp) t.Editor.SetBaseline(Baseline(fp));
+            if (t.FilePath is { } fp) t.SetBaseline(Baseline(fp));
         return true;
     }
 
@@ -800,8 +798,8 @@ internal sealed partial class App
         if (_editor.ViewWidth > 0) { ed.ViewWidth = _editor.ViewWidth; ed.ViewHeight = _editor.ViewHeight; }
         try
         {
-            ed.Open(full, lineZeroBased);
-            if (column >= 0) ed.GoToLine(lineZeroBased, column);
+            ed.Open(full);
+            ed.GoToLine(lineZeroBased, column);
             ed.SetBaseline(Baseline(full));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException
@@ -824,7 +822,7 @@ internal sealed partial class App
     {
         _tabs.Activate(index);
         if (announce && _tabs.Active is { } t)
-            _status = $"Tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}: {t.Name}{(t.Editor.Dirty ? " ●" : "")}";
+            _status = $"Tab {_tabs.ActiveIndex + 1}/{_tabs.Tabs.Count}: {t.DisplayName}{(t.Dirty ? " ●" : "")}";
     }
 
     private void SwitchTab(int delta)
@@ -835,19 +833,19 @@ internal sealed partial class App
         ActivateTab(_tabs.ActiveIndex, announce: true);
     }
 
-    private void CloseTab(EditorTab tab)
+    private void CloseTab(TextEditor tab)
     {
-        if (!tab.Editor.Dirty) { CloseNow(tab); return; }
-        Ask($"Tab \"{tab.Name}\" has changes!  S saves · D closes without saving · Esc cancels",
+        if (!tab.Dirty) { CloseNow(tab); return; }
+        Ask($"Tab \"{tab.DisplayName}\" has changes!  S saves · D closes without saving · Esc cancels",
             ('s', () => SaveTab(tab, then: () => CloseNow(tab))),
             ('d', () => CloseNow(tab)));
     }
 
-    private void CloseNow(EditorTab tab)
+    private void CloseNow(TextEditor tab)
     {
         _tabs.Close(tab);
         if (_tabs.Tabs.Count == 0 && _focus == Focus.Editor) _focus = Focus.Tree;
-        _status = $"Closed tab \"{tab.Name}\"." + (_tabs.Tabs.Count > 0 ? $" Tabs left: {_tabs.Tabs.Count}." : "");
+        _status = $"Closed tab \"{tab.DisplayName}\"." + (_tabs.Tabs.Count > 0 ? $" Tabs left: {_tabs.Tabs.Count}." : "");
         RefreshRecovery();
     }
 
@@ -862,26 +860,25 @@ internal sealed partial class App
     /// file may have been changed, or deleted, by an agent since it was opened.
     /// `then` runs after a successful save.
     /// </summary>
-    private void SaveTab(EditorTab tab, Action? then)
+    private void SaveTab(TextEditor tab, Action? then)
     {
-        var ed = tab.Editor;
-        var state = ed.CheckDisk();
+        var state = tab.CheckDisk();
         if (state == TextEditor.DiskState.Changed)
-            Ask($"{tab.Name} changed on disk since it was opened!  S overwrites it · R takes the disk version (Ctrl+Z brings yours back) · Esc cancels",
+            Ask($"{tab.DisplayName} changed on disk since it was opened!  S overwrites it · R takes the disk version (Ctrl+Z brings yours back) · Esc cancels",
                 ('s', () => WriteTab(tab, then)),
                 ('r', () => ReloadTab(tab)));
-        else if (state == TextEditor.DiskState.Missing && ed.DiskStamp != null)
-            Ask($"{tab.Name} was deleted on disk!  S saves it again · Esc cancels",
+        else if (state == TextEditor.DiskState.Missing && tab.DiskStamp != null)
+            Ask($"{tab.DisplayName} was deleted on disk!  S saves it again · Esc cancels",
                 ('s', () => WriteTab(tab, then)));
         else WriteTab(tab, then);
     }
 
-    private void WriteTab(EditorTab tab, Action? then)
+    private void WriteTab(TextEditor tab, Action? then)
     {
         try
         {
-            tab.Editor.Save();
-            _status = $"Saved: {tab.Name}";
+            tab.Save();
+            _status = $"Saved: {tab.DisplayName}";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
         {
@@ -892,12 +889,12 @@ internal sealed partial class App
         then?.Invoke();
     }
 
-    private void ReloadTab(EditorTab tab)
+    private void ReloadTab(TextEditor tab)
     {
         try
         {
-            tab.Editor.Reload();
-            _status = $"Took the disk version of {tab.Name}; Ctrl+Z brings back your edits.";
+            tab.Reload();
+            _status = $"Took the disk version of {tab.DisplayName}; Ctrl+Z brings back your edits.";
             RefreshRecovery();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException or ArgumentException)
@@ -909,7 +906,7 @@ internal sealed partial class App
     /// <summary>Save every dirty tab in turn (each may ask about the disk), then run `done`.</summary>
     private void SaveAllThen(Action done)
     {
-        var next = _tabs.Tabs.FirstOrDefault(t => t.Editor.Dirty);
+        var next = _tabs.Tabs.FirstOrDefault(t => t.Dirty);
         if (next == null) { done(); return; }
         SaveTab(next, then: () => SaveAllThen(done));
     }
@@ -971,7 +968,7 @@ internal sealed partial class App
         _liveTabs = tabs;
     }
 
-    private Dictionary<TextEditor, long> TabMarks() => _tabs.Tabs.ToDictionary(t => t.Editor, t => t.Editor.LineShifts);
+    private Dictionary<TextEditor, long> TabMarks() => _tabs.Tabs.ToDictionary(t => t, t => t.LineShifts);
 
     /// <summary>
     /// Where a hit's line is now (0-based): edits in its tab since the scan read the file move it.
@@ -980,7 +977,7 @@ internal sealed partial class App
     private int HitLine(SearchHit hit)
     {
         int line = hit.LineNumber - 1;
-        if (_tabs.Tabs.Find(t => Paths.Same(t.Editor.FilePath, hit.FilePath))?.Editor is not { } ed) return line;
+        if (_tabs.Tabs.Find(t => Paths.Same(t.FilePath, hit.FilePath)) is not { } ed) return line;
         int now = ed.FollowLine(line, _hitTabs.GetValueOrDefault(ed));
         return now < 0 ? line : now;
     }
@@ -1002,7 +999,7 @@ internal sealed partial class App
     {
         var buffers = new Dictionary<string, string[]>(Paths.Comparer);
         foreach (var t in _tabs.Tabs)
-            if (t.Editor.Dirty && t.Editor.FilePath is { } path) buffers.TryAdd(path, t.Editor.Lines.ToArray());
+            if (t.Dirty && t.FilePath is { } path) buffers.TryAdd(path, t.Lines.ToArray());
         return buffers;
     }
 
@@ -1030,7 +1027,7 @@ internal sealed partial class App
         var scope = _searchScope;
         string? target = _searchTargetPath == null ? null : Path.GetFullPath(_searchTargetPath);
         var buffer = scope == SearchScope.CurrentFile && target != null && _tabs.IndexOfPath(target) is >= 0 and var t
-            ? _tabs.Tabs[t].Editor.Lines : null;
+            ? _tabs.Tabs[t].Lines : null;
         CancelSearch();
         if (canRefine || buffer != null)
         {

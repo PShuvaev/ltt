@@ -1,36 +1,28 @@
-/// <summary>One editor tab: an open file.</summary>
-internal sealed class EditorTab
-{
-    public required TextEditor Editor { get; init; }
-    public string Name => Editor.DisplayName;
-}
-
-/// <summary>The open tabs, in opening order, and which one is active.</summary>
+/// <summary>The open tabs — an editor each — in opening order, and which one is active.</summary>
 internal sealed class TabManager
 {
-    public List<EditorTab> Tabs { get; } = new();
+    public List<TextEditor> Tabs { get; } = new();
     public int ActiveIndex { get; private set; } = -1;
 
-    public EditorTab? Active => ActiveIndex >= 0 && ActiveIndex < Tabs.Count ? Tabs[ActiveIndex] : null;
-    public bool AnyDirty => Tabs.Any(t => t.Editor.Dirty);
-    public int DirtyCount => Tabs.Count(t => t.Editor.Dirty);
+    public TextEditor? Active => ActiveIndex >= 0 && ActiveIndex < Tabs.Count ? Tabs[ActiveIndex] : null;
+    public bool AnyDirty => Tabs.Any(t => t.Dirty);
+    public int DirtyCount => Tabs.Count(t => t.Dirty);
 
     /// <summary>The tab of a file, however its path is spelled (a symlinked folder on the way); -1 for none.</summary>
     public int IndexOfPath(string fullPath)
     {
-        int i = Tabs.FindIndex(t => Paths.Same(t.Editor.FilePath, fullPath));
+        int i = Tabs.FindIndex(t => Paths.Same(t.FilePath, fullPath));
         if (i >= 0 || Tabs.Count == 0) return i;
         string real = Paths.Real(fullPath);
-        return Tabs.FindIndex(t => t.Editor.FilePath is { } p && Paths.Same(Paths.Real(p), real));
+        return Tabs.FindIndex(t => t.FilePath is { } p && Paths.Same(Paths.Real(p), real));
     }
 
     /// <summary>Add a tab at the end and make it active.</summary>
-    public EditorTab Add(TextEditor editor)
+    public TextEditor Add(TextEditor editor)
     {
-        var tab = new EditorTab { Editor = editor };
-        Tabs.Add(tab);
+        Tabs.Add(editor);
         ActiveIndex = Tabs.Count - 1;
-        return tab;
+        return editor;
     }
 
     public void Activate(int index)
@@ -49,11 +41,11 @@ internal sealed class TabManager
     /// tab activates the one that took its place — the right neighbour, or the
     /// left one when it was the last.
     /// </summary>
-    public void Close(EditorTab tab)
+    public void Close(TextEditor tab)
     {
         int idx = Tabs.IndexOf(tab);
         if (idx < 0) return;
-        tab.Editor.Colours?.Close();
+        tab.Colours?.Close();
         bool wasActive = idx == ActiveIndex;
         Tabs.RemoveAt(idx);
         if (Tabs.Count == 0) ActiveIndex = -1;

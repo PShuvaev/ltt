@@ -69,6 +69,19 @@ internal sealed partial class App
         screen.Put(x, y, marker.ToString(), selected ? ConsoleColor.White : ConsoleColor.DarkGray,
             selected ? ConsoleColor.DarkBlue : ConsoleColor.Black, 1);
 
+    private static ConsoleColor ColorFor(TokenKind kind) => kind switch
+    {
+        TokenKind.Keyword => ConsoleColor.Cyan,
+        TokenKind.Str => ConsoleColor.Yellow,
+        TokenKind.Comment => ConsoleColor.DarkGreen,
+        TokenKind.Number => ConsoleColor.Magenta,
+        TokenKind.Preproc => ConsoleColor.DarkCyan,
+        TokenKind.Added => ConsoleColor.Green, // the colours of the gutter's change marks
+        TokenKind.Changed => ConsoleColor.Yellow,
+        TokenKind.Removed => ConsoleColor.Red,
+        _ => ConsoleColor.Gray,
+    };
+
     /// <summary>
     /// An editor line drawn from display column scrollX in `width` cells, with
     /// syntax colours and the selection [selFrom, selTo) (indexes into the line)
@@ -104,7 +117,7 @@ internal sealed partial class App
             if (selFrom >= 0) runEnd = sel ? Math.Min(runEnd, selTo) : i < selFrom ? Math.Min(runEnd, selFrom) : runEnd;
             if (runEnd <= i) { t++; continue; }
             int used = screen.Put(sx, y, line.AsSpan(i, runEnd - i),
-                sel ? ConsoleColor.White : Highlighter.ColorFor(tok.Kind),
+                sel ? ConsoleColor.White : ColorFor(tok.Kind),
                 sel ? ConsoleColor.DarkBlue : ConsoleColor.Black,
                 end - sx, out int consumed, tabOrigin: col, pad: false, joinBefore: sx > x);
             sx += used;
@@ -353,10 +366,9 @@ internal sealed partial class App
     /// edits, ✗ — gone from disk, × — close. Tabs whose files share a name
     /// also show the parent folder.
     /// </summary>
-    private static string TabLabel(EditorTab t, bool ambiguous)
+    private static string TabLabel(TextEditor ed, bool ambiguous)
     {
-        var ed = t.Editor;
-        string name = t.Name;
+        string name = ed.DisplayName;
         if (ambiguous && ed.FilePath != null)
             name += " · " + Path.GetFileName(Path.GetDirectoryName(ed.FilePath) ?? "");
         return " " + name + (ed.Dirty ? " ●" : "") + (ed.MissingOnDisk ? " ✗" : ed.ChangedOnDisk ? " ⚠" : "") + " × ";
@@ -379,8 +391,8 @@ internal sealed partial class App
         }
         WriteAt(editorX, 1, "", ConsoleColor.Gray, ConsoleColor.Black, editorW);
 
-        var nameCounts = _tabs.Tabs.GroupBy(t => t.Name).ToDictionary(g => g.Key, g => g.Count());
-        var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.Name] > 1)).ToList();
+        var nameCounts = _tabs.Tabs.GroupBy(t => t.DisplayName).ToDictionary(g => g.Key, g => g.Count());
+        var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.DisplayName] > 1)).ToList();
         var widths = labels.Select(l => Cells.WidthOf(l)).ToList();
 
         int start = _tabs.ActiveIndex;

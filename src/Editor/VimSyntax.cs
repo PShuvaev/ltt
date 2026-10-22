@@ -3,6 +3,12 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 
+/// <summary>What a run of characters is, for its colour: vim's highlight groups come down to these (see VimSyntax.Kinds; KindOf relies on their order).</summary>
+public enum TokenKind : byte { Normal, Keyword, Str, Comment, Number, Preproc, Added, Changed, Removed }
+
+/// <summary>A highlighted range of the source line (no text is copied).</summary>
+public readonly record struct Token(int Start, int Length, TokenKind Kind);
+
 /// <summary>
 /// Syntax colours from vim. ltt has no highlighter of its own: vim has a mature one (hundreds of
 /// languages) and is on most Unix machines, so a second one would be redundant. When vim is on
@@ -59,18 +65,8 @@ internal sealed class VimSyntax : IDisposable
         ("Debug", 'n'), ("Underlined", 'n'), ("Ignore", 'n'), ("Error", 'n'),
     };
 
-    internal static TokenKind KindOf(char c) => c switch
-    {
-        'k' => TokenKind.Keyword,
-        's' => TokenKind.Str,
-        'c' => TokenKind.Comment,
-        'm' => TokenKind.Number,
-        'p' => TokenKind.Preproc,
-        'a' => TokenKind.Added,
-        'h' => TokenKind.Changed,
-        'r' => TokenKind.Removed,
-        _ => TokenKind.Normal,
-    };
+    // The kind letters in the order of TokenKind; any other letter is plain.
+    internal static TokenKind KindOf(char c) => (TokenKind)Math.Max(0, "nkscmpahr".IndexOf(c));
 
     // Before anything else: the settings, the language detection, and which script language vim speaks.
     private static string[] Bootstrap() => new[]
@@ -89,65 +85,68 @@ internal sealed class VimSyntax : IDisposable
     // tabs take the colour before them). vim keeps what it worked out for every line it parsed, and
     // in ex mode nothing tells it that an edit made that stale: LttRuns parses from the first edited
     // line down (ltt_dirty) — or, far below an edit, has vim start over and find its footing near the
-    // lines asked, as it does when it jumps there itself.
-    private const string Vim9Script = """
-        def g:LttReady()
-          writefile(['ltt READY'], '/dev/stdout')
-        enddef
-        def g:LttLoad(id: number, name: string, path: string)
-          g:LttClose(id)
-          var b = bufadd(name)
+    // lines asked, as it does when it jumps there itself. These run once per tab or per edit: they are
+    // in the old script language, which every vim speaks; LttKind and LttRuns come in two (see WriteLoop).
+    private const string Script = """
+        function! g:LttLoad(id, name, path)
+          call g:LttClose(a:id)
+          let b = bufadd(a:name)
           if b == 0 || index(values(g:ltt_bufs), b) >= 0
-            b = bufadd('/ltt/' .. id .. name)
+            let b = bufadd('/ltt/' . a:id . a:name)
           endif
-          setbufvar(b, '&buftype', 'nofile')
-          setbufvar(b, '&swapfile', 0)
-          setbufvar(b, '&undolevels', -1)
-          setbufvar(b, '&modeline', 0)
-          bufload(b)
-          g:ltt_bufs[id] = b
-          setbufline(b, 1, readfile(path, 'b'))
-          delete(path)
-          g:LttFiletype(id)
-        enddef
-        def g:LttFiletype(id: number)
-          execute 'noautocmd buffer ' .. g:ltt_bufs[id]
+          call setbufvar(b, '&buftype', 'nofile')
+          call setbufvar(b, '&swapfile', 0)
+          call setbufvar(b, '&undolevels', -1)
+          call setbufvar(b, '&modeline', 0)
+          call bufload(b)
+          let g:ltt_bufs[a:id] = b
+          call setbufline(b, 1, readfile(a:path, 'b'))
+          call delete(a:path)
+          call g:LttFiletype(a:id)
+        endfunction
+        function! g:LttFiletype(id)
+          execute 'noautocmd buffer ' . g:ltt_bufs[a:id]
           setlocal filetype=
           filetype detect
-          g:ltt_dirty[id] = v:numbermax
-        enddef
-        def g:LttRename(id: number, name: string)
-          execute 'noautocmd buffer ' .. g:ltt_bufs[id]
+          let g:ltt_dirty[a:id] = 2147483647
+        endfunction
+        function! g:LttRename(id, name)
+          execute 'noautocmd buffer ' . g:ltt_bufs[a:id]
           try
-            execute 'keepalt noautocmd file ' .. fnameescape(name)
+            execute 'keepalt noautocmd file ' . fnameescape(a:name)
           catch
-            execute 'keepalt noautocmd file ' .. fnameescape('/ltt/' .. id .. name)
+            execute 'keepalt noautocmd file ' . fnameescape('/ltt/' . a:id . a:name)
           endtry
-          g:LttFiletype(id)
-        enddef
-        def g:LttClose(id: number)
-          if has_key(g:ltt_bufs, id)
-            execute 'bwipeout! ' .. remove(g:ltt_bufs, id)
+          call g:LttFiletype(a:id)
+        endfunction
+        function! g:LttClose(id)
+          if has_key(g:ltt_bufs, a:id)
+            execute 'bwipeout! ' . remove(g:ltt_bufs, a:id)
           endif
-        enddef
-        def g:LttEdit(id: number, at: number, count: number, lines: list<string>)
-          const b = g:ltt_bufs[id]
-          const both = min([count, len(lines)])
+        endfunction
+        function! g:LttEdit(id, at, count, lines)
+          let b = g:ltt_bufs[a:id]
+          let both = min([a:count, len(a:lines)])
           if both > 0
-            setbufline(b, at + 1, lines[: both - 1])
+            call setbufline(b, a:at + 1, a:lines[: both - 1])
           endif
-          if count > both
-            deletebufline(b, at + both + 1, at + count)
-          elseif len(lines) > both
-            appendbufline(b, at + both, lines[both :])
+          if a:count > both
+            call deletebufline(b, a:at + both + 1, a:at + a:count)
+          elseif len(a:lines) > both
+            call appendbufline(b, a:at + both, a:lines[both :])
           endif
-          g:ltt_dirty[id] = min([g:ltt_dirty[id], at + 1])
-        enddef
-        def g:LttEditFile(id: number, at: number, count: number, path: string)
-          const lines = readfile(path, 'b')
-          delete(path)
-          g:LttEdit(id, at, count, lines)
-        enddef
+          let g:ltt_dirty[a:id] = min([g:ltt_dirty[a:id], a:at + 1])
+        endfunction
+        function! g:LttEditFile(id, at, count, path)
+          let lines = readfile(a:path, 'b')
+          call delete(a:path)
+          call g:LttEdit(a:id, a:at, a:count, lines)
+        endfunction
+
+        """;
+
+    // LttKind and LttRuns run for every character asked: in vim9 script, for a vim that has it.
+    private const string Vim9Runs = """
         def g:LttKind(id: number): string
           const key = string(id)
           if has_key(g:ltt_kinds, key)
@@ -220,64 +219,7 @@ internal sealed class VimSyntax : IDisposable
         """;
 
     // The same in the old script language, for a vim before 9.0 (three times slower).
-    private const string OldScript = """
-        function! g:LttReady()
-          call writefile(['ltt READY'], '/dev/stdout')
-        endfunction
-        function! g:LttLoad(id, name, path)
-          call g:LttClose(a:id)
-          let b = bufadd(a:name)
-          if b == 0 || index(values(g:ltt_bufs), b) >= 0
-            let b = bufadd('/ltt/' . a:id . a:name)
-          endif
-          call setbufvar(b, '&buftype', 'nofile')
-          call setbufvar(b, '&swapfile', 0)
-          call setbufvar(b, '&undolevels', -1)
-          call setbufvar(b, '&modeline', 0)
-          call bufload(b)
-          let g:ltt_bufs[a:id] = b
-          call setbufline(b, 1, readfile(a:path, 'b'))
-          call delete(a:path)
-          call g:LttFiletype(a:id)
-        endfunction
-        function! g:LttFiletype(id)
-          execute 'noautocmd buffer ' . g:ltt_bufs[a:id]
-          setlocal filetype=
-          filetype detect
-          let g:ltt_dirty[a:id] = 2147483647
-        endfunction
-        function! g:LttRename(id, name)
-          execute 'noautocmd buffer ' . g:ltt_bufs[a:id]
-          try
-            execute 'keepalt noautocmd file ' . fnameescape(a:name)
-          catch
-            execute 'keepalt noautocmd file ' . fnameescape('/ltt/' . a:id . a:name)
-          endtry
-          call g:LttFiletype(a:id)
-        endfunction
-        function! g:LttClose(id)
-          if has_key(g:ltt_bufs, a:id)
-            execute 'bwipeout! ' . remove(g:ltt_bufs, a:id)
-          endif
-        endfunction
-        function! g:LttEdit(id, at, count, lines)
-          let b = g:ltt_bufs[a:id]
-          let both = min([a:count, len(a:lines)])
-          if both > 0
-            call setbufline(b, a:at + 1, a:lines[: both - 1])
-          endif
-          if a:count > both
-            call deletebufline(b, a:at + both + 1, a:at + a:count)
-          elseif len(a:lines) > both
-            call appendbufline(b, a:at + both, a:lines[both :])
-          endif
-          let g:ltt_dirty[a:id] = min([g:ltt_dirty[a:id], a:at + 1])
-        endfunction
-        function! g:LttEditFile(id, at, count, path)
-          let lines = readfile(a:path, 'b')
-          call delete(a:path)
-          call g:LttEdit(a:id, a:at, a:count, lines)
-        endfunction
+    private const string OldRuns = """
         function! g:LttKind(id)
           if has_key(g:ltt_kinds, a:id)
             return g:ltt_kinds[a:id]
@@ -416,14 +358,16 @@ internal sealed class VimSyntax : IDisposable
             foreach (string line in Bootstrap()) input.WriteLine(line);
             input.Flush();
             if (!_probed.Wait(StartTimeoutMs)) return;
-            // The script in the newest language this vim speaks, the old one when that one does not work here.
-            // A first question shows it works: there is no buffer 0, so the answer is "ltt R 0 !".
-            foreach (string script in _scriptVersion >= 9 ? new[] { Vim9Script, OldScript } : new[] { OldScript })
+            // The script, then LttKind and LttRuns in the newest language this vim speaks, the old one when
+            // that one does not work here. A first question shows they work: there is no buffer 0, so the
+            // answer is "ltt R 0 !"; then a line that comes whatever happened to them ends the attempt.
+            input.Write(Script.Replace("\r\n", "\n"));
+            foreach (string runs in _scriptVersion >= 9 ? new[] { Vim9Runs, OldRuns } : new[] { OldRuns })
             {
                 _started.Reset();
-                input.Write(script.Replace("\r\n", "\n"));
+                input.Write(runs.Replace("\r\n", "\n"));
                 input.WriteLine("call LttRuns(0, 0, 1, [])");
-                input.WriteLine("call LttReady()");
+                input.WriteLine("call writefile(['ltt READY'], '/dev/stdout')");
                 input.Flush();
                 if (!_started.Wait(StartTimeoutMs) || _works) break;
             }
@@ -558,20 +502,9 @@ internal sealed class VimSyntax : IDisposable
         long size = 0;
         foreach (string line in lines) size += Math.Min(line.Length, MaxLine) + 1;
         if (size > InlineChars)
-        {
             Enqueue(w => w.WriteLine($"call LttEditFile({c.Id}, {at}, {count}, {Quote(TextFile(lines))})"));
-            return;
-        }
-        Enqueue(w =>
-        {
-            w.Write($"call LttEdit({c.Id}, {at}, {count}, [");
-            for (int i = 0; i < lines.Length; i++)
-            {
-                if (i > 0) w.Write(", ");
-                w.Write(Quote(Cut(lines[i])));
-            }
-            w.WriteLine("])");
-        });
+        else
+            Enqueue(w => w.WriteLine($"call LttEdit({c.Id}, {at}, {count}, [{string.Join(", ", lines.Select(l => Quote(Cut(l))))}])"));
     }
 
     internal void Rename(SyntaxColours c, string path) => Enqueue(w => w.WriteLine($"call LttRename({c.Id}, {Quote(path)})"));
@@ -582,13 +515,8 @@ internal sealed class VimSyntax : IDisposable
     {
         if (!Usable) return; // never answered: nothing to wait for
         _asked[q.Token] = (c, q);
-        Enqueue(w =>
-        {
-            w.Write($"call LttRuns({c.Id}, {q.Token}, {q.First + 1}, [");
-            for (int i = 0; i < q.Texts.Length; i++)
-                w.Write(i == 0 ? $"[{q.ByteFrom[i]},{q.ByteTo[i]}]" : $",[{q.ByteFrom[i]},{q.ByteTo[i]}]");
-            w.WriteLine("])");
-        });
+        Enqueue(w => w.WriteLine(
+            $"call LttRuns({c.Id}, {q.Token}, {q.First + 1}, [{string.Join(",", q.ByteFrom.Select((b, i) => $"[{b},{q.ByteTo[i]}]"))}])"));
     }
 
     /// <summary>What vim is given of a line: a long one only up to MaxLine, never half of a surrogate pair.</summary>
@@ -730,7 +658,7 @@ internal sealed class SyntaxColours
         {
             var known = _known[j];
             int k = known.No - at;
-            if (!Same(known.Text, old[k])) continue;
+            if (known.Text != old[k]) continue;
             if (inPlace != null) inPlace[k] = known;
             if (k == 0) head = known;
             if (k == count - 1) tail = known;
@@ -763,7 +691,7 @@ internal sealed class SyntaxColours
     private static Line Moved(Line? head, Line? tail, string text, int no)
     {
         int len = text.Length;
-        int p = head == null ? 0 : CommonPrefix(head.Text, text);
+        int p = head == null ? 0 : head.Text.AsSpan().CommonPrefixLength(text);
         int s = tail == null ? 0 : CommonSuffix(tail.Text, text);
         if (head != null && ReferenceEquals(head, tail)) s = Math.Min(s, head.Text.Length - p); // no overlap
         s = Math.Min(s, len - p);
@@ -777,13 +705,6 @@ internal sealed class SyntaxColours
 
     private static byte KindAt(Line line, int i) =>
         i >= line.From && i < line.From + line.Kinds.Length ? line.Kinds[i - line.From] : (byte)TokenKind.Normal;
-
-    private static int CommonPrefix(string a, string b)
-    {
-        int n = Math.Min(a.Length, b.Length), i = 0;
-        while (i < n && a[i] == b[i]) i++;
-        return i;
-    }
 
     private static int CommonSuffix(string a, string b)
     {
@@ -814,7 +735,7 @@ internal sealed class SyntaxColours
             string text = lines[i];
             if (text.Length == 0 || text.Length > VimSyntax.MaxLine) continue;
             var known = Find(i);
-            if (known == null || !Same(known.Text, text)) want = bare = true;
+            if (known == null || known.Text != text) want = bare = true;
             else if (!Covers(known, text, scrollX, width)) want = true;
         }
         var view = (_editor.Version, top, scrollX, width);
@@ -832,7 +753,7 @@ internal sealed class SyntaxColours
             string text = texts[k] = lines[first + k];
             if (text.Length == 0 || text.Length > VimSyntax.MaxLine) continue;
             var known = Find(first + k);
-            if (known != null && Same(known.Text, text) && Covers(known, text, scrollX, width)) continue;
+            if (known != null && known.Text == text && Covers(known, text, scrollX, width)) continue;
             (from[k], to[k]) = Window(text, scrollX, width);
             byteFrom[k] = VimSyntax.Utf8(text, 0, from[k]);
             byteTo[k] = byteFrom[k] + VimSyntax.Utf8(text, from[k], to[k]);
@@ -862,7 +783,7 @@ internal sealed class SyntaxColours
     /// <summary>The colour runs of a line, when there are any for this text; false — draw it plain.</summary>
     internal bool Fill(int no, string text, List<Token> tokens)
     {
-        if (_closed || !_vim.Usable || Find(no) is not { } known || !Same(known.Text, text)) return false;
+        if (_closed || !_vim.Usable || Find(no) is not { } known || known.Text != text) return false;
         tokens.Clear();
         int from = Math.Min(known.From, text.Length), end = Math.Min(known.From + known.Kinds.Length, text.Length);
         if (from > 0) tokens.Add(new Token(0, from, TokenKind.Normal));
@@ -902,7 +823,7 @@ internal sealed class SyntaxColours
             if (q.To[asked] <= q.From[asked]) continue; // not asked
             int no = q.First + asked;
             if (shifts != q.Shifts && (no = _editor.FollowLine(no, q.Shifts)) < 0) continue;
-            if (no >= lines.Count || !Same(lines[no], q.Texts[asked])) continue; // edited since
+            if (no >= lines.Count || lines[no] != q.Texts[asked]) continue; // edited since
             Put(new Line
             {
                 No = no, Text = lines[no], From = q.From[asked], Stale = _editor.Version != q.Version,
@@ -975,6 +896,4 @@ internal sealed class SyntaxColours
         if (_known.Count <= Keep) return;
         _known.RemoveAll(l => Math.Abs(l.No - _top) > Keep / 2);
     }
-
-    private static bool Same(string a, string b) => ReferenceEquals(a, b) || string.Equals(a, b, StringComparison.Ordinal);
 }

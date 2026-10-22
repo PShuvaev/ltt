@@ -131,13 +131,12 @@ public sealed class TextEditor
     public int LineCount => _lines.Count;
     public string LineText(int i) => _lines[i];
 
-    public void Open(string path, int goToLine = 0)
+    public void Open(string path)
     {
         string full = Path.GetFullPath(path);
         var stamp = TextFile.Stamp(full); // before reading: a write landing meanwhile shows as a change
         var (lines, format) = TextFile.Read(full);
         Load(full, lines, format, stamp);
-        Cy = Math.Clamp(goToLine, 0, _lines.Count - 1);
         EnsureCursorVisible();
     }
 
@@ -327,8 +326,7 @@ public sealed class TextEditor
         Cx = Cells.FloorBoundary(_lines[Cy], Math.Min(cx, _lines[Cy].Length));
         if (step != null) step.After = (Cy, Cx); // redo puts the cursor back here
         ScrollY = Math.Clamp(sy, 0, MaxScrollY);
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     /// <summary>
@@ -463,19 +461,12 @@ public sealed class TextEditor
                 _open = null;
             }
         }
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
         RefreshDirty();
     }
 
     /// <summary>Dirty — an honest comparison with the saved state (undoing back to it is clean again).</summary>
-    private void RefreshDirty()
-    {
-        if (_lines.Count != _savedContent.Length) { Dirty = true; return; }
-        for (int i = 0; i < _lines.Count; i++)
-            if (!string.Equals(_lines[i], _savedContent[i], StringComparison.Ordinal)) { Dirty = true; return; }
-        Dirty = false;
-    }
+    private void RefreshDirty() => Dirty = !_lines.SequenceEqual(_savedContent);
 
     public void Undo()
     {
@@ -514,8 +505,7 @@ public sealed class TextEditor
         SelAnchor = anchor is { } a && a.Line < _lines.Count
             ? (a.Line, Cells.FloorBoundary(_lines[a.Line], a.Col))
             : null;
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
         RefreshDirty();
     }
 
@@ -525,13 +515,7 @@ public sealed class TextEditor
     {
         BeginEdit("insert");
         DeleteSelectionCore();
-        string line = _lines[Cy];
-        SetLine(Cy, string.Create(line.Length + 1, (line, Cx, c), static (dst, s) =>
-        {
-            s.line.AsSpan(0, s.Cx).CopyTo(dst);
-            dst[s.Cx] = s.c;
-            s.line.AsSpan(s.Cx).CopyTo(dst[(s.Cx + 1)..]);
-        }));
+        SetLine(Cy, _lines[Cy].Insert(Cx, c.ToString()));
         Cx++;
         EndEdit();
     }
@@ -666,17 +650,18 @@ public sealed class TextEditor
     {
         if (Cx > 0) Cx = Cells.PrevBoundary(_lines[Cy], Cx);
         else if (Cy > 0) { Cy--; Cx = _lines[Cy].Length; }
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     public void MoveRight()
     {
         if (Cx < _lines[Cy].Length) Cx = Cells.NextBoundary(_lines[Cy], Cx);
         else if (Cy < _lines.Count - 1) { Cy++; Cx = 0; }
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
+
+    /// <summary>The cursor was placed anew: up and down keep its column from now on, and it comes into view.</summary>
+    private void CursorMoved() { _desiredCol = CursorColumn; EnsureCursorVisible(); }
 
     private void UseDesiredColumn() =>
         Cx = Cells.FloorBoundary(_lines[Cy], Cells.IndexAt(_lines[Cy], _desiredCol));
@@ -692,13 +677,12 @@ public sealed class TextEditor
         int firstNonBlank = 0;
         while (firstNonBlank < s.Length && IsBlankChar(s[firstNonBlank])) firstNonBlank++;
         Cx = Cx == firstNonBlank ? 0 : firstNonBlank; // smart Home, like in IDEs
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
-    public void End() { Cx = _lines[Cy].Length; _desiredCol = CursorColumn; EnsureCursorVisible(); }
+    public void End() { Cx = _lines[Cy].Length; CursorMoved(); }
     public void DocHome() { Cy = 0; Cx = 0; _desiredCol = 0; EnsureCursorVisible(); }
-    public void DocEnd() { Cy = _lines.Count - 1; Cx = _lines[Cy].Length; _desiredCol = CursorColumn; EnsureCursorVisible(); }
+    public void DocEnd() { Cy = _lines.Count - 1; Cx = _lines[Cy].Length; CursorMoved(); }
 
     /// <summary>
     /// Character class for word jumps and word selection: 1 — word, 2 — space,
@@ -749,8 +733,7 @@ public sealed class TextEditor
     {
         if (Cx == 0) { MoveLeft(); return; }
         Cx = Cells.FloorBoundary(_lines[Cy], WordStartBefore(_lines[Cy], Cx));
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     public void WordRight()
@@ -762,8 +745,7 @@ public sealed class TextEditor
         if (i < s.Length) i = RunEnd(s, i);
         int b = Cells.FloorBoundary(s, i);
         Cx = b < i ? Cells.NextBoundary(s, b) : i; // never back into the character just passed
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     private bool IsBlank(int line) => _lines[line].AsSpan().Trim().Length == 0;
@@ -815,8 +797,7 @@ public sealed class TextEditor
         SelAnchor = (0, 0);
         Cy = _lines.Count - 1;
         Cx = _lines[Cy].Length;
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     /// <summary>Collapse the selection to its start or end (arrows without Shift).</summary>
@@ -824,9 +805,8 @@ public sealed class TextEditor
     {
         var (sl, sc, el, ec) = SelectionRange();
         (Cy, Cx) = toStart ? (sl, sc) : (el, ec);
-        _desiredCol = CursorColumn;
         SelAnchor = null;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     private ((int, int, int, int) Range, int Version, int Count) _charCount; // drawn every frame: counted once
@@ -886,8 +866,7 @@ public sealed class TextEditor
         int b = RunEnd(s, i);
         SelAnchor = (Cy, Cells.FloorBoundary(s, RunStart(s, Cells.NextBoundary(s, i))));
         Cx = Cells.FloorBoundary(s, b) is var e && e < b ? Cells.NextBoundary(s, e) : b;
-        _desiredCol = CursorColumn;
-        EnsureCursorVisible();
+        CursorMoved();
     }
 
     /// <summary>Scroll the view; the cursor does not move.</summary>

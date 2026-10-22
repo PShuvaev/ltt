@@ -44,7 +44,9 @@ internal static class Recovery
                     MakeDir();
                     string name = $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Session}-{++_sequence:D6}.txt";
                     string file = Path.Combine(Dir, name), temp = file + ".tmp";
-                    using (var fs = new FileStream(temp, Private(FileMode.Create)))
+                    var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write };
+                    if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+                    using (var fs = new FileStream(temp, options))
                     using (var w = new StreamWriter(fs, new UTF8Encoding(false)))
                     {
                         // The line count shows a file cut short for what it is.
@@ -79,13 +81,6 @@ internal static class Recovery
     {
         if (OperatingSystem.IsWindows()) Directory.CreateDirectory(Dir);
         else Directory.CreateDirectory(Dir, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-    }
-
-    private static FileStreamOptions Private(FileMode mode)
-    {
-        var options = new FileStreamOptions { Mode = mode, Access = FileAccess.Write };
-        if (!OperatingSystem.IsWindows()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        return options;
     }
 
     /// <summary>

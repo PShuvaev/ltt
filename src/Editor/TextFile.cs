@@ -62,7 +62,7 @@ internal static class TextFile
         using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 16);
         using var reader = latin1
             ? new StreamReader(fs, Encoding.Latin1, detectEncodingFromByteOrderMarks: false)
-            : new StreamReader(fs, DecoderFor(TextEncoding.Utf8), detectEncodingFromByteOrderMarks: true);
+            : new StreamReader(fs, EncodingFor(TextEncoding.Utf8, strict: true), detectEncodingFromByteOrderMarks: true);
         var split = new LineSplitter(); // the lines Read makes, so a hit's line number is the editor's
         var lines = new List<string>();
         var buf = new char[1 << 16];
@@ -108,41 +108,22 @@ internal static class TextFile
         }
     }
 
-    private static Encoding DecoderFor(TextEncoding enc) => enc switch
+    /// <summary>An encoding: strict — invalid bytes throw (for reading); bom — its preamble is the byte order mark.</summary>
+    private static Encoding EncodingFor(TextEncoding enc, bool strict = false, bool bom = false) => enc switch
     {
-        TextEncoding.Utf8 => new UTF8Encoding(false, throwOnInvalidBytes: true),
-        TextEncoding.Utf16LE => new UnicodeEncoding(bigEndian: false, byteOrderMark: false, throwOnInvalidBytes: true),
-        TextEncoding.Utf16BE => new UnicodeEncoding(bigEndian: true, byteOrderMark: false, throwOnInvalidBytes: true),
-        TextEncoding.Utf32LE => new UTF32Encoding(bigEndian: false, byteOrderMark: false, throwOnInvalidCharacters: true),
-        TextEncoding.Utf32BE => new UTF32Encoding(bigEndian: true, byteOrderMark: false, throwOnInvalidCharacters: true),
+        TextEncoding.Utf8 => new UTF8Encoding(bom, throwOnInvalidBytes: strict),
+        TextEncoding.Utf16LE => new UnicodeEncoding(bigEndian: false, byteOrderMark: bom, throwOnInvalidBytes: strict),
+        TextEncoding.Utf16BE => new UnicodeEncoding(bigEndian: true, byteOrderMark: bom, throwOnInvalidBytes: strict),
+        TextEncoding.Utf32LE => new UTF32Encoding(bigEndian: false, byteOrderMark: bom, throwOnInvalidCharacters: strict),
+        TextEncoding.Utf32BE => new UTF32Encoding(bigEndian: true, byteOrderMark: bom, throwOnInvalidCharacters: strict),
         _ => Encoding.Latin1,
-    };
-
-    private static Encoding EncoderFor(TextEncoding enc) => enc switch
-    {
-        TextEncoding.Utf8 => new UTF8Encoding(false),
-        TextEncoding.Utf16LE => new UnicodeEncoding(bigEndian: false, byteOrderMark: false),
-        TextEncoding.Utf16BE => new UnicodeEncoding(bigEndian: true, byteOrderMark: false),
-        TextEncoding.Utf32LE => new UTF32Encoding(bigEndian: false, byteOrderMark: false),
-        TextEncoding.Utf32BE => new UTF32Encoding(bigEndian: true, byteOrderMark: false),
-        _ => Encoding.Latin1,
-    };
-
-    private static byte[] Bom(TextEncoding enc) => enc switch
-    {
-        TextEncoding.Utf8 => new byte[] { 0xEF, 0xBB, 0xBF },
-        TextEncoding.Utf16LE => new byte[] { 0xFF, 0xFE },
-        TextEncoding.Utf16BE => new byte[] { 0xFE, 0xFF },
-        TextEncoding.Utf32LE => new byte[] { 0xFF, 0xFE, 0, 0 },
-        TextEncoding.Utf32BE => new byte[] { 0, 0, 0xFE, 0xFF },
-        _ => Array.Empty<byte>(),
     };
 
     /// <summary>Decode and split into lines (see LineSplitter), counting each kind of break.</summary>
     private static (List<string>, TextFormat) ReadAs(Stream fs, TextEncoding enc, int bomLen)
     {
         fs.Position = bomLen;
-        using var reader = new StreamReader(fs, DecoderFor(enc), detectEncodingFromByteOrderMarks: false,
+        using var reader = new StreamReader(fs, EncodingFor(enc, strict: true), detectEncodingFromByteOrderMarks: false,
             bufferSize: 1 << 16, leaveOpen: true);
         var lines = new List<string>();
         var split = new LineSplitter();
@@ -240,7 +221,7 @@ internal static class TextFile
     /// </summary>
     public static void Write(string path, IReadOnlyList<string> lines, TextFormat format)
     {
-        var encoding = EncoderFor(format.Encoding);
+        var encoding = EncodingFor(format.Encoding);
         // Latin-1 can only hold U+0000..U+00FF: refuse up front rather than write '?'.
         if (format.Encoding == TextEncoding.Latin1)
             foreach (var line in lines)
@@ -371,7 +352,7 @@ internal static class TextFile
 
     private static void WriteTo(Stream stream, IReadOnlyList<string> lines, TextFormat format, Encoding encoding)
     {
-        if (format.Bom) stream.Write(Bom(format.Encoding));
+        if (format.Bom) stream.Write(EncodingFor(format.Encoding, bom: true).Preamble);
         using var w = new StreamWriter(stream, encoding, 1 << 16, leaveOpen: true);
         for (int i = 0; i < lines.Count; i++)
         {
