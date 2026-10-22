@@ -121,6 +121,27 @@ def test_reload_keeps_the_cursor_on_its_line_when_lines_come_above(ltt, ws):
     assert s.pos[:3] == (10, 13, 7)  # still at the end of "line 8", now two lines down
 
 
+@pytest.mark.xfail(strict=True, reason="BUG: when lines change both above and below the cursor, a reload keeps "
+                                       "the cursor's line number and the view's, so both land on other text")
+@pytest.mark.parametrize("own_line", ["kept", "changed"])
+def test_reload_keeps_the_cursor_on_its_text_when_lines_change_above_and_below(ltt, ws, own_line):
+    # The usual shape of an agent's edit in several places (idea from Kakoune, which maps
+    # selections through a diff of the old and the new lines).
+    lines = [f"line {i}" for i in range(1, 101)]
+    app = open_file(ltt, ws, text="\n".join(lines) + "\n")
+    app.press("ctrl+l")
+    app.type("50")
+    app.press("enter", "end")
+    top = app.snap().editor_rows[0]
+    new = ["new 1"] + lines[:99] + ["line 100 changed"]
+    if own_line == "changed":
+        new[50] = "line 50 changed"
+    ws.write("proj/a.txt", "\n".join(new) + "\n")
+    s = app.wait_status("Reloaded a.txt")
+    assert s.pos[:3] == (51, 102, 8)  # where "line 50" ended, one line down
+    assert (s.editor_rows[0].number, s.editor_rows[0].text) == (top.number + 1, top.text)
+
+
 def test_reload_below_the_cursor_leaves_it_in_place(ltt, ws):
     app = open_file(ltt, ws)
     app.press("down", "right", "right")
@@ -565,6 +586,54 @@ def test_touch_marks_a_dirty_tab_changed(ltt, ws):
     mtime_plus(ws, "proj/a.txt", 5)
     wait_tab(app, "a.txt", dirty=True, changed=True)
     assert app.press("ctrl+s").question.startswith("a.txt changed on disk since it was opened!")
+
+
+def rewrite_keeping_time(ws, rel, text):
+    """The same number of bytes, other text, and the old modification time put back:
+    cp -p, rsync -t and tar do that, and a coarse clock (FAT, some network disks) does it by itself."""
+    p = ws.path(rel)
+    st = os.stat(p)
+    data = text.encode()
+    assert len(data) == st.st_size
+    with open(p, "wb") as f:
+        f.write(data)
+    os.utime(p, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a rewrite that keeps the size and the modification time goes unnoticed "
+                                       "(only those two tell a disk version), and saving overwrites it without asking")
+def test_a_rewrite_keeping_size_and_time_marks_a_dirty_tab_changed(ltt, ws):  # idea from Helix's write.rs
+    app = open_file(ltt, ws, text="hello world\n")
+    app.type("MINE ")
+    rewrite_keeping_time(ws, "proj/a.txt", "HELLO WORLD\n")
+    wait_tab(app, "a.txt", dirty=True, changed=True)
+    assert app.press("ctrl+s").question.startswith("a.txt changed on disk since it was opened!")
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a rewrite that keeps the size and the modification time goes unnoticed: "
+                                       "a clean tab goes on showing the old text")
+def test_a_rewrite_keeping_size_and_time_reloads_a_clean_tab(ltt, ws):
+    app = open_file(ltt, ws, text="hello world\n")
+    rewrite_keeping_time(ws, "proj/a.txt", "HELLO WORLD\n")
+    s = app.wait_status("Reloaded a.txt")
+    assert s.editor_lines[0] == "HELLO WORLD"
+
+
+@pytest.mark.parametrize("how", ["chmod", "same_text_rewritten"])
+def test_a_change_that_leaves_the_text_alone_marks_nothing(ltt, ws, how):
+    # Noticing the rewrite above must not cry wolf: a new mode, or the same bytes written again with
+    # the old time, leave a dirty tab unmarked, and saving it does not ask.
+    app = open_file(ltt, ws, text="hello world\n")
+    app.type("MINE ")
+    if how == "chmod":
+        os.chmod(ws.path("proj/a.txt"), 0o600)
+    else:
+        rewrite_keeping_time(ws, "proj/a.txt", "hello world\n")
+    time.sleep(2.5)  # on purpose: the watcher's batch and two disk checks come and go
+    assert not app.snap().tabs[0].changed
+    app.press("ctrl+s")
+    app.wait_status("Saved: a.txt")
+    assert ws.read("proj/a.txt") == "MINE hello world\n"
 
 
 def test_inactive_clean_tab_reloads_in_the_background(ltt, ws):
