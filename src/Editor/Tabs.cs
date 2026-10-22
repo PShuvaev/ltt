@@ -53,6 +53,7 @@ internal sealed class TabManager
     {
         int idx = Tabs.IndexOf(tab);
         if (idx < 0) return;
+        tab.Editor.Colours?.Close();
         bool wasActive = idx == ActiveIndex;
         Tabs.RemoveAt(idx);
         if (Tabs.Count == 0) ActiveIndex = -1;

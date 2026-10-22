@@ -38,7 +38,9 @@ public sealed class TextEditor
     public int ScrollY { get; private set; }
     public bool Dirty { get; private set; }
     public TextFormat Format { get; private set; } = TextFormat.Default;
-    public Syntax Syntax { get; private set; } = Syntax.Plain;
+
+    /// <summary>The syntax colours of this text (from vim); told of every change, in order.</summary>
+    internal SyntaxColours? Colours { get; set; }
 
     /// <summary>Tab inserts a tab character (tab-indented files, Makefiles, Go) instead of spaces.</summary>
     public bool IndentWithTabs { get; private set; }
@@ -110,6 +112,9 @@ public sealed class TextEditor
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 
+    /// <summary>Changes with every change of the text.</summary>
+    public int Version => _version;
+
     /// <summary>Lower scroll bound: the last line sits at the bottom edge; the view is never empty.</summary>
     public int MaxScrollY => Math.Max(0, _lines.Count - Math.Max(1, ViewHeight));
 
@@ -120,33 +125,6 @@ public sealed class TextEditor
     private int _desiredCol; // display column remembered while moving up/down
 
     private int _wheelNumerator; // accumulated fifths of a line (see WheelScroll)
-
-    // _blockState[i]: what line i starts inside (a /* */ comment, a `…` string). Filled
-    // lazily front to back and cut back to the first changed line by edits,
-    // so rendering a deep window never re-tokenizes the file from the top.
-    private readonly List<LineState> _blockState = new() { LineState.Code };
-
-    private void InvalidateHighlightFrom(int line)
-    {
-        int keep = Math.Max(1, line + 1); // a line's own start state does not depend on it
-        if (_blockState.Count > keep) _blockState.RemoveRange(keep, _blockState.Count - keep);
-    }
-
-    /// <summary>What `line` starts inside: code, a /* */ comment or a `…` string.</summary>
-    public LineState LineStateBefore(int line)
-    {
-        if (line <= 0 || !Highlighter.CarriesState(Syntax)) return LineState.Code;
-        line = Math.Min(line, _lines.Count);
-        while (_blockState.Count <= line)
-        {
-            int i = _blockState.Count - 1;
-            _blockState.Add(Highlighter.EndState(_lines[i], Syntax, _blockState[i]));
-        }
-        return _blockState[line];
-    }
-
-    /// <summary>Whether `line` starts inside a /* */ block comment.</summary>
-    public bool BlockCommentStateBefore(int line) => LineStateBefore(line) == LineState.Comment;
 
     public bool HasFile => FilePath != null;
     public string DisplayName => FilePath == null ? "(no file)" : Path.GetFileName(FilePath);
@@ -176,7 +154,6 @@ public sealed class TextEditor
         _opened = _savedContent;
         FilePath = full;
         Format = format;
-        SetSyntax(Syntax.For(full));
         IndentWithTabs = DetectTabIndent(_lines, full);
         DiskStamp = stamp;
         ChangedOnDisk = false;
@@ -190,6 +167,7 @@ public sealed class TextEditor
         ScrollX = ScrollY = 0;
         _wheelNumerator = 0;
         Dirty = false;
+        Colours?.Reset();
     }
 
     /// <summary>Replace the whole text as one undo step (a recovered buffer); the result is unsaved.</summary>
@@ -216,16 +194,8 @@ public sealed class TextEditor
         }
         ScrollY = Math.Clamp(ScrollY, 0, MaxScrollY);
         _open = null;
-        _blockState.Clear();
-        _blockState.Add(LineState.Code);
         while (Monitor.IsEntered(_changeLock)) Monitor.Exit(_changeLock); // an edit that threw never finished
-    }
-
-    private void SetSyntax(Syntax syntax)
-    {
-        Syntax = syntax;
-        _blockState.Clear();
-        _blockState.Add(LineState.Code);
+        Colours?.Reset(); // vim's copy of the text may have missed the edit that threw
     }
 
     /// <summary>Tabs for Makefiles and Go, and for files whose indented lines mostly start with a tab.</summary>
@@ -254,8 +224,7 @@ public sealed class TextEditor
     public void RenameTo(string newPath, bool wasInSync = false)
     {
         FilePath = Path.GetFullPath(newPath);
-        var syntax = Syntax.For(FilePath);
-        if (!ReferenceEquals(syntax, Syntax)) SetSyntax(syntax); // the language may have changed
+        Colours?.Renamed(); // the language may have changed
         IndentWithTabs = DetectTabIndent(_lines, FilePath); // so may the indentation: a Makefile takes tabs
         var stamp = TextFile.Stamp(FilePath);
         MissingOnDisk = stamp == null;
@@ -434,6 +403,7 @@ public sealed class TextEditor
 
     private void Apply(int at, int count, string[] lines)
     {
+        Colours?.Spliced(at, count == 0 ? Array.Empty<string>() : _lines.GetRange(at, count), lines);
         if (count != lines.Length) RecordShift(at, count, lines);
         if (count == lines.Length)
             for (int i = 0; i < count; i++) _lines[at + i] = lines[i];
@@ -443,7 +413,6 @@ public sealed class TextEditor
             _lines.InsertRange(at, lines);
         }
         _version++;
-        InvalidateHighlightFrom(at);
     }
 
     /// <summary>A copy of the lines from any thread, between two edits; null — one is stuck midway.</summary>

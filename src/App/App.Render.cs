@@ -25,8 +25,6 @@ internal sealed partial class App
         return exact ? core : "≥" + core;
     }
 
-    private const int MaxHighlightedLine = 20_000;
-
     /// <summary>The end of s that fits in `cells` cells, led by … when something was cut.</summary>
     internal static string FitTail(string s, int cells)
     {
@@ -256,7 +254,8 @@ internal sealed partial class App
 
         bool hasSel = _editor.HasSelection;
         var (selSL, selSC, selEL, selEC) = hasSel ? _editor.SelectionRange() : (-1, 0, -1, 0);
-        var syntax = _editor.Syntax;
+        var colours = _editor.HasFile ? _editor.Colours ?? _vim.Attach(_editor) : null;
+        colours?.Prepare(_editor.ScrollY, contentH, _editor.ScrollX, viewW);
 
         // The tree also occupies the tab-bar row, so it has one more row than the editor.
         for (int tr = 0; tr < _treeContentH; tr++)
@@ -328,17 +327,12 @@ internal sealed partial class App
                             (mark & LineDiff.Added) != 0 ? ConsoleColor.Green : (mark & LineDiff.Modified) != 0 ? ConsoleColor.Yellow : ConsoleColor.Red,
                             ConsoleColor.Black, 1);
                     string lineText = _editor.LineText(lineNo);
-                    // Only the visible part is tokenized; the state it starts in comes from the editor's cache.
-                    // A very long line (minified code, a log) is drawn without colours.
-                    var lineState = _editor.LineStateBefore(lineNo);
-                    if (lineText.Length > MaxHighlightedLine)
+                    // The colours come from vim (see SyntaxColours); a very long line (minified code, a log) has none.
+                    if (lineText.Length > VimSyntax.MaxLine || colours == null || !colours.Fill(lineNo, lineText, _tokens))
                     {
                         _tokens.Clear();
                         _tokens.Add(new Token(0, lineText.Length, TokenKind.Normal));
                     }
-                    else
-                        Highlighter.TokenizeInto(_tokens, lineText, syntax, ref lineState,
-                            Cells.IndexAt(lineText, _editor.ScrollX + viewW) + 1);
                     int sFrom = -1, sTo = -1;
                     bool sEol = false;
                     if (hasSel && lineNo >= selSL && lineNo <= selEL)

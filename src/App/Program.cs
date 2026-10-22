@@ -223,6 +223,7 @@ internal sealed partial class App
 {
     private readonly FileTree _tree;
     private readonly TabManager _tabs = new();
+    private readonly VimSyntax _vim = new(); // syntax colours
     private readonly TextEditor _emptyEditor = new();
     private TextEditor _editor => _tabs.Active?.Editor ?? _emptyEditor;
 
@@ -356,7 +357,7 @@ internal sealed partial class App
             while (_running)
             {
                 bool dirty = false;
-                if (input.TryRead(_pendingSearch != null ? SearchTickMs : WatchTickMs, out var ev))
+                if (input.TryRead(_pendingSearch != null || _vim.Busy ? SearchTickMs : WatchTickMs, out var ev))
                 {
                     SafeDispatch(ev);
                     dirty = true;
@@ -390,6 +391,7 @@ internal sealed partial class App
                 if (PollSizing()) dirty = true;
                 if (PollPaste()) dirty = true;
                 if (PollChanges()) dirty = true;
+                if (_vim.Poll()) dirty = true;
                 StartSizingIfIdle();
                 if (Environment.TickCount64 - _diskCheckAt >= DiskCheckIntervalMs)
                 {
@@ -407,6 +409,7 @@ internal sealed partial class App
             CancelSearch();
             CancelSizing();
             _paste?.Cts.Cancel();
+            _vim.Dispose();
             _watcher.Dispose();
             _watcher = null;
             _emergencyDone.Set();
