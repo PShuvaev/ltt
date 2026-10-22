@@ -1,8 +1,10 @@
 """Saving: Ctrl+S and the ● marks, byte-for-byte fidelity, line endings, permissions, links, special files, errors."""
+import contextlib
 import os
 import shutil
 import stat
 import subprocess
+import threading
 
 import pytest
 
@@ -96,6 +98,24 @@ def test_mixed_line_endings_are_announced_and_saved_as_the_most_common(ltt, ws):
     assert ws.read_bytes("m.txt") == b"a\r\nb\r\nc\r\nd\r\n"
 
 
+@pytest.mark.xfail(strict=True, reason="BUG: a lone CR in a file with LF line endings counts as a line break, "
+                                       "and saving rewrites every line ending to the most common kind")
+@pytest.mark.parametrize("data, first, edited", [
+    (b"1%\r2%\r3%\r4%\nDone\n", "1%\u240d2%\u240d3%\u240d4%", b"1%\r2%\r3%\r4%\nDone!\n"),
+    (b"50%\r100%\ndone\n", "50%\u240d100%", b"50%\r100%\ndone!\n"),
+], ids=["more_cr_than_lf", "more_lf_than_cr"])
+def test_a_lone_cr_in_an_lf_file_stays_in_its_line(ltt, ws, data, first, edited):
+    # A progress bar redrawn with \r in a log (Vim and Helix keep it as text, idea from Helix's line_ending.rs).
+    # Only a file without any \n is cut at \r (old Mac text, see FIDELITY).
+    p = ws.write("log.txt", data)
+    app = ltt(p)
+    assert app.snap().editor_lines[:2] == [first, edited.split(b"\n")[1][:-1].decode()]
+    app.press("down", "end")
+    app.type("!")
+    save(app, "log.txt")
+    assert ws.read_bytes("log.txt") == edited
+
+
 def test_typing_keeps_crlf(ltt, ws):  # fix/pty/t1.py #5
     p = ws.write("crlf.txt", b"one\r\ntwo\r\n")
     app = ltt(p)
@@ -149,6 +169,56 @@ def test_save_keeps_the_permissions(ltt, ws, mode):
     save(app, "run.sh")
     assert stat.S_IMODE(os.stat(p).st_mode) == mode
     assert ws.read("run.sh") == "#echo hi\n"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: saving gives the file the group of its folder "
+                                       "(only the mode is copied to the new file)")
+def test_save_keeps_the_group(ltt, ws):  # idea from dte's tmp_file() (fchown before fchmod)
+    p = ws.write("proj/g.txt", "hello\n")
+    folder_gid = os.stat(ws.path("proj")).st_gid
+    other = [g for g in os.getgroups() if g != folder_gid]
+    if not other:
+        pytest.skip("the user is in no group but the folder's")
+    os.chown(p, -1, other[0])
+    app = ltt(p)
+    app.type("X")
+    save(app, "g.txt")
+    assert ws.read("proj/g.txt") == "Xhello\n"
+    assert os.stat(p).st_gid == other[0]
+
+
+@pytest.mark.slow
+@pytest.mark.xfail(strict=True, reason="BUG: the temporary file of a save is created readable by everyone "
+                                       "and takes the original's mode only after the text is in it")
+def test_a_private_file_is_never_readable_by_others_while_it_saves(ltt, ws):
+    # Idea from Vim's Test_backupcopy_auto_restrictive_umask: 100 MB, so the temporary file is there a while.
+    p = ws.write("proj/secret.txt", ("s" * 99 + "\n") * 1_000_000)
+    os.chmod(p, 0o600)
+    app = ltt(p, ready=False)
+    app.wait_ready(timeout=60)
+    app.type("X")
+    modes, stop = [], threading.Event()
+
+    def watch():
+        while not stop.is_set():
+            for e in os.scandir(ws.path("proj")):
+                if e.name.startswith(".ltt-") and e.name.endswith(".tmp"):
+                    try:
+                        modes.append(stat.S_IMODE(e.stat().st_mode))
+                    except FileNotFoundError:
+                        pass
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        app.press("ctrl+s")
+        app.wait_status("Saved: secret.txt", timeout=60)
+    finally:
+        stop.set()
+        watcher.join()
+    assert modes, "the temporary file was never seen"
+    assert all(m & 0o077 == 0 for m in modes), sorted({oct(m) for m in modes})
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
 
 
 def test_save_replaces_the_file_in_one_rename(ltt, ws):
@@ -309,6 +379,35 @@ def test_a_write_error_midway_keeps_the_original(ltt, ws):  # D6: EFBIG used to 
     assert s.tabs[0].dirty and app.alive
     assert ws.read("proj/big.txt") == body * 3000
     assert os.listdir(ws.path("proj")) == ["big.txt"]
+
+
+def _parting(actual, expected):
+    """None when the texts are equal, else where they part (pytest's own diff of 300 KB takes minutes)."""
+    if actual == expected:
+        return None
+    n = len(os.path.commonprefix([actual, expected]))
+    return f"they part at {n}: {actual[n:n + 20]!r} instead of {expected[n:n + 20]!r}"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a write error midway through an in-place save (a hard-linked file, "
+                                       "a read-only folder) leaves the new bytes over the start of the old ones")
+@pytest.mark.parametrize("why", ["hard_link", "read_only_folder"])
+def test_a_write_error_midway_in_place_keeps_the_original(ltt, ws, why):  # idea from micro's safeWrite
+    body = "x" * 99 + "\n"
+    p = ws.write("proj/big.txt", body * 3000)  # 300 KB, past the 100 KB limit below
+    if why == "hard_link":
+        os.link(p, ws.path("proj/other.txt"))
+    with file_size_limit(100_000):
+        app = ltt(p, ready=False)
+    app.wait_ready()
+    app.type("X")
+    with read_only(ws.path("proj")) if why == "read_only_folder" else contextlib.nullcontext():
+        app.press("ctrl+s")
+        s = app.wait_status("Save error:")
+    assert s.tabs[0].dirty and app.alive
+    assert _parting(ws.read("proj/big.txt"), body * 3000) is None
+    if why == "hard_link":
+        assert _parting(ws.read("proj/other.txt"), body * 3000) is None
 
 
 def test_saving_where_a_folder_now_stands_reports_an_error(ltt, ws):

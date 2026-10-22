@@ -36,6 +36,51 @@ def test_open_shows_the_text_and_names_the_format(ltt, ws, fmt):
     assert not s.tabs[0].dirty
 
 
+# Not in FORMATS while they fail: id -> (BOM, codec, what the open status says)
+UTF32 = {
+    "utf32le": (b"\xff\xfe\x00\x00", "utf-32-le", ", UTF-32 LE"),
+    "utf32be": (b"\x00\x00\xfe\xff", "utf-32-be", ", UTF-32 BE"),
+}
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: UTF-32 LE opens as UTF-16 LE with a NUL between the letters "
+                                       "(its BOM starts like UTF-16's), and UTF-32 BE is refused as binary")
+@pytest.mark.parametrize("fmt", list(UTF32))
+def test_utf32_opens_as_utf32_and_an_edit_keeps_it(ltt, ws, fmt):  # idea from dte's test/encoding.c
+    bom, codec, described = UTF32[fmt]
+    p = ws.write("f.txt", bom + TEXT.encode(codec))
+    app = ltt(ws.root, cols=140)
+    s = open_by_path(app, p)
+    assert f"Opened f.txt (3 lines{described}), tab 1/1." in s.status
+    assert s.editor_lines[:3] == ["héllo wörld", "naïve café", ""]
+    app.type("Ünï ")
+    app.wait_editor(["Ünï héllo wörld"])
+    save(app, "f.txt")
+    assert ws.read_bytes("f.txt") == bom + ("Ünï " + TEXT).encode(codec)
+
+
+def _east_asian_text():
+    chars = ([chr(c) for c in range(0x4E00, 0x4E00 + 1200)]   # CJK ideographs
+             + [chr(c) for c in range(0x3041, 0x3097)]        # hiragana
+             + [chr(c) for c in range(0xAC00, 0xAC00 + 600)])  # hangul
+    return "".join("".join(chars[i:i + 40]) + "\n" for i in range(0, len(chars), 40))
+
+
+@pytest.mark.parametrize("codec", ["big5", "gb18030", "shift_jis", "euc_kr"])
+def test_an_east_asian_legacy_encoding_survives_an_edit(ltt, ws, codec):
+    # Not UTF-8, so it opens as Latin-1 (a character per byte) and must come back byte for byte
+    # (idea from Helix's WHATWG encoding fixtures; the text here is made from the codecs).
+    data = _east_asian_text().encode(codec, errors="ignore")
+    with pytest.raises(UnicodeDecodeError):
+        data.decode("utf-8")
+    p = ws.write("cjk.txt", data)
+    app = ltt(p)
+    app.press("ctrl+end")
+    app.type("end")
+    save(app, "cjk.txt")
+    assert ws.read_bytes("cjk.txt") == data + b"end"
+
+
 @pytest.mark.parametrize("fmt", list(FORMATS))
 def test_open_and_save_keeps_the_encoding_byte_for_byte(ltt, ws, fmt):  # D3
     data = FORMATS[fmt][0](TEXT)
