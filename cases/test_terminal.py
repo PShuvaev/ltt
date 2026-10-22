@@ -5,6 +5,7 @@ import os
 import re
 import signal
 import threading
+import time
 
 import pytest
 
@@ -99,6 +100,63 @@ def test_note_counts_the_unsaved_tabs(ltt, ws):
     assert app.wait_exit() == 143
     assert b"ltt stopped (signal SIGTERM): 2 unsaved tab(s) saved to " in after_last_frame(app.output)
     assert len(ws.recovery_files()) == 2
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: SIGQUIT kills ltt with the terminal left raw, on the alternate screen, "
+                                       "the mouse and kitty keys on")
+def test_sigquit_restores_the_terminal(ltt, ws):  # micro's handled signals, Neovim's signal_spec
+    ws.write("a.txt", "alpha\n")
+    app = ltt(ws.path("a.txt"))
+    app.signal(signal.SIGQUIT)
+    assert app.wait_exit() == 131
+    assert after_last_frame(app.output).startswith(LEAVE)
+    assert app.tty_settings() == fresh_termios()
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: after a stop and a continue, quitting leaves the terminal raw "
+                                       "(the runtime puts back its own snapshot of the settings, taken in raw mode)")
+def test_quit_after_a_stop_and_a_continue_restores_the_terminal(ltt, ws):  # Neovim's tui_spec 'suspending'
+    ws.write("a.txt", "alpha\n")
+    app = ltt(ws.path("a.txt"))
+    app.signal(signal.SIGSTOP)
+    app.signal(signal.SIGCONT)
+    time.sleep(0.5)  # on purpose: the runtime takes SIGCONT on a thread of its own
+    assert app.quit() == 0
+    assert app.tty_settings() == fresh_termios()
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: after a stop and a continue, ltt neither sets its terminal modes again "
+                                       "nor repaints, so whatever ran in the meantime stays on the screen")
+def test_continue_after_a_stop_sets_the_modes_again_and_repaints(ltt, ws):
+    ws.write("a.txt", "alpha\n")
+    app = ltt(ws.path("a.txt"))
+    mark = app.output_mark()
+    app.signal(signal.SIGSTOP)
+    app.signal(signal.SIGCONT)
+    app.wait_output(b"\x1b[2J", after=mark)
+    assert ENTER in app.output_since(mark)
+    assert app.snap().editor_lines[0] == "alpha"
+
+
+def test_a_resize_while_stopped_is_drawn_once_continued(ltt, ws):  # Neovim's 'handles suspended PTY process'
+    ws.write("a.txt", "alpha\n")
+    app = ltt(ws.path("a.txt"))
+    before = app.frames
+    app.signal(signal.SIGSTOP)
+    app.resize(80, 24, settle=False)
+    app.signal(signal.SIGCONT)
+    s = app.wait(lambda s: s.frame_no > before and (s.cols, s.rows) == (80, 24) and s.lines[1][s.left_w] == "│",
+                 what="an 80x24 frame")
+    assert s.editor_lines[0] == "alpha"
+
+
+def test_rapid_resizes_down_to_nothing_and_back(ltt, ws):  # Neovim's tui_spec 'rapid resize'
+    ws.write("a.txt", "alpha\n")
+    app = ltt(ws.path("a.txt"))
+    for cols, rows in [(4, 44), (44, 1), (1, 1), (1, 4), (0, 0)]:
+        app.resize(cols, rows, settle=False)
+    s = app.resize(57, 17)
+    assert app.alive and s.editor_lines[0] == "alpha"
 
 
 def test_ctrl_c_never_ends_the_session(ltt, ws):

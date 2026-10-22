@@ -7,6 +7,7 @@ reopens them as unsaved tabs and deletes the backups.
 """
 import os
 import signal
+import stat
 import sys
 import time
 
@@ -86,6 +87,26 @@ def test_signal_backs_up_the_dirty_tab_and_exits_128_plus_n(ltt, ws, sig, code):
     assert killed(ltt, ws, sig) == code
     assert [b[1:] for b in backups(ws.recovery)] == [(2, ws.path("proj/note.txt"), "XYZhello\n")]
     assert ws.read("proj/note.txt") == "hello\n"
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: SIGQUIT ends ltt without a backup of the unsaved edits "
+                                       "(only TERM, INT and HUP are handled)")
+def test_sigquit_backs_up_the_dirty_tab_and_exits_131(ltt, ws):  # micro and Neovim handle QUIT as well
+    assert killed(ltt, ws, signal.SIGQUIT) == 131
+    assert [b[1:] for b in backups(ws.recovery)] == [(2, ws.path("proj/note.txt"), "XYZhello\n")]
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: backups are readable by everyone: the folder ltt makes is 0755 "
+                                       "and each backup 0644, whatever the mode of the file it keeps")
+def test_backups_are_readable_by_their_owner_only(ltt, ws):  # idea from Vim's test_swap.vim
+    assert not os.path.exists(ws.recovery)  # ltt makes it
+    app = edited(ltt, ws)
+    os.chmod(ws.path("proj/note.txt"), 0o600)
+    app.signal(signal.SIGTERM)
+    assert app.wait_exit() == 143
+    [name] = ws.recovery_files()
+    assert stat.S_IMODE(os.stat(ws.recovery).st_mode) == 0o700
+    assert stat.S_IMODE(os.stat(os.path.join(ws.recovery, name)).st_mode) == 0o600
 
 
 def test_closed_terminal_backs_up_the_dirty_tab_and_exits_129(ltt, ws):
@@ -255,6 +276,15 @@ def test_long_file_name_is_backed_up_and_restored(ltt, ws):
     assert [b[2:] for b in backups(ws.recovery)] == [(ws.path("proj/" + name), "XYZhello\n")]
     app, s = restart(ltt, ws)
     assert s.status.startswith("Restored unsaved edits from an interrupted session: nnnnnnnn")
+    assert s.editor_lines[0] == "XYZhello" and ws.recovery_files() == []
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: the backup of a file with a line break in its name is never restored "
+                                       "(its path reads as two header lines) and stays in the folder for good")
+def test_a_line_break_in_the_file_name_is_backed_up_and_restored(ltt, ws):  # idea from micro's backup names
+    assert killed(ltt, ws, rel="proj/nl\nname.txt") == 143
+    app, s = restart(ltt, ws)
+    assert s.status.startswith("Restored unsaved edits from an interrupted session")
     assert s.editor_lines[0] == "XYZhello" and ws.recovery_files() == []
 
 
