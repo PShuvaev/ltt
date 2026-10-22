@@ -13,7 +13,7 @@ for the age of coding agents
 
 </div>
 
-## Quick start - open the current folder
+## Quick start - open the folder you're in
 
 ```sh
 curl https:/ltt.is-an.ai|sh
