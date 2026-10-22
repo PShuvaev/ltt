@@ -809,3 +809,15 @@ def test_plain_gutter_of_a_file_made_with_ctrl_n_is_all_green(ltt, ws):
     app.press("enter")
     app.type("world")
     assert marks(app.snap()) == {1: ADDED, 2: ADDED}
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a symlink in a repository is compared with the link's own blob "
+                                       "(the name of its target), so every line of the file it opens shows as changed")
+def test_a_symlink_in_a_repository_marks_only_the_lines_that_changed(ltt, ws):  # Helix's git/test.rs 'symlink'
+    root = ws.repo("r", {"file.txt": "a\nb\nc\n"})
+    os.symlink("file.txt", os.path.join(root, "link.txt"))
+    ws.git("add", "link.txt", cwd="r")
+    ws.git("commit", "-q", "-m", "link", cwd="r")
+    ws.write("r/file.txt", "a\nB\nc\n")
+    app = ltt(ws.path("r/link.txt"))
+    wait_marks(app, {2: MODIFIED}, timeout=5)

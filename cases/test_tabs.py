@@ -1,4 +1,5 @@
 """Tabs: switching (Alt+1..9, Ctrl+PgUp/PgDn, clicks, wheel), closing (Ctrl+W, ×), the bar, the title."""
+import os
 import time
 
 import pytest
@@ -433,3 +434,15 @@ def test_hidden_tab_catches_up_with_the_search_results_panel(ltt, ws):
     s = app.wait(lambda s: s.title_path.endswith("/proj/a.txt"), what="a.txt active")
     row = s.editor_row(300)
     assert s.results_top is not None and row is not None and row.y < s.results_top
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a file reached through another spelling of its folder (a symlinked "
+                                       "folder; /tmp and /private/tmp on macOS) opens a second tab on the same file")
+def test_a_path_through_a_link_finds_the_tab_already_open(ltt, ws):  # Vim's Test_swap_symlink
+    p = ws.write("proj/a.c", "1\n2\n3\n4\n")
+    os.symlink(ws.path("proj"), ws.path("alias"))
+    app = ltt(ws.path("proj"), p)
+    app.press("ctrl+l")
+    app.type(ws.path("alias/a.c") + ":3")
+    s = app.press("enter")
+    assert s.tab_names == ["a.c"] and s.pos[:2] == (3, 5)

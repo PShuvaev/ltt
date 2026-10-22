@@ -579,3 +579,23 @@ def test_dragging_along_the_title_copies_once(ltt, ws):  # C3: every mouse move 
     app.wait(lambda s: ws.clipboard == ws.path("proj/a.txt"), timeout=5, what="the path on the clipboard")
     flush(app)
     assert osc52_count(app, mark) == 1 and len(ws.clipboard_log) == 1
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a drag that outlives its tab (Alt+2 or Ctrl+W during it) moves the "
+                                       "cursor of the tab that takes over and selects there")
+@pytest.mark.parametrize("switch", ["alt+2", "ctrl+w"])
+def test_a_drag_that_outlives_its_tab_leaves_the_next_tab_alone(ltt, ws, switch):
+    # Kakoune's regression 0-delete-buffer-while-dragging
+    ws.write("proj/a.txt", "aaaa aaaa aaaa\n" * 5)
+    ws.write("proj/b.txt", "bbbb bbbb bbbb\n" * 5)
+    app = ltt(ws.path("proj/a.txt"), ws.path("proj/b.txt"))
+    s = app.snap()
+    x, y = at(s, 2, 3)
+    app.write(K.mouse(K.LEFT, x, y, True))  # the button goes down in a.txt…
+    app.settle()
+    before = app.press(switch)  # …and b.txt takes over before it comes up
+    assert before.active_tab.name == "b.txt"
+    app.write(b"".join(K.mouse(K.LEFT | K.MOTION, x + i, y + 2, True) for i in range(1, 6)))
+    app.write(K.mouse(K.LEFT, x + 5, y + 2, False))
+    s = app.settle()
+    assert s.active_tab.name == "b.txt" and s.pos == before.pos and s.pos[3] == 0

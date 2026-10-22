@@ -1,4 +1,5 @@
 """Root folders of the left panel: several at once, Ctrl+O to add one (or open a file), Delete to take one away."""
+import os
 import sys
 
 import pytest
@@ -428,3 +429,20 @@ def test_a_renamed_root_is_still_watched(ltt, ws):
     ws.write("renamed/new.txt", "n\n")
     s = app.wait_tree("new.txt")
     assert roots(s) == ["renamed"] and s.tree_row("new.txt").depth == 1
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: a folder reached through a symlink is taken for another folder: "
+                                       "its file on the command line, or the folder itself in Ctrl+O, adds a second root")
+@pytest.mark.parametrize("how", ["command_line", "ctrl_o"])
+def test_a_folder_through_a_link_is_the_same_root(ltt, ws, how):  # Vim's Test_swap_symlink
+    ws.write("proj/a.c", "1\n")
+    os.symlink(ws.path("proj"), ws.path("alias"))
+    if how == "command_line":
+        app = ltt(ws.path("proj"), ws.path("alias/a.c"))
+        s = app.snap()
+        assert s.tab_names == ["a.c"]
+    else:
+        app = ltt(ws.path("proj"))
+        s = add(app, ws.path("alias"))
+        assert s.status.startswith("Folder already in the panel")
+    assert roots(s) == ["proj"]
