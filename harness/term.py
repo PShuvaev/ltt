@@ -42,8 +42,8 @@ class TerminalScreen(pyte.Screen):
 
     - a zero-width character that is not a combining mark (ZWJ, VS16, U+200B…) joins
       the cell before it; pyte drops it and the rest of the text that came with it;
-    - a cell that collects a long run of marks is not NFC-normalized again on every
-      mark (quadratic: 40,000 marks took pyte 14 s).
+    - a cell keeps at most 64 characters, as terminals keep a few marks per cell:
+      pyte NFC-normalized it again on every mark (40,000 marks took it 14 s).
     """
 
     def draw(self, data):
@@ -73,6 +73,8 @@ class TerminalScreen(pyte.Screen):
         if x >= 2 and line[x - 1].data == "":
             x -= 1
         last = line[x - 1]
+        if len(last.data) >= 64:
+            return
         data = last.data + ch
         line[x - 1] = last._replace(data=unicodedata.normalize("NFC", data) if len(data) <= 16 else data)
         self.dirty.add(y)

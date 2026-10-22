@@ -317,6 +317,21 @@ def test_moving_along_a_3mb_line(ltt):
     assert t < secs(0.05), f"best key answered after {t:.3f} s"  # ~1 ms
 
 
+# ---------------------------------------------------------------- a run of 200,000 combining marks
+
+@pytest.mark.xfail(strict=True, reason="BUG: every mark of a long combining run is joined to its cell one at a time, "
+                                       "a quadratic cost on every frame, and all of them are sent to the terminal")
+@pytest.mark.parametrize("mark", ["\u0301", "\u200b"], ids=["acute", "zero-width space"])
+def test_typing_next_to_a_line_of_200000_marks(ltt, ws, mark):
+    # Zalgo text (micro's line_array tests, Helix's adversarial_extreme_zalgo): ~2 s a key before
+    p = ws.write("zalgo.txt", "x" + mark * 200_000 + "\nnext\n")
+    app = ltt(p, env=PLAIN)
+    assert app.output_mark() < 100_000  # the first frame: no 400 KB for one cell
+    app.press("down")
+    t = best_of(app, "x", typed_one_more, times=5)
+    assert t < secs(0.05), f"best key answered after {t:.3f} s"
+
+
 # ---------------------------------------------------------------- a big paste
 
 def test_pasting_5000_lines_lands_in_one_frame(ltt, ws):

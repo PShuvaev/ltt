@@ -76,6 +76,47 @@ def test_combining_marks_take_no_cell_of_their_own(ltt, ws):
     assert s.cursor == (s.text_x + 7, y)
 
 
+@pytest.mark.xfail(strict=True, reason="BUG: a combining mark at the start of a line is drawn on the gutter cell "
+                                       "before the text")
+def test_a_combining_mark_at_the_start_of_a_line_stays_out_of_the_gutter(ltt, ws):  # micro's line_array tests
+    app = open_text(ltt, ws, "\u0301abc\n")
+    s = app.snap()
+    y = row_y(s, 1)
+    assert s.cell(s.text_x - 1, y).ch == " "
+    assert s.text(y, s.text_x, s.text_x + 3) == "abc"
+
+
+# Bidi controls ("Trojan Source": a bidi-aware terminal would reorder the line around them) and
+# characters that show nothing (ideas from Helix's adversarial buffer tests, dte's u_is_zero_width
+# and Neovim's <200b>).
+INVISIBLE = {
+    "RLO": "\u202e", "PDF": "\u202c", "LRI": "\u2066", "PDI": "\u2069", "LRM": "\u200e", "ALM": "\u061c",
+    "zero-width space": "\u200b", "word joiner": "\u2060", "BOM in the text": "\ufeff", "soft hyphen": "\u00ad",
+    "line separator": "\u2028",
+}
+
+
+@pytest.mark.xfail(strict=True, reason="BUG: bidi controls and invisible characters reach the terminal as they are: "
+                                       "nothing shows them, and a bidi terminal reorders the line around them")
+@pytest.mark.parametrize("name", INVISIBLE)
+def test_an_invisible_character_shows_as_a_stand_in(ltt, ws, name):
+    ch = INVISIBLE[name]
+    app = open_text(ltt, ws, f"ab{ch}cd\n")
+    s = app.snap()
+    assert s.text(row_y(s, 1), s.text_x, s.text_x + 5) == "ab\ufffdcd"
+    assert ch.encode() not in app.output
+    s = burst(app, "right", "right", "right")  # over a, b and the stand-in
+    assert line_col(s) == (1, 4)
+
+
+def test_joiners_and_variation_selectors_still_join(ltt, ws):
+    # The stand-ins above are not for ZWJ, ZWNJ or VS16: they build emoji and words.
+    app = open_text(ltt, ws, "a\u2764\ufe0f \U0001F468\u200d\U0001F469 \u0646\u200c\u0645 z\n")
+    out = app.output
+    assert all(c.encode() in out for c in ("\ufe0f", "\u200d", "\u200c"))
+    assert "\ufffd" not in app.snap().editor_lines[0]
+
+
 # ---------------------------------------------------------------- long lines
 
 
