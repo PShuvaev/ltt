@@ -10,6 +10,7 @@ import time
 import pytest
 
 from harness import shared
+from vim_helpers import with_vim
 from startup_helpers import (ENTER, FRAME_END, FRAME_START, LEAVE, SIGNALS, foreign_controls, fresh_termios,
                              is_raw, session_output, shell_status)
 
@@ -420,6 +421,7 @@ def test_control_characters_in_a_file_show_as_symbols(ltt, ws):  # D12
 
 
 def test_escape_sequences_in_highlighted_code_never_reach_the_terminal(ltt, ws):  # D12
+    with_vim(ws, syntax=False)
     ws.write("t.cs", "int a = 1; // \x1b]0;PWNED\x07 comment\n"
                      "var s = \"\x1b[2J\x07\";\n"
                      "/* \x1b[?1049l */ int b;\n")
@@ -427,7 +429,8 @@ def test_escape_sequences_in_highlighted_code_never_reach_the_terminal(ltt, ws):
     s = app.snap()
     assert s.editor_lines[:3] == ["int a = 1; // ␛]0;PWNED␇ comment", 'var s = "␛[2J␇";', "/* ␛[?1049l */ int b;"]
     x, y = s.find("␛]0")
-    assert s.fg(x, y) == s.fg(x - 3, y) != s.fg(s.text_x, y)  # drawn as part of the comment's colour run
+    # drawn as part of the comment's colour run
+    s = app.wait(lambda s: s.fg(x, y) == s.fg(x - 3, y) != s.fg(s.text_x, y), what="the comment coloured")
     assert foreign_controls(session_output(app)) == [] and s.window_title == ""
 
 

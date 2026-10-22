@@ -4,6 +4,7 @@ import os
 import pytest
 
 from prompts_helpers import candidates, ghost, prompt_line, rename, select_in_tree
+from vim_helpers import with_vim
 
 RENAME_HELP = "Enter renames · Esc cancels · type just the new name (no path); open tabs update themselves"
 JUST_A_NAME = "Enter just the new name, with no path or special characters."
@@ -134,13 +135,14 @@ def test_tabs_inside_a_renamed_folder_follow(ltt, ws):
 
 
 def test_rename_to_another_extension_changes_the_highlighting(ltt, ws):
+    with_vim(ws, syntax=False)
     ws.write("proj/code.txt", "class Foo {}")
     app = ltt(ws.path("proj"), ws.path("proj/code.txt"))
     s = app.snap()
     row = s.editor_rows[0]
     assert s.fg(s.text_x, row.y) == "Gray"  # plain text
-    s = rename(app, "code.cs")
-    assert s.fg(s.text_x, row.y) != "Gray"  # `class` is a C# keyword
+    rename(app, "code.cs")
+    app.wait(lambda s: s.fg(s.text_x, row.y) != "Gray", what="`class` coloured as a C# keyword")
 
 
 # ---- case-only renames (the volume is case-insensitive) ----

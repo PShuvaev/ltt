@@ -5,6 +5,7 @@ import pytest
 
 from perf_helpers import (MILLION, MINIFIED_LEN, NEEDLES, PLAIN, SHORT_LINE, ZEBRAS, answer, big_repo, million_js,
                           million_line, minified_js, tree)
+from vim_helpers import with_vim
 
 pytestmark = pytest.mark.slow
 
@@ -162,25 +163,29 @@ def test_tree_answers_keys_while_sizes_are_counted(ltt):
 
 # ---------------------------------------------------------------- a 3 MB line
 
-def test_line_over_20000_characters_is_drawn_without_colours(ltt):
+def test_line_over_20000_characters_is_drawn_without_colours(ltt, ws):
     # V15: a 3 MB line of code is drawn plain; the short line after it keeps its colours
+    with_vim(ws, syntax=False)
     app = ltt(minified_js(), env=PLAIN)
-    s = app.snap()
+    x = app.snap().text_x
+
+    def short_line_coloured(s):
+        y = s.editor_rows[1].y
+        return (s.fg(x, y), s.fg(x + SHORT_LINE.index('"'), y), s.fg(x + SHORT_LINE.index("//"), y)) == \
+            ("Cyan", "Yellow", "DarkGreen")
+    s = app.wait(short_line_coloured, what="the short line coloured")
     long_row, short_row = s.editor_rows[0], s.editor_rows[1]
     assert {s.fg(x, long_row.y) for x in range(s.text_x, s.cols - 1)} == {"Gray"}
     assert short_row.text == SHORT_LINE
-    x = s.text_x
-    assert (s.fg(x, short_row.y), s.fg(x + SHORT_LINE.index('"'), short_row.y),
-            s.fg(x + SHORT_LINE.index("//"), short_row.y)) == ("Cyan", "Yellow", "DarkGreen")
 
 
 def test_line_of_20000_characters_keeps_its_colours(ltt, ws):
     # V15: the limit is 20,000 characters: one more and the line is drawn plain
+    with_vim(ws, syntax=False)
     line = ("var x = 1; " * 2000)[:20_000]
     ws.write("edge.js", line + "\n" + line + "x\n")
     app = ltt(ws.path("edge.js"))
-    s = app.snap()
-    assert [s.fg(s.text_x, r.y) for r in s.editor_rows[:2]] == ["Cyan", "Gray"]
+    app.wait(lambda s: [s.fg(s.text_x, r.y) for r in s.editor_rows[:2]] == ["Cyan", "Gray"], what="line 1 coloured")
 
 
 def test_typing_at_the_end_of_a_3mb_line_keeps_the_line(ltt):
