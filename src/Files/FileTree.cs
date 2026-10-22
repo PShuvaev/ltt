@@ -257,8 +257,7 @@ public sealed class FileTree
     /// </summary>
     private static void MarkIgnored(TreeNode dir)
     {
-        foreach (var c in dir.Children)
-            c.Ignored = c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" };
+        foreach (var c in dir.Children) c.Ignored = IsService(c);
         if (dir.Children.Count == 0) return;
         // A folder is asked about as "name/"; a symlink as the link itself — a path
         // through it would make git refuse the whole batch ("beyond a symbolic link").
@@ -286,7 +285,7 @@ public sealed class FileTree
             string prefix = rel == "." ? "" : rel + "/";
             foreach (var c in dir.Children)
             {
-                c.Ignored = c is { IsDir: true, Name: ".git" } or { IsDir: false, Name: ".gitignore" };
+                c.Ignored = IsService(c);
                 queries.Add((c, prefix + c.Name + (c.IsDir && !c.IsLink ? "/" : "")));
             }
         }
@@ -298,6 +297,18 @@ public sealed class FileTree
         foreach (var (c, q) in queries)
             if (ignored.Contains(q)) c.Ignored = true;
         return true;
+    }
+
+    // A .git folder, or the .git file of a linked worktree or a submodule, and .gitignore.
+    private static bool IsService(TreeNode c) => c.Name == ".git" || c is { IsDir: false, Name: ".gitignore" };
+
+    /// <summary>The nearest folder at or above dir with a .git in it — its repository's top; null — none.</summary>
+    private static string? RepoTop(string dir, Dictionary<string, string?> known)
+    {
+        if (known.TryGetValue(dir, out var top)) return top;
+        top = Path.Exists(Path.Combine(dir, ".git")) ? dir
+            : Path.GetDirectoryName(dir) is { } parent ? RepoTop(parent, known) : null;
+        return known[dir] = top;
     }
 
     private void RebuildVisible()
@@ -344,12 +355,14 @@ public sealed class FileTree
     /// <summary>Remove a root from the panel (files on disk are untouched). The last root cannot be removed.</summary>
     public bool RemoveRoot(TreeNode root)
     {
+        var selected = Selected;
         if (Roots.Count <= 1 || !Roots.Remove(root)) return false;
         DropSizing(job => Paths.IsSameOrInside(job.Parent.FullPath, root.FullPath));
         // No longer watched: what changes there from now on would go unnoticed.
         foreach (string key in _sizeCache.Keys.Where(k => Paths.IsSameOrInside(k, root.FullPath)).ToList())
             _sizeCache.Remove(key);
         RebuildVisible();
+        if (selected != null) SelectNode(selected); // still shown, in another root: it stays selected
         return true;
     }
 
@@ -427,18 +440,29 @@ public sealed class FileTree
         return true;
     }
 
-    /// <summary>A root was renamed on disk — replace its path, keeping position and expanded state.</summary>
+    /// <summary>
+    /// A folder was renamed on disk: roots that are it or lie inside it take the new path, keeping
+    /// their position and expanded state. Whether the folder itself is a root (it is selected then).
+    /// </summary>
     public bool ReplaceRootPath(string oldPath, string newPath)
     {
-        int i = Roots.FindIndex(r => Paths.Same(r.FullPath, Paths.Normalize(oldPath)));
-        if (i < 0) return false;
-        bool expanded = Roots[i].Expanded;
-        var root = CreateRoot(newPath);
-        root.Expanded = expanded;
-        Roots[i] = root;
+        string old = Paths.Normalize(oldPath);
+        TreeNode? renamed = null;
+        bool any = false;
+        for (int i = 0; i < Roots.Count; i++)
+        {
+            bool same = Paths.Same(Roots[i].FullPath, old);
+            if (!same && !Paths.IsInside(Roots[i].FullPath, old)) continue;
+            var root = CreateRoot(same ? newPath : newPath + Roots[i].FullPath[old.Length..]);
+            root.Expanded = Roots[i].Expanded;
+            Roots[i] = root;
+            if (same) renamed = root;
+            any = true;
+        }
+        if (!any) return false;
         RebuildVisible();
-        SelectNode(root);
-        return true;
+        if (renamed != null) SelectNode(renamed);
+        return renamed != null;
     }
 
     /// <summary>The node of a path among the folders read so far (nothing is read or expanded); null — not there.</summary>
@@ -551,10 +575,19 @@ public sealed class FileTree
             };
             probes[i].Children.AddRange(ReadEntries(order[i]));
         });
-        // One git call per root answers for every re-read folder; per-folder calls only if git refuses the batch.
-        foreach (var group in probes.GroupBy(p => Roots.First(r => Paths.IsSameOrInside(p.FullPath, r.FullPath)).FullPath))
+        // One git call per repository answers for every re-read folder in it (a nested one has rules
+        // of its own); per-folder calls only if git refuses the batch. Outside any: the service entries.
+        var tops = new Dictionary<string, string?>(Paths.Comparer);
+        foreach (var group in probes.GroupBy(p => RepoTop(p.FullPath, tops) ?? "", Paths.Comparer))
+        {
+            if (group.Key.Length == 0)
+            {
+                foreach (var c in group.SelectMany(p => p.Children)) c.Ignored = IsService(c);
+                continue;
+            }
             if (!MarkIgnoredBatch(group.Key, group.ToList()))
                 Parallel.ForEach(group, new ParallelOptions { MaxDegreeOfParallelism = 8 }, MarkIgnored);
+        }
         var fresh = probes.Select(p => p.Children).ToArray();
         for (int i = 0; i < order.Count; i++)
         {

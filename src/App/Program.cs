@@ -539,6 +539,7 @@ internal sealed partial class App
         _diskCheckAt = 0; // compare open tabs with the disk right away
         _liveSourceStale = true; // results can no longer be refined: lines may have changed
         bool redraw = FollowRenames(batch.Renames);
+        if (!batch.Deep && FollowByIdentity(batch.Dirs)) redraw = true;
         _changes.Changed(batch.Dirs, _tree.RootPaths);
         if (batch.Overflow) _changes.RefreshAll();
         if (batch.Dirs.Count == 0 && !batch.Overflow) return redraw;
@@ -584,6 +585,39 @@ internal sealed partial class App
     }
 
     /// <summary>
+    /// A rename the watcher saw as one file gone and another one new — FSEvents reports a rename
+    /// with a write right after it so: a tab whose file just went follows the name in a changed
+    /// folder that is the same file. macOS only, where a file's number is never handed to another
+    /// file (Linux reuses inode numbers at once, and inotify reports every rename anyway).
+    /// </summary>
+    private bool FollowByIdentity(IReadOnlyCollection<string> dirs)
+    {
+        if (!OperatingSystem.IsMacOS()) return false;
+        bool any = false;
+        foreach (var tab in _tabs.Tabs)
+        {
+            var ed = tab.Editor;
+            if (ed.FilePath is not { } fp || ed.MissingOnDisk || ed.DiskStamp is not { Ino: not 0 } known
+                || File.Exists(fp)) continue;
+            var disk = TextFile.Stat(Path.GetDirectoryName(fp)!)?.Dev; // numbers are per disk
+            string? found = dirs.SelectMany(FilesIn).FirstOrDefault(f =>
+                TextFile.Stat(f) is { } st && st.Ino == known.Ino && (disk == null || st.Dev == disk) && _tabs.IndexOfPath(f) < 0);
+            if (found == null) continue;
+            ed.RenameTo(found);
+            ed.SetBaseline(Baseline(found));
+            _status = $"{Path.GetFileName(fp)} was moved to {found} — its tab follows.";
+            any = true;
+        }
+        return any;
+
+        static IEnumerable<string> FilesIn(string dir) // no links: a link would lead to the same file under another name
+        {
+            try { return new DirectoryInfo(dir).GetFiles().Where(f => f.LinkTarget == null).Select(f => f.FullName).ToList(); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
+        }
+    }
+
+    /// <summary>
     /// Compare each tab with its file: a clean tab takes the new text (one undo
     /// step), a dirty one keeps its edits and is marked, so saving asks first.
     /// Returns whether anything changed.
@@ -605,7 +639,7 @@ internal sealed partial class App
                     ed.MissingOnDisk = false;
                     changed = true;
                     break;
-                case TextEditor.DiskState.Changed when !ed.Dirty:
+                case TextEditor.DiskState.Changed when !ed.Dirty && !ed.Unreadable: // said once, not every second
                     try
                     {
                         ed.Reload();
@@ -708,7 +742,7 @@ internal sealed partial class App
             _focus = Focus.Editor;
             _status = activateOnly
                 ? $"Tab: {_editor.DisplayName}"
-                : $"Line {lineZeroBased + 1}.";
+                : $"Line {_editor.Cy + 1}."; // the one reached: a short file ends before the line asked for
             return;
         }
 

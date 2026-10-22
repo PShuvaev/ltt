@@ -246,8 +246,9 @@ internal static class TextFile
             foreach (var line in lines)
             {
                 int bad = line.AsSpan().IndexOfAnyExceptInRange('\0', '\u00FF');
-                if (bad >= 0)
-                    throw new IOException($"'{line[bad]}' cannot be saved in this file's Latin-1 encoding.");
+                if (bad < 0) continue;
+                Rune.DecodeFromUtf16(line.AsSpan(bad), out var rune, out _); // the whole character, not half an emoji
+                throw new IOException($"'{rune}' cannot be saved in this file's Latin-1 encoding.");
             }
 
         string target = path;
@@ -292,6 +293,7 @@ internal static class TextFile
             }
             if (!OperatingSystem.IsWindows() && File.Exists(target))
             {
+                CopyXattrs(target, temp); // while the copy is still writable
                 // The owner and the group first (a change of owner may clear set-id bits), then the mode.
                 if (kind is { } k && chown(temp, k.Uid, k.Gid) != 0) chown(temp, uint.MaxValue, k.Gid);
                 try { File.SetUnixFileMode(temp, File.GetUnixFileMode(target)); }
@@ -368,6 +370,47 @@ internal static class TextFile
 
     [DllImport("libc", SetLastError = true)]
     private static extern int chown(string path, uint owner, uint group);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int copyfile(string from, string to, IntPtr state, uint flags); // macOS
+
+    [DllImport("libc", EntryPoint = "listxattr", SetLastError = true)]
+    private static extern nint ListXattrs(string path, byte[]? list, nint size); // Linux
+
+    [DllImport("libc", EntryPoint = "getxattr", SetLastError = true)]
+    private static extern nint GetXattr(string path, string name, byte[]? value, nint size);
+
+    [DllImport("libc", EntryPoint = "setxattr", SetLastError = true)]
+    private static extern int SetXattr(string path, string name, byte[] value, nint size, int flags);
+
+    /// <summary>
+    /// A file's extended attributes (Finder tags, user.* ones) onto its replacement, as far as they
+    /// go: one that may not be set (security.* without the right) is left out.
+    /// </summary>
+    private static void CopyXattrs(string from, string to)
+    {
+        try
+        {
+            if (OperatingSystem.IsMacOS())
+            {
+                copyfile(from, to, IntPtr.Zero, 1 << 2 /* COPYFILE_XATTR */);
+                return;
+            }
+            if (!OperatingSystem.IsLinux()) return;
+            nint size = ListXattrs(from, null, 0);
+            if (size <= 0) return;
+            var list = new byte[size];
+            if ((size = ListXattrs(from, list, size)) <= 0) return;
+            foreach (string name in Encoding.UTF8.GetString(list, 0, (int)size).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+            {
+                nint length = GetXattr(from, name, null, 0);
+                if (length < 0) continue;
+                var value = new byte[length];
+                if ((length = GetXattr(from, name, value, length)) >= 0) SetXattr(to, name, value, length, 0);
+            }
+        }
+        catch (Exception e) when (e is EntryPointNotFoundException or DllNotFoundException) { }
+    }
 
     private static bool IsWritable(string path) => OperatingSystem.IsWindows()
         ? (File.GetAttributes(path) & FileAttributes.ReadOnly) == 0

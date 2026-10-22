@@ -110,7 +110,8 @@ internal sealed class RawTerminalInput : ITerminalInput
 
     [StructLayout(LayoutKind.Sequential)]
     private struct PollFd { public int Fd; public short Events; public short Revents; }
-    [DllImport("libc", SetLastError = true)] private static extern int poll(PollFd[] fds, nuint nfds, int timeoutMs);
+    // By reference: an array of structs is only copied in, and revents would never come back (POLLHUP unseen).
+    [DllImport("libc", SetLastError = true)] private static extern int poll(ref PollFd fd, nuint nfds, int timeoutMs);
 
     public RawTerminalInput()
     {
@@ -166,12 +167,12 @@ internal sealed class RawTerminalInput : ITerminalInput
         if (_unread.Count > 0) return _unread.Pop();
         if (_bufPos < _bufLen) return _buf[_bufPos++];
         if (_noTerminal) return -1;
-        var pfd = new[] { new PollFd { Fd = StdinFd, Events = 1 /* POLLIN */ } };
+        var pfd = new PollFd { Fd = StdinFd, Events = 1 /* POLLIN */ };
         long deadline = timeoutMs < 0 ? long.MaxValue : Environment.TickCount64 + timeoutMs;
         while (true)
         {
             int wait = timeoutMs < 0 ? -1 : (int)Math.Max(0, deadline - Environment.TickCount64);
-            int ready = poll(pfd, 1, wait);
+            int ready = poll(ref pfd, 1, wait);
             if (ready < 0)
             {
                 if (Marshal.GetLastPInvokeError() == 4 /* EINTR */) continue;
@@ -186,7 +187,7 @@ internal sealed class RawTerminalInput : ITerminalInput
                     _bufPos = 1;
                     return _buf[0];
                 }
-                if (n == 0 && (pfd[0].Revents & 0x18) != 0) return -2; // POLLHUP | POLLERR — the terminal is gone
+                if (n == 0 && (pfd.Revents & 0x18) != 0) return -2; // POLLHUP | POLLERR — the terminal is gone
                 // Spurious wakeup or EAGAIN (see the ctor note): fall through to the deadline check.
             }
             if (Environment.TickCount64 >= deadline) return -1;

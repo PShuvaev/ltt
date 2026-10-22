@@ -134,6 +134,11 @@ internal sealed partial class App
             _status = $"Name already taken: {newPath}";
             return;
         }
+        if (DirtyTabInTheWay(oldPath, newPath, isDir) is { } held)
+        {
+            _status = $"Name held by unsaved edits in the tab {held.Name} — save or close it first.";
+            return;
+        }
 
         try
         {
@@ -152,20 +157,44 @@ internal sealed partial class App
         _status = $"Renamed: {Path.GetFileName(oldPath)} → {newName}";
     }
 
-    /// <summary>Open tabs of a moved file, or of the files in a moved folder, follow it.</summary>
+    /// <summary>
+    /// Open tabs of a moved file, or of the files in a moved folder, follow it. A tab already on
+    /// the new path is one whose file is gone: it gives way, unless it holds unsaved edits (a
+    /// rename or a paste avoids that name) — then the tab that would land on it stays behind.
+    /// </summary>
     private void MoveTabs(string oldPath, string newPath, bool isDir, IReadOnlySet<TextEditor>? inSync = null)
     {
-        foreach (var tab in _tabs.Tabs)
+        foreach (var (tab, to) in Followers(oldPath, newPath, isDir))
         {
-            string? fp = tab.Editor.FilePath;
-            if (fp == null) continue;
-            bool synced = inSync?.Contains(tab.Editor) == true;
-            if (Paths.Same(fp, oldPath)) tab.Editor.RenameTo(newPath, synced);
-            else if (isDir && Paths.IsInside(fp, oldPath)) tab.Editor.RenameTo(newPath + fp[oldPath.Length..], synced);
-            else continue;
-            tab.Editor.SetBaseline(Baseline(tab.Editor.FilePath!));
+            if (TabAt(to, besides: tab) is { } gone)
+            {
+                if (gone.Editor.Dirty) continue;
+                _tabs.Close(gone);
+            }
+            tab.Editor.RenameTo(to, inSync?.Contains(tab.Editor) == true);
+            tab.Editor.SetBaseline(Baseline(to));
         }
     }
+
+    /// <summary>The tabs a move takes along, and where each one lands.</summary>
+    private List<(EditorTab Tab, string To)> Followers(string oldPath, string newPath, bool isDir)
+    {
+        var list = new List<(EditorTab, string)>();
+        foreach (var tab in _tabs.Tabs)
+            if (tab.Editor.FilePath is { } fp)
+            {
+                if (Paths.Same(fp, oldPath)) list.Add((tab, newPath));
+                else if (isDir && Paths.IsInside(fp, oldPath)) list.Add((tab, newPath + fp[oldPath.Length..]));
+            }
+        return list;
+    }
+
+    private EditorTab? TabAt(string path, EditorTab besides) =>
+        _tabs.Tabs.FirstOrDefault(t => t != besides && t.Editor.FilePath is { } p && Paths.SameReal(p, path));
+
+    /// <summary>A tab with unsaved edits where a move would bring another tab: a name in use, though not on disk.</summary>
+    private EditorTab? DirtyTabInTheWay(string oldPath, string newPath, bool isDir) =>
+        Followers(oldPath, newPath, isDir).Select(f => TabAt(f.To, f.Tab)).FirstOrDefault(t => t is { Editor.Dirty: true });
 
     // ---- Copy and move: Ctrl+C / Ctrl+X picks an entry up, Ctrl+V pastes it into a folder of any root ----
 
@@ -224,7 +253,8 @@ internal sealed partial class App
         if (what.Cut && Paths.Same(Path.GetDirectoryName(what.Path), dir)) { _status = $"{what.Label} is already here."; return; }
         if (what.Cut && IsDeleteProtected(what.Path, _tree.RootPaths)) { _status = $"Protected path - never moved: {what.Path}"; return; }
 
-        string to = FileOps.FreeName(dir, Path.GetFileName(what.Path), what.IsDir);
+        string to = FileOps.FreeName(dir, Path.GetFileName(what.Path), what.IsDir,
+            alsoTaken: what.Cut ? p => DirtyTabInTheWay(what.Path, p, what.IsDir) != null : null);
         // A tab that matches its file now still does after the move, even where another disk rounds the time.
         var inSync = what.Cut
             ? _tabs.Tabs.Select(t => t.Editor).Where(e => e.FilePath is { } fp && Paths.IsSameOrInside(fp, what.Path)
@@ -273,6 +303,8 @@ internal sealed partial class App
             : moved ? $"Moved {what.Label} into {into}."
             : stopped ? $"Stopped: the copy in {into} is incomplete." + (what.Cut ? " The original stays." : "")
             : p is { Copied: 0, Failed: > 0 } ? error + p.FirstError
+            : p is { Copied: 0, Skipped: > 0 } && !what.IsDir // a lone pipe or device: there is nothing to copy
+                ? $"Nothing copied into {into}." + (what.Cut ? " The original stays." : "") + problems
             : what.Cut ? $"Copied {what.Label} into {into}, but the original stays:" + problems
             : $"Copied {what.Label} into {into}" + (what.IsDir ? $" ({p.Copied} files)." : ".") + problems;
         ShowInTree(job.To, alsoDir: moved ? Path.GetDirectoryName(what.Path) : null,

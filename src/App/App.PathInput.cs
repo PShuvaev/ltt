@@ -80,23 +80,34 @@ internal sealed partial class App
     /// <summary>
     /// "path", "path:line" or "path:line:column" (as compilers and agents print
     /// them, gcc and Go with a colon after); a path that exists as typed wins
-    /// over a suffix reading. Lines and columns come back 0-based. null — nothing usable.
+    /// over a suffix reading — where it is looked for, resolve says (the prompt's
+    /// folder; by default the working one). Lines and columns come back 0-based.
+    /// null — nothing usable.
     /// </summary>
-    internal static (string Path, int Line, int Column)? ParseLocation(string text)
+    internal static (string Path, int Line, int Column)? ParseLocation(string text, Func<string, string>? resolve = null)
     {
         text = text.Trim();
         if (text.Length == 0) return null;
-        if (File.Exists(text) || Directory.Exists(text)) return (text, 0, -1);
+        string asTyped = resolve == null ? text : resolve(text);
+        if (File.Exists(asTyped) || Directory.Exists(asTyped)) return (text, 0, -1);
         if (text.Length > 1 && text[^1] == ':') text = text[..^1]; // "file:12:5: error…"
         var parts = text.Split(':');
         // Trailing numeric fields; a Windows drive "C:" stays part of the path.
         int numeric = 0;
-        for (int i = parts.Length - 1; i > 0 && numeric < 2 && int.TryParse(parts[i], out _); i--) numeric++;
+        for (int i = parts.Length - 1; i > 0 && numeric < 2 && TryNumber(parts[i], out _); i--) numeric++;
         if (numeric == 0) return (text, 0, -1);
         string path = string.Join(':', parts[..^numeric]);
-        int line = Math.Max(1, int.Parse(parts[^numeric])) - 1;
-        int col = numeric == 2 ? Math.Max(1, int.Parse(parts[^1])) - 1 : -1;
-        return (path, line, col);
+        TryNumber(parts[^numeric], out int line);
+        TryNumber(parts[^1], out int col);
+        return (path, Math.Max(1, line) - 1, numeric == 2 ? Math.Max(1, col) - 1 : -1);
+    }
+
+    /// <summary>A line or column number as typed; digits past the int range mean "as far as it goes".</summary>
+    private static bool TryNumber(string s, out int n)
+    {
+        if (int.TryParse(s, out n)) return true;
+        n = int.MaxValue;
+        return s.Length > 0 && s.All(char.IsAsciiDigit);
     }
 
     /// <summary>Ctrl+L: a line number jumps in the open file; a path (with :line) opens it there.</summary>
@@ -105,7 +116,7 @@ internal sealed partial class App
         string raw = _pathInput.ToString().Trim();
         _mode = UiMode.Normal;
         if (raw.Length == 0) { _status = "Go to cancelled."; return; }
-        if (int.TryParse(raw, out int lineNo))
+        if (TryNumber(raw, out int lineNo))
         {
             if (!_editor.HasFile) { _status = "Open a file first, or type a path."; return; }
             _focus = Focus.Editor;
@@ -113,7 +124,7 @@ internal sealed partial class App
             _status = $"Line {_editor.Cy + 1} of {_editor.LineCount}.";
             return;
         }
-        if (ParseLocation(raw) is not { } loc) return;
+        if (ParseLocation(raw, ResolveInputPath) is not { } loc) return;
         string path = ResolveInputPath(loc.Path);
         if (!File.Exists(path))
         {
@@ -135,7 +146,7 @@ internal sealed partial class App
         _focus = Focus.Tree;
         if (raw.Length == 0) { _status = "Adding a folder cancelled."; return; }
 
-        var loc = ParseLocation(raw) ?? (raw, 0, -1);
+        var loc = ParseLocation(raw, ResolveInputPath) ?? (raw, 0, -1);
         string p = ResolveInputPath(loc.Path);
         if (File.Exists(p))
         {

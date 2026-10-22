@@ -49,6 +49,12 @@ public sealed class TextEditor
     /// <summary>The disk version the buffer was loaded from or last saved as (null — no file on disk).</summary>
     public (DateTime WriteUtc, long Length, long Ino, long ChangeNs)? DiskStamp { get; private set; }
 
+    // The disk version a reload could not read (the file turned binary, say), and the one CheckDisk saw last.
+    private (DateTime, long, long, long)? _unreadable, _lastSeen;
+
+    /// <summary>The file on disk is the version a reload already failed to read: trying again is no use.</summary>
+    public bool Unreadable => _unreadable != null && _unreadable == _lastSeen;
+
     /// <summary>The file changed on disk while this buffer had unsaved edits (they are kept).</summary>
     public bool ChangedOnDisk { get; set; }
 
@@ -271,6 +277,7 @@ public sealed class TextEditor
     {
         if (FilePath == null) return DiskState.Same;
         var stamp = TextFile.Stamp(FilePath);
+        _lastSeen = stamp;
         if (stamp == null) return DiskState.Missing;
         if (stamp == DiskStamp) return DiskState.Same;
         // Only the inode or its change time moved: a rewrite that kept the time and the size, or
@@ -303,7 +310,15 @@ public sealed class TextEditor
     {
         if (FilePath == null) return;
         var stamp = TextFile.Stamp(FilePath); // before reading, as in Open
-        var (lines, format) = TextFile.Read(FilePath);
+        List<string> lines;
+        TextFormat format;
+        try { (lines, format) = TextFile.Read(FilePath); }
+        catch
+        {
+            _unreadable = stamp;
+            throw;
+        }
+        _unreadable = null;
         int pre = 0;
         while (pre < lines.Count && pre < _lines.Count && lines[pre] == _lines[pre]) pre++;
         int suf = 0;
@@ -907,8 +922,10 @@ public sealed class TextEditor
         int y = Math.Clamp(line, 0, _lines.Count - 1);
         string s = _lines[y];
         // A scrolled view starts with the ‹ marker: the text begins after it,
-        // and a character cut by that edge is not on screen.
+        // and a character cut by that edge is not on screen. The last column is
+        // the › marker's: a click there lands on the character before it.
         int first = ScrollX > 0 ? ScrollX + 1 : 0;
+        if (ViewWidth > 0) cellCol = Math.Min(cellCol, ScrollX + CursorRightCol);
         int i = Cells.FloorBoundary(s, Cells.IndexAt(s, Math.Max(cellCol, first)));
         if (i < s.Length && Cells.ColumnOf(s, i) < first) i = Cells.NextBoundary(s, i);
         SetCursor(y, i);

@@ -130,13 +130,16 @@ internal static class FileOps
         }
     }
 
-    /// <summary>dir/name, or the first free "name 2", "name 3"… (the number goes before a file's extension).</summary>
-    internal static string FreeName(string dir, string name, bool isDir)
+    /// <summary>
+    /// dir/name, or the first free "name 2", "name 3"… (the number goes before a file's extension);
+    /// alsoTaken — names in use though nothing is on disk there.
+    /// </summary>
+    internal static string FreeName(string dir, string name, bool isDir, Func<string, bool>? alsoTaken = null)
     {
         int dot = isDir ? -1 : name.LastIndexOf('.');
         string stem = dot > 0 ? name[..dot] : name, ext = dot > 0 ? name[dot..] : "";
         string path = Path.Combine(dir, name);
-        for (int n = 2; Path.Exists(path); n++) path = Path.Combine(dir, $"{stem} {n}{ext}");
+        for (int n = 2; Path.Exists(path) || alsoTaken?.Invoke(path) == true; n++) path = Path.Combine(dir, $"{stem} {n}{ext}");
         return path;
     }
 }
