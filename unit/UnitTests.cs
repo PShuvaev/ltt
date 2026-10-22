@@ -220,6 +220,45 @@ internal static class UnitTests
             Check(string.Concat(tt.Select(t => tricky.Substring(t.Start, t.Length))) == tricky,
                 $"highlight: tokenization terminates and tiles \"{tricky}\"");
         }
+
+        // JavaScript's regular expressions and `…` strings over lines (Textadept's lexer tests); Go's raw strings.
+        var js = Syntax.For("x.js");
+        var st = LineState.Code;
+        const string regex = "const re = /\\/*$/g; let x = 1;";
+        var rt = Highlighter.Tokenize(regex, js, ref st);
+        Check(st == LineState.Code && rt.Any(t => t.Kind == TokenKind.Str && regex.Substring(t.Start, t.Length) == "/\\/*$/g")
+              && rt.Any(t => t.Kind == TokenKind.Keyword && regex.Substring(t.Start, t.Length) == "let"),
+            "highlight: a JavaScript regular expression is a string, and its /* opens no comment");
+        st = LineState.Code;
+        Check(Highlighter.Tokenize("let a = b / c, d = (e) / f / g[0] / 2;", js, ref st).All(t => t.Kind != TokenKind.Str)
+              && st == LineState.Code,
+            "highlight: a slash after a name, a number or a bracket divides");
+        st = LineState.Code;
+        Highlighter.Tokenize("const help = `", js, ref st);
+        var inside = Highlighter.Tokenize("usage: lint src/*.js", js, ref st);
+        var after = Highlighter.Tokenize("`; let y;", js, ref st);
+        Check(inside.All(t => t.Kind == TokenKind.Str) && st == LineState.Code && after[0].Kind == TokenKind.Str
+              && after.Any(t => t.Kind == TokenKind.Keyword),
+            "highlight: a JavaScript template string runs over lines, and a /* in it opens no comment");
+        st = LineState.Code;
+        Highlighter.Tokenize("s := `C:\\`", Syntax.For("x.go"), ref st);
+        Check(st == LineState.Code, "highlight: a backslash in a Go raw string escapes nothing");
+        bool tilesJs = true, agreesJs = true;
+        foreach (var syntax in new[] { js, Syntax.For("x.go") })
+            for (int n = 0; n < 2000; n++)
+            {
+                var chars = new char[rnd.Next(0, 24)];
+                for (int i = 0; i < chars.Length; i++) chars[i] = alphabet[rnd.Next(alphabet.Length)];
+                string line = new(chars);
+                var start = (LineState)rnd.Next(3);
+                var s1 = start;
+                var t = Highlighter.Tokenize(line, syntax, ref s1);
+                int pos = 0;
+                foreach (var tok in t) { tilesJs &= tok.Start == pos; pos += tok.Length; }
+                tilesJs &= pos == line.Length;
+                agreesJs &= s1 == Highlighter.EndState(line, syntax, start);
+            }
+        Check(tilesJs && agreesJs, "highlight fuzz: JavaScript and Go tokens tile the line; the fast state scan agrees");
     }
 
     private static void TestInput()
@@ -304,6 +343,20 @@ internal static class UnitTests
               && U("55296") is not { KeyChar: >= '\uD800' and <= '\uDFFF' },
             "input: C1 controls and lone surrogates are never typed into the text");
 
+        // Terminal replies and keys of other terminals (tvision's and turbo's terminal tests).
+        Check(Bytes(0x1B, (byte)'[', (byte)'?', (byte)'1', (byte)';', (byte)'2', (byte)'c', (byte)'x') is [KeyInput { Key.KeyChar: 'x' }]
+              && Bytes(0x1B, (byte)'[', (byte)'>', (byte)'0', (byte)';', (byte)'2', (byte)'7', (byte)'6', (byte)';', (byte)'0', (byte)'c') is [],
+            "input: device-attribute replies are no keys");
+        Check(Bytes(0x1B, (byte)'O', 0x1B, (byte)'[', (byte)'B') is [KeyInput { Key.Key: ConsoleKey.DownArrow }]
+              && Bytes(0x1B, (byte)'O', 0x0D) is [KeyInput { Key.Key: ConsoleKey.Enter }],
+            "input: a key that cuts an SS3 sequence short still counts");
+        Check(Bytes(0x1B, 0x0D) is [KeyInput { Key: { Key: ConsoleKey.Enter } altEnter }] && altEnter.Modifiers.HasFlag(ConsoleModifiers.Alt)
+              && Bytes(0x1B, 0x09) is [KeyInput { Key: { Key: ConsoleKey.Tab } altTab }] && altTab.Modifiers.HasFlag(ConsoleModifiers.Alt),
+            "input: Esc + CR and Esc + Tab are Alt+Enter and Alt+Tab");
+        Check(RawTerminalInput.ParseCsi("27;5;8", '~') is KeyInput { Key: { Key: ConsoleKey.Backspace } cb }
+              && cb.Modifiers.HasFlag(ConsoleModifiers.Control) && U("8;5") is { Key: ConsoleKey.Backspace },
+            "input: Ctrl+Backspace reported with code 8 is Ctrl+Backspace");
+
         Check(App.SearchJumpDelta(new ConsoleKeyInfo((char)7, ConsoleKey.G, false, false, true)) == +1
               && App.SearchJumpDelta(new ConsoleKeyInfo((char)7, ConsoleKey.G, true, false, true)) == -1
               && App.SearchJumpDelta(new ConsoleKeyInfo('g', ConsoleKey.G, false, false, false)) == 0,
@@ -329,6 +382,12 @@ internal static class UnitTests
         string flags = "ab" + string.Concat(Enumerable.Repeat("🇺🇸", 20));
         Check(Enumerable.Range(2, flags.Length - 2).All(i => (Cells.FloorBoundary(flags, i) - 2) % 4 == 0),
             "cells: a long run of flags is never split between two flags' letters");
+        Check(Cells.CeilBoundary("cafe\u0301", 4) == 5 && Cells.CeilBoundary("cafe\u0301", 3) == 3
+              && Cells.CeilBoundary("👍🏽x", 2) == 4 && Cells.CeilBoundary("ab", 2) == 2,
+            "cells: a place inside a character moves to its end");
+        Check(Cells.CharCount("a👀b") == 3 && Cells.CharCount("e\u0301") == 1 && Cells.CharCount("👍🏽") == 1
+              && Cells.CharCount("") == 0 && Cells.CharCount(new string('x', 1000) + "🇺🇸y") == 1002,
+            "cells: characters are counted as the cursor steps over them");
     }
 
     private static void TestScreen()
@@ -607,6 +666,30 @@ internal static class UnitTests
         Check(sel.LineText(0) == " line here" && sel.Cy == 0 && sel.Cx == 0, "select: Backspace deletes a multi-line selection");
         sel.ParagraphDown();
         Check(sel.Cy == 2, "nav: Option+↓ — to the next paragraph start");
+
+        // Search hits follow the lines edits move (Ox's document_searching).
+        var follow = Open(Put(dir, "follow.txt", "x\nneedle one\nneedle two\nneedle three\n"));
+        long mark = follow.LineShifts;
+        follow.DocHome();
+        follow.InsertNewline(); // a line above every one
+        Check(follow.FollowLine(2, mark) == 3 && follow.FollowLine(0, mark) == 1, "follow: lines below an inserted one move down");
+        long mark2 = follow.LineShifts;
+        follow.SetCursor(2, 0);
+        follow.SetAnchorHere();
+        follow.SetCursor(3, 0);
+        follow.Backspace(); // "needle one" and its line break go
+        Check(follow.FollowLine(3, mark2) == 2 && follow.FollowLine(2, mark2) == 2 && follow.LineText(2) == "needle two",
+            "follow: a deleted line becomes the one that took its place");
+        long mark3 = follow.LineShifts;
+        follow.SetCursor(2, 0);
+        follow.InsertNewline();
+        Check(follow.FollowLine(2, mark3) == 3 && follow.LineText(3) == "needle two",
+            "follow: Enter at a line's start takes the line down with it");
+        var join = Open(Put(dir, "join.txt", "cafe\n\u0301 noir\n"));
+        join.SetCursor(1, 0);
+        join.Backspace();
+        Check(join.LineText(0) == "cafe\u0301 noir" && join.Cx == 5,
+            "editing: a join that makes one character of two puts the cursor after it");
     }
 
     private static void TestUndo()
@@ -1578,5 +1661,29 @@ internal static class UnitTests
         Check(new TextFormat(TextEncoding.Utf8, false, "\n").Describe() == ""
               && new TextFormat(TextEncoding.Latin1, false, "\r\n").Describe().Contains("CRLF"),
             "format: plain UTF-8 + LF needs no note; others are described");
+
+        Check(App.NormalizeSearchSeed("a" + string.Concat(Enumerable.Repeat("👀", 130))) == "a" + string.Concat(Enumerable.Repeat("👀", 119))
+              && App.NormalizeSearchSeed(new string('w', 150)) == new string('w', 120),
+            "search seed: at most 120 characters, never half of one");
+        string comp = TempDir("complete");
+        for (int i = 0; i < 50; i++) Put(comp, $"abc{i:00}.txt", "x");
+        Put(comp, "abd.txt", "d");
+        string sep = Path.DirectorySeparatorChar.ToString();
+        var (shown, _) = PathCompletion.Compute(comp + sep + "a", comp, out string common);
+        Check(shown.Count == 50 && common == comp + sep + "ab", "complete: Tab completes what every match shares, the 50 shown or not");
+        if (!OperatingSystem.IsWindows())
+        {
+            string links = TempDir("links");
+            Put(links, "real/shared/t.txt", "data");
+            Directory.CreateDirectory(Path.Combine(links, "real", "v2"));
+            File.CreateSymbolicLink(Path.Combine(links, "real", "v2", "link.txt"), "../shared/t.txt");
+            File.CreateSymbolicLink(Path.Combine(links, "real", "v2", "gone.txt"), "../shared/none.txt");
+            Directory.CreateSymbolicLink(Path.Combine(links, "proj"), Path.Combine(links, "real", "v2"));
+            string shared = Paths.Real(Path.Combine(links, "real", "shared"));
+            Check(Paths.Final(Path.Combine(links, "proj", "link.txt")) == Path.Combine(shared, "t.txt")
+                  && Paths.Final(Path.Combine(links, "proj", "gone.txt")) == Path.Combine(shared, "none.txt")
+                  && Paths.Final(Path.Combine(links, "real", "shared", "t.txt")) == Path.Combine(links, "real", "shared", "t.txt"),
+                "paths: a link's ../ counts from the folder it really is in (vis's text-test.c), a dangling one's too");
+        }
     }
 }

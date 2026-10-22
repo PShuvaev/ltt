@@ -463,9 +463,6 @@ def test_save_keeps_extended_attributes(ltt, ws):
     assert _xattr(p, "user.ltt-test") == b"kept"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a relative link inside a folder reached through a symlink is followed "
-                                       "by the text of its path, not on disk: the file is 'not found', and with "
-                                       "another file at the spelled-out place ltt shows one file and saves the other")
 @pytest.mark.parametrize("decoy", [False, True], ids=["plain", "decoy"])
 def test_a_relative_link_inside_a_linked_folder_saves_its_real_target(ltt, ws, decoy):  # vis's text-test.c
     ws.write("real/shared/t.txt", "data\n")
@@ -482,8 +479,6 @@ def test_a_relative_link_inside_a_linked_folder_saves_its_real_target(ltt, ws, d
     assert not decoy or ws.read("shared/t.txt") == "decoy\n"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a file another program holds under flock(LOCK_EX) does not open "
-                                       "('cannot access the file'), and a change made under the lock is never read")
 def test_a_file_under_another_programs_lock_opens_and_reloads(ltt, ws):  # vis never locks either
     p = ws.write("proj/locked.txt", "locked\n")
     with open(p, "rb+") as f:
@@ -504,31 +499,29 @@ def _acl(path):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="ACLs set by chmod +a and BSD flags: macOS")
-@pytest.mark.xfail(strict=True, reason="BUG: a save drops the file's ACL and its BSD flags (hidden): the file "
-                                       "that replaces it gets only the mode, the owner and the extended attributes")
 def test_save_keeps_the_acl_and_the_flags(ltt, ws):  # vis's text-io.c preserve_acl
     p = ws.write("a.txt", "hello\n")
     subprocess.run(["/bin/chmod", "+a", "everyone allow read", p], check=True)
     os.chflags(p, stat.UF_HIDDEN)
+    acl = _acl(p)
     app = ltt(p)
     app.type("X")
     save(app, "a.txt")
     assert ws.read("a.txt") == "Xhello\n"
-    assert _acl(p) == ["everyone allow read"] and os.stat(p).st_flags & stat.UF_HIDDEN
+    assert acl and _acl(p) == acl and os.stat(p).st_flags & stat.UF_HIDDEN
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="ACLs set by chmod +a: macOS")
-@pytest.mark.xfail(strict=True, reason="BUG: a file whose ACL denies deleting it cannot be replaced, and the save "
-                                       "fails with 'Access denied' instead of writing the file in place")
 def test_save_of_a_file_that_may_not_be_deleted_writes_it_in_place(ltt, ws):  # vis's text-io.c save methods
     p = ws.write("a.txt", "hello\n")
     subprocess.run(["/bin/chmod", "+a", "everyone deny delete", p], check=True)
+    acl = _acl(p)
     try:
         app = ltt(p)
         app.type("X")
         app.press("ctrl+s")
         s = app.wait_status_re("Saved|Save error")
         assert s.status.startswith("Saved: a.txt") and ws.read("a.txt") == "Xhello\n"
-        assert _acl(p) == ["everyone deny delete"]
+        assert acl and _acl(p) == acl and not [n for n in os.listdir(ws.root) if n.endswith(".tmp")]
     finally:
         subprocess.run(["/bin/chmod", "-N", p], check=True)

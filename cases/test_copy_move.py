@@ -1186,8 +1186,6 @@ def _mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a copied folder gets the default mode (0755), not its own: a private "
-                                       "0700 folder is opened to everyone")
 @pytest.mark.parametrize("mode", [0o700, 0o750, 0o555], ids=["0700", "0750", "0555"])
 def test_a_copied_folder_keeps_its_mode(ltt, ws, mode):  # Emacs's files-tests: copy-directory
     ws.write("proj/a/private/secret.txt", "s")
@@ -1209,8 +1207,6 @@ def test_a_copied_folder_keeps_its_mode(ltt, ws, mode):  # Emacs's files-tests: 
                 os.chmod(ws.path(p), 0o755)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder moved to another disk gets the default mode (0755), "
-                                       "not its own")
 def test_a_folder_moved_to_another_disk_keeps_its_mode(ws, other_disk, ltt):  # Emacs's files-tests
     ws.write("proj/a/private/secret.txt", "s")
     os.chmod(ws.path("proj/a/private"), 0o700)
@@ -1225,7 +1221,6 @@ def test_a_folder_moved_to_another_disk_keeps_its_mode(ws, other_disk, ltt):  # 
     assert app.quit() == 0
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a link whose target is not UTF-8 is copied with U+FFFD in its target")
 def test_a_link_whose_target_is_not_utf8_is_copied_byte_for_byte(ltt, ws):  # Emacs's files-tests: odd names
     ws.mkdir("proj/a")
     ws.mkdir("proj/b")

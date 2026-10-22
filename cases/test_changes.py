@@ -823,8 +823,6 @@ def test_a_symlink_in_a_repository_marks_only_the_lines_that_changed(ltt, ws):  
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: in a git worktree (its .git is a file) the marks stay after an outside "
-                                       "commit: the folder that file points to is never looked at")
 def test_git_marks_clear_after_a_commit_in_a_worktree(ltt, ws):  # Textadept's and Emacs's vc tests: worktrees
     ws.repo("main", {"a.txt": "one\n"})
     ws.git("worktree", "add", "-q", ws.path("wt"), "-b", "side", cwd="main")
@@ -835,8 +833,6 @@ def test_git_marks_clear_after_a_commit_in_a_worktree(ltt, ws):  # Textadept's a
     row(app, "a.txt", "Gray", timeout=5)
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: outside git a file is marked by its modification time alone: one "
-                                       "dated in the future is yellow from the start")
 def test_plain_file_dated_in_the_future_is_not_marked(ltt, ws):  # Emacs's files-tests: times from elsewhere
     ws.write("p/a.txt", "a\n")
     ws.write("p/future.txt", "f\n", mtime=time.time() + 3600)
@@ -846,8 +842,6 @@ def test_plain_file_dated_in_the_future_is_not_marked(ltt, ws):  # Emacs's files
     assert s.tree_row("future.txt").fg == "Gray"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: outside git a file changed after the start but dated back "
-                                       "(cp -p, rsync -t, tar x) is not marked")
 def test_plain_file_changed_and_dated_back_is_yellow(ltt, ws):  # Emacs's files-tests: times from elsewhere
     ws.write("p/a.txt", "one\n")
     ws.write("p/b.txt", "two\n")

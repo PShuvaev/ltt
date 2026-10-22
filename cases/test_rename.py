@@ -362,8 +362,6 @@ def test_ctrl_c_cancels(ltt, ws):
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the rename prompt trims the name it was given: Enter on ' notes.txt ' "
-                                       "unchanged renames the file to 'notes.txt'")
 @pytest.mark.parametrize("typed, after", [(None, " notes.txt "), ("2.txt ", " notes2.txt ")],
                          ids=["unchanged", "edited"])
 def test_spaces_the_name_has_around_it_stay(ltt, ws, typed, after):  # an idea from Emacs's file tests

@@ -371,8 +371,6 @@ def test_long_prefill_keeps_the_typed_name_in_view(ltt, ws):
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+N on an existing file that cannot be opened (binary) says "
-                                       "'The file already existed — opened it' and opens no tab")
 def test_existing_file_that_cannot_be_opened_says_why(ltt, ws):  # vis-test and Textadept: binary files
     ws.write("proj/bin.dat", b"\x00\x01")
     app = ltt(ws.path("proj"))
@@ -381,8 +379,6 @@ def test_existing_file_that_cannot_be_opened_says_why(ltt, ws):  # vis-test and 
     assert s.tabs == []
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a NUL pasted into a path prompt ends in 'Internal error "
-                                       "(ArgumentException: Null character in path)'")
 @pytest.mark.parametrize("key, label", [("ctrl+n", " New file: "), ("ctrl+l", " Go to: ")])
 def test_a_nul_pasted_into_a_path_prompt_is_dropped(ltt, ws, key, label):  # Emacs's fileio-tests/null-character
     ws.mkdir("proj")

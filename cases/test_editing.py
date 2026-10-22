@@ -349,8 +349,6 @@ def test_word_delete_never_splits_an_emoji(ltt, ws):
 # ---------------------------------------------------------------- the cursor after an edit, tabs after a rename
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: an edit that joins a mark to the character before it leaves the "
-                                       "cursor between the two, inside one character: what is typed next splits it")
 @pytest.mark.parametrize("text, keys, want", [
     ("cafe\n\u0301 noir\n", ["down", "backspace"], "cafe\u0301| noir\n"),
     ("cafe\n\u0301 noir\n", ["end", "delete"], "cafe\u0301| noir\n"),
@@ -366,8 +364,6 @@ def test_the_cursor_never_stops_inside_a_character_after_an_edit(ltt, ws, text, 
     assert mark_cursor(app, ws) == want
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a file renamed to a kind indented with tabs (Makefile, *.go) keeps "
-                                       "inserting spaces for Tab: the choice is made only when a file opens")
 @pytest.mark.parametrize("name", ["Makefile", "main.go"])
 def test_tab_inserts_a_tab_after_a_rename_to_a_tab_indented_kind(ltt, ws, name):
     # Textadept's file_io_test.lua 'buffer.save_as should update the lexer'
@@ -378,8 +374,6 @@ def test_tab_inserts_a_tab_after_a_rename_to_a_tab_indented_kind(ltt, ws, name):
     assert save(app, ws, name) == "all:\n\t"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: lines of spaces alone count as indented with spaces, so they "
-                                       "outvote the tab-indented lines and Tab inserts spaces")
 def test_lines_of_spaces_alone_do_not_outvote_tab_indentation(ltt, ws):
     # Textadept's file_io_test.lua 'io.open_file should detect and switch to tabs'
     app = open_text(ltt, ws, "f {\n\tone\n    \n\ttwo\n    \n    \n}\n", name="a.c")

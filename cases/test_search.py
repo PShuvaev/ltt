@@ -841,8 +841,6 @@ def test_a_match_after_many_of_the_first_letter_is_found(ltt, ws):  # Kakoune's 
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the two-character threshold counts UTF-16 units: one emoji "
-                                       "starts a search")
 def test_one_emoji_is_one_character_short_of_a_search(ltt, ws):  # Ox's kaolinite char_mapping
     ws.write("proj/a.txt", "\U0001F440 here\n")
     app = ltt(ws.path("proj"))

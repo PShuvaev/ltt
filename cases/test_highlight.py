@@ -316,8 +316,6 @@ def test_yaml_hash_inside_a_value_is_not_a_comment(ltt, ws):  # Kakoune's yaml.k
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: '/*' inside a JS regex literal or a multi-line template literal "
-                                       "opens a block comment that runs to the end of the file")
 @pytest.mark.parametrize("text, line", [
     ("const re = /\\/*$/;\nlet x = 1;\n", 2),
     ("const help = `\nusage: lint src/*.js\n`;\nlet x = 1;\n", 4),
@@ -325,3 +323,19 @@ def test_yaml_hash_inside_a_value_is_not_a_comment(ltt, ws):  # Kakoune's yaml.k
 def test_slash_star_in_a_js_regex_or_template_opens_no_comment(ltt, ws, text, line):  # Textadept's lexer tests
     app = open_text(ltt, ws, text, name="a.js")
     assert fg(app.snap(), "let", line=line) == "Cyan"
+
+
+def test_a_division_or_a_closing_tag_is_no_regex(ltt, ws):  # the other side of the regex test
+    text = "let a = b / c / d;\nconst el = <a>x</a>, w = <b>y</b>;\nlet z = 1; // c\n"
+    app = open_text(ltt, ws, text, name="a.jsx")
+    s = app.snap()
+    assert fg(s, "/ c /", line=1) == "Gray" and fg(s, "</a>, w = <b>y</b>", line=2) == "Gray"
+    assert fg(s, "let", line=3) == "Cyan" and fg(s, "// c", line=3) == "DarkGreen"
+
+
+def test_a_go_raw_string_runs_over_lines_and_takes_no_escapes(ltt, ws):
+    text = 'var p = `C:\\`\nvar q = `one\n/* not a comment\n`\nvar r int\n'
+    app = open_text(ltt, ws, text, name="a.go")
+    s = app.snap()
+    assert fg(s, "`C:\\`", line=1) == "Yellow" and fg(s, "/* not a comment", line=3) == "Yellow"
+    assert fg(s, "var", line=5) == "Cyan"

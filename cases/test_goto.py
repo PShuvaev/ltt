@@ -579,8 +579,6 @@ def test_a_location_with_a_colon_after_it_opens_there(ltt, ws, suffix, pos):  # 
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Tab completes the prefix the first 50 matches share: with abc00…abc49 "
-                                       "and abd.txt it completes 'a' to 'abc', past abd.txt")
 def test_tab_completes_only_what_every_match_shares(ltt, ws):  # Textadept's ui_test.lua (completion lists)
     for i in range(50):
         ws.write(f"proj/abc{i:02d}.txt", "x")
@@ -592,8 +590,6 @@ def test_tab_completes_only_what_every_match_shares(ltt, ws):  # Textadept's ui_
     assert prompt_line(s) == " Go to: ab"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: completion compares names unit by unit: a name stored decomposed "
-                                       "(e and a combining accent, as macOS often keeps é) is not offered for é")
 def test_completion_offers_a_decomposed_name_for_a_composed_one(ltt, ws):  # Textadept's lfs_ext tests
     ws.write("proj/" + unicodedata.normalize("NFD", "café.txt"), "c")
     app = ltt(ws.write("proj/zz.txt", "z"))

@@ -534,8 +534,6 @@ def test_search_keys_work_with_the_kitty_keyboard(ltt, ws):
 # ---------------------------------------------------------------- hits after edits
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+G goes to the line a hit had when the search ran: after lines "
-                                       "are added or deleted above it, it lands on another line")
 @pytest.mark.parametrize("edit, line", [("added", 4), ("deleted", 2)])
 def test_ctrl_g_after_an_edit_goes_where_the_hit_is_now(ltt, ws, edit, line):  # Ox's kaolinite document_searching
     app, s = search_file(ltt, ws, "x\nneedle one\nneedle two\nneedle three\n", 3)
@@ -549,8 +547,6 @@ def test_ctrl_g_after_an_edit_goes_where_the_hit_is_now(ltt, ws, edit, line):  #
     assert s.status.startswith(f"Hit 2/3: a.txt:{line} ·")
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: Ctrl+G to a hit whose file is gone says 'Hit 2/2' and keeps the "
-                                       "last tab, without an error")
 def test_ctrl_g_to_a_hit_whose_file_is_gone_reports_an_error(ltt, ws):  # Textadept's find_test.lua goto_file_found
     ws.write("proj/a.txt", "needle one\n")
     ws.write("proj/b.txt", "x\nneedle two\n")
@@ -565,8 +561,6 @@ def test_ctrl_g_to_a_hit_whose_file_is_gone_reports_an_error(ltt, ws):  # Textad
     assert s.status.startswith("Error: File not found: ") and s.tab_names == ["a.txt"]
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: the seed is cut at 120 UTF-16 units, inside an emoji: the query "
-                                       "ends in U+FFFD and holds 59 emoji, not 119")
 def test_a_selection_seed_is_cut_at_120_characters_of_any_kind(ltt, ws):  # Ox's kaolinite char_mapping
     ws.write("proj/a.txt", "a" + "\U0001F440" * 130 + "\n")
     app = ltt(ws.path("proj/a.txt"), cols=300)

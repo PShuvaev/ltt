@@ -386,8 +386,6 @@ def test_a_tab_hidden_while_the_terminal_shrank_shows_its_cursor_line(ltt, ws):
 # ---------------------------------------------------------------- the cursor at the markers, counts of characters
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a wide character under the cursor in the last cell before the › "
-                                       "marker does not fit and is drawn blank: the cursor sits on an empty cell")
 @pytest.mark.parametrize("how", ["left_from_the_end", "right_from_the_start"])
 def test_the_wide_character_under_the_cursor_at_the_right_edge_is_shown(ltt, ws, how):  # Ox's kaolinite widths
     if how == "left_from_the_end":
@@ -401,8 +399,6 @@ def test_the_wide_character_under_the_cursor_at_the_right_edge_is_shown(ltt, ws,
     assert s.cell(x, y).ch in ("日", "本", "語") and s.cell(x + 1, y).ch != "›"
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: after a sideways wheel the cursor is drawn on the ‹ or › marker "
-                                       "that covers its column")
 @pytest.mark.parametrize("side", ["left", "right"])
 def test_a_cursor_under_a_marker_after_a_sideways_wheel_is_hidden(ltt, ws, side):  # Ox's document_scrolling
     app = open_text(ltt, ws, LONG + "\n")
@@ -418,8 +414,6 @@ def test_a_cursor_under_a_marker_after_a_sideways_wheel_is_hidden(ltt, ws, side)
     assert s.cell(marker, y).ch in "‹›" and s.cursor_hidden
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: counts of characters are UTF-16 units: one emoji counts 2 in "
-                                       "'selected:', in the copy, paste and select-all messages")
 def test_an_emoji_counts_as_one_character(ltt, ws):  # Ox's kaolinite char_mapping
     app = open_text(ltt, ws, "a\U0001F440b\n")
     app.press("right")

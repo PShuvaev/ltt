@@ -849,8 +849,6 @@ def test_writes_in_a_folded_folder_leave_the_status_alone(ltt, ws):
 
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a clean tab whose file could not be read for a moment (chmod 0, then "
-                                       "back) keeps its ⚠ for good, though the file is as it was")
 def test_a_file_readable_again_clears_the_changed_mark(ltt, ws):  # Textadept's file_io_test.lua: reloads
     p = ws.write("proj/a.txt", "hello\n")
     app = ltt(p, cols=W)
@@ -863,8 +861,6 @@ def test_a_file_readable_again_clears_the_changed_mark(ltt, ws):  # Textadept's 
     assert s.editor_lines[0] == "hello" and not s.tabs[0].dirty
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder moved from one root to another leaves its open tab "
-                                       "behind as gone (✗); a file moved so is followed")
 def test_tab_follows_its_folder_moved_to_another_root(ltt, ws):  # Emacs's files-tests: renaming folders
     ws.write("one/docs/x.txt", "x\n")
     ws.mkdir("two")
@@ -876,8 +872,6 @@ def test_tab_follows_its_folder_moved_to_another_root(ltt, ws):  # Emacs's files
     assert s.tab_names == ["x.txt"] and not s.tabs[0].missing
 
 
-@pytest.mark.xfail(strict=True, reason="BUG: a folder renamed twice in a row (docs → docs2 → docs3) leaves its "
-                                       "open tab behind as gone (✗); a file renamed so is followed")
 def test_tab_follows_its_folder_renamed_twice_in_a_row(ltt, ws):  # Emacs's files-tests: renaming folders
     ws.write("proj/docs/x.txt", "x\n")
     app = ltt(ws.path("proj"), ws.path("proj/docs/x.txt"), cols=W)
