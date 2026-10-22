@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    The unit tests, compiled together with ltt's own sources so that its
+    internal classes are in reach. LTT_SRC is the ltt checkout: -p:LTT_SRC=PATH
+    or the environment variable, by default ../ltt next to this worktree.
+    The settings follow ltt.csproj.
+  -->
+  <PropertyGroup>
+    <LTT_SRC Condition="'$(LTT_SRC)' == ''">$(MSBuildThisFileDirectory)../../ltt</LTT_SRC>
+    <LttDir>$([System.IO.Path]::GetFullPath($([System.IO.Path]::Combine('$(MSBuildStartupDirectory)', '$(LTT_SRC)'))))</LttDir>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <UseAppHost>false</UseAppHost>
+    <StartupObject>UnitTests</StartupObject> <!-- ltt's own Main is compiled in too -->
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="$(LttDir)/src/**/*.cs" />
+  </ItemGroup>
+
+  <Target Name="CheckLttDir" BeforeTargets="CoreCompile" Condition="!Exists('$(LttDir)/ltt.csproj')">
+    <Error Text="No ltt checkout at $(LttDir): pass -p:LTT_SRC=PATH or set LTT_SRC." />
+  </Target>
+
+</Project>

@@ -21,8 +21,10 @@ import struct
 import termios
 import threading
 import time
+import unicodedata
 
 import pyte
+from wcwidth import wcwidth
 
 from . import keys as K
 from .screen import Cell, Snap, color_name
@@ -33,6 +35,47 @@ TIME_SCALE = float(os.environ.get("LTT_TEST_TIME_SCALE", "1"))
 
 class LttError(AssertionError):
     pass
+
+
+class TerminalScreen(pyte.Screen):
+    """pyte's screen, with two fixes for what a real terminal does (pyte 0.8.2 does not):
+
+    - a zero-width character that is not a combining mark (ZWJ, VS16, U+200B…) joins
+      the cell before it; pyte drops it and the rest of the text that came with it;
+    - a cell that collects a long run of marks is not NFC-normalized again on every
+      mark (quadratic: 40,000 marks took pyte 14 s).
+    """
+
+    def draw(self, data):
+        if data.isascii():
+            return super().draw(data)
+        start = 0
+        for i, ch in enumerate(data):
+            w = wcwidth(ch)
+            if w > 0:
+                continue
+            if start < i:
+                super().draw(data[start:i])
+            if w == 0:
+                self._join(ch)
+            start = i + 1  # w < 0: unprintable, nothing to show
+        if start < len(data):
+            super().draw(data[start:])
+
+    def _join(self, ch):
+        """Put a zero-width character on the cell before the cursor (a wide character's own cell, not its stub)."""
+        x, y = self.cursor.x, self.cursor.y
+        if x == 0:
+            if y == 0:
+                return
+            x, y = self.columns, y - 1
+        line = self.buffer[y]
+        if x >= 2 and line[x - 1].data == "":
+            x -= 1
+        last = line[x - 1]
+        data = last.data + ch
+        line[x - 1] = last._replace(data=unicodedata.normalize("NFC", data) if len(data) <= 16 else data)
+        self.dirty.add(y)
 
 
 def _scaled(t):
@@ -49,7 +92,7 @@ class Ltt:
         self._raw = bytearray()
         self._chunks = []                 # (monotonic time, bytes)
         self._carry = b""                 # tail that may be the start of FRAME_END
-        self._screen = pyte.Screen(cols, rows)
+        self._screen = TerminalScreen(cols, rows)
         self._stream = pyte.ByteStream(self._screen)
         self._snap = None
         self._frames = 0

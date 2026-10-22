@@ -14,10 +14,16 @@ def roots(s):
 
 
 def add(app, text):
-    """Ctrl+O, the text, Enter; returns the frame after it."""
+    """Ctrl+O, the text, Enter; returns the first frame without the prompt.
+
+    A new root starts being watched before the frame is drawn, which can take
+    longer than press() waits for quiet: a background frame drawn just as
+    Enter arrived would pass for the answer.
+    """
     app.press("ctrl+o")
     app.type(text)
-    return app.press("enter")
+    app.press("enter")
+    return app.wait(lambda s: s.mode != "PROMPT", what="the prompt to close")
 
 
 def candidates(s):
