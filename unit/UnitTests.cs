@@ -1014,6 +1014,39 @@ internal static class UnitTests
         Check(tree2.Roots.Count == 2 && !tree2.AddRoot(tmp), "multiroot: two hierarchies, no duplicate roots");
         Check(tree2.RemoveRoot(tree2.Roots[1]) && !tree2.RemoveRoot(tree2.Roots[0]), "multiroot: a root is removed, the last one stays");
 
+        // Ctrl+E's way from file to file: the tree's order, as if every folder were expanded.
+        string walk = TempDir("tree-walk"), other = TempDir("tree-walk-other");
+        PutBytes(walk, "big/y.txt", new byte[2000]);
+        PutBytes(walk, "big/x.txt", new byte[1000]);
+        PutBytes(walk, "quiet/z.txt", new byte[10]);
+        PutBytes(walk, "a.txt", new byte[500]);
+        PutBytes(walk, "b.txt", new byte[100]);
+        string c = PutBytes(other, "c.txt", new byte[1]);
+        string W(string rel) => Path.Combine(walk, rel.Replace('/', Path.DirectorySeparatorChar));
+        var marked = new HashSet<string> { W("big"), W("big/x.txt"), W("a.txt"), W("quiet/z.txt"), c }; // quiet itself is not
+        bool Marked(TreeNode n) => marked.Contains(n.FullPath);
+        var wt = new FileTree(new[] { walk, other });
+        string? Next(string? from, bool back = false) => wt.NextFile(from, back, Marked)?.FullPath;
+        Check(Next(null) == W("big/x.txt") && Next(W("big/x.txt")) == W("a.txt") && Next(W("a.txt")) == c && Next(c) == null,
+            "next changed file: in the tree's order, on into the next root");
+        Check(Next(null, back: true) == c && Next(W("a.txt"), back: true) == W("big/x.txt") && Next(W("big/x.txt"), back: true) == null
+              && Next(W("b.txt"), back: true) == W("a.txt"),
+            "previous changed file: the same order backwards, from any entry");
+        Check(Next(walk) == W("big/x.txt") && Next(W("big")) == W("big/x.txt") && Next(W("quiet")) == W("a.txt")
+              && !wt.Roots[0].Children.First(n => n.Name == "quiet").ChildrenLoaded,
+            "next changed file: from a folder, what it holds first; a folder that holds no change is never read");
+        var nested = new FileTree(new[] { W("big"), walk });
+        Check(nested.NextFile(W("big/x.txt"), false, Marked)?.FullPath == W("a.txt"),
+            "next changed file: a file shown under two roots is not met again");
+        if (!OperatingSystem.IsWindows())
+        {
+            string loop = TempDir("tree-walk-loop");
+            string f = PutBytes(loop, "d/f.txt", new byte[1]);
+            Directory.CreateSymbolicLink(Path.Combine(loop, "d", "up"), loop);
+            Check(new FileTree(loop).NextFile(null, false, _ => true)?.FullPath == f,
+                "next changed file: a symlinked folder is not gone into (it may lead back up)");
+        }
+
         string sep = Path.DirectorySeparatorChar.ToString();
         var (c1, g1) = PathCompletion.Compute(tmp + sep + "zd", tmp);
         Check(c1.Count == 1 && c1[0] == tmp + sep + "zdir" + sep && g1 == "ir" + sep, "complete: fragment completes to the folder with ghost text");
@@ -1194,6 +1227,24 @@ internal static class UnitTests
         var many = Enumerable.Range(0, 10).Select(i => "w" + i).ToArray();
         Check(LineDiff.Marks(many, Enumerable.Range(0, 10).Select(i => "n" + i).ToList(), maxEdits: 3).All(m => m == LineDiff.Modified),
             "line marks: a change too big to diff is marked as a whole");
+
+        // Where Ctrl+E stops: l3 modified, two lines added after l6, l12-l13 gone (marked under l11), l35 modified.
+        var was = Enumerable.Range(1, 60).Select(i => "l" + i).ToArray();
+        var now = was.ToList();
+        now[2] = "L3";
+        now.InsertRange(6, new[] { "new", "new" });
+        now.RemoveRange(13, 2);
+        now[34] = "L35";
+        var w = Open(Put(TempDir("change-stops"), "a.txt", string.Join("\n", now)), height: 10); // no final newline: no empty last line
+        w.SetBaseline(was);
+        var stops = w.ChangeStarts();
+        w.GoToChange(6);
+        bool stayed = w is { Cy: 6, Cx: 0, ScrollY: 0 };
+        w.GoToChange(34);
+        Check(stops.SequenceEqual(new[] { 2, 6, 12, 34 }) && stayed && w is { Cy: 34, Cx: 0, ScrollY: 32 },
+            "change stops: a run of marked lines is one; one in view keeps the view, a far one shows from its start, lines above it");
+        w.SetBaseline(Array.Empty<string>());
+        Check(w.ChangeStarts().SequenceEqual(new[] { 0 }), "change stops: a new file is one change");
 
         string sep = Path.DirectorySeparatorChar.ToString();
         var (head, entries, newDirs) = Changes.Parse("/r",

@@ -61,7 +61,7 @@ Once a bug is fixed its test fails as XPASS — then drop the mark.
 | files changed outside, recovery of unsaved edits | `test_external`, `test_recovery` |
 | search | `test_search`, `test_search_results` |
 | go to, new file and folder, rename, tabs, quitting | `test_goto`, `test_create`, `test_rename`, `test_tabs`, `test_quit` |
-| keyboard protocols and layouts, mouse, change highlighting | `test_keyboard`, `test_mouse`, `test_changes` |
+| keyboard protocols and layouts, mouse, change highlighting and the walk through the changes | `test_keyboard`, `test_mouse`, `test_changes` |
 | speed and big data | `test_perf`, `test_scale` |
 | the harness itself | `test_harness`, `test_smoke` |
 

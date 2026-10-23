@@ -1,5 +1,5 @@
 """Change highlighting: the tree's colours and the editor's gutter marks — against the last commit
-in a git repository, against what was there when ltt started elsewhere."""
+in a git repository, against what was there when ltt started elsewhere — and Ctrl+E's walk through them."""
 import os
 import shutil
 import time
@@ -849,3 +849,182 @@ def test_plain_file_changed_and_dated_back_is_yellow(ltt, ws):  # Emacs's files-
     ws.write("p/a.txt", "changed\n", mtime=time.time() - 3600)
     s = row(app, "a.txt", "Yellow", timeout=5)
     assert s.tree_row("b.txt").fg == "Gray"
+
+
+# ---------------------------------------------------------------- walking through the changes: Ctrl+E, Ctrl+Shift+E
+
+NEXT, PREV = "ctrl+e", "ctrl+shift+e"
+HINT = " · Ctrl+E/Ctrl+Shift+E — next/prev"
+
+
+def lines(n, prefix="l"):
+    return "".join(f"{prefix}{i}\n" for i in range(1, n + 1))
+
+
+def where(s):
+    """The open file, the cursor's line and column (1-based)."""
+    return s.active_tab.name, s.pos[0], s.pos[2]
+
+
+def walk(app, key, times):
+    """Press the key so many times: where each press lands."""
+    return [where(app.press(key)) for _ in range(times)]
+
+
+def test_ctrl_e_walks_the_changes_of_the_open_file_and_ctrl_shift_e_walks_back(ltt, ws):
+    was = [f"l{i}" for i in range(1, 31)]
+    now = list(was)
+    now[2] = "L3"                # line 3 modified
+    now[6:6] = ["new", "new"]    # lines 7-8 added
+    del now[13:15]               # l12, l13 gone: marked under l11, now line 13
+    now[20:22] = ["L21", "L22"]  # lines 21-22 modified
+    ws.repo("r", {"a.txt": "\n".join(was) + "\n"})
+    ws.write("r/a.txt", "\n".join(now) + "\n")
+    app = ltt(ws.path("r/a.txt"), cols=120)
+    wait_marks(app, {3: MODIFIED, 7: ADDED, 8: ADDED, 13: GONE_BELOW, 21: MODIFIED, 22: MODIFIED})
+    assert walk(app, NEXT, 4) == [("a.txt", 3, 1), ("a.txt", 7, 1), ("a.txt", 13, 1), ("a.txt", 21, 1)]
+    s = app.snap()
+    assert s.status == "Change 4/4 in a.txt" + HINT and s.editor_rows[0].number == 1  # all in view: it stays
+    s = app.press(NEXT)
+    assert s.status == "No changes below." and where(s) == ("a.txt", 21, 1)
+    assert walk(app, PREV, 3) == [("a.txt", 13, 1), ("a.txt", 7, 1), ("a.txt", 3, 1)]
+    s = app.press(PREV)
+    assert s.status == "No changes above." and where(s) == ("a.txt", 3, 1)
+
+
+def test_ctrl_shift_e_inside_a_change_goes_to_its_start_ctrl_e_to_the_next_one(ltt, ws):
+    ws.repo("r", {"a.txt": lines(10)})
+    ws.write("r/a.txt", lines(10).replace("l4\nl5\nl6\n", "L4\nL5\nL6\n").replace("l9\n", "L9\n"))
+    app = ltt(ws.path("r/a.txt"), cols=120)
+    wait_marks(app, {4: MODIFIED, 5: MODIFIED, 6: MODIFIED, 9: MODIFIED})
+    app.press("down", "down", "down", "down")  # line 5, inside the first change
+    s = app.press(PREV)
+    assert where(s) == ("a.txt", 4, 1) and s.status == "Change 1/2 in a.txt" + HINT
+    app.press("down")
+    s = app.press(NEXT)
+    assert where(s) == ("a.txt", 9, 1) and s.status == "Change 2/2 in a.txt" + HINT
+
+
+def test_ctrl_e_shows_a_far_change_from_its_start_three_lines_below_the_top(ltt, ws):
+    ws.repo("r", {"a.txt": lines(200), "b.txt": "b\n"})
+    ws.write("r/a.txt", lines(200).replace("l150\n", "L150\nadded\n"))
+    ws.write("r/b.txt", "B\n")
+    app = ltt(ws.path("r/a.txt"))
+    row(app, "b.txt", "Yellow")  # git has answered: the open file has its baseline
+    s = app.press(NEXT)
+    assert where(s) == ("a.txt", 150, 1) and s.editor_rows[0].number == 147
+    assert marks(s) == {150: MODIFIED, 151: MODIFIED}  # one change: a line rewritten into two
+
+
+def test_ctrl_e_goes_on_through_the_changed_files_in_the_trees_order_ctrl_shift_e_comes_back(ltt, ws):
+    # The tree's order: folders first, then files, largest first in each: src (big.txt, small.txt),
+    # docs, then top.txt, new.txt, z.txt.
+    ws.repo("r", {"src/big.txt": lines(20, "b"), "src/small.txt": lines(3, "s"), "docs/guide.txt": "guide\n",
+                  "top.txt": lines(5, "t"), "z.txt": "z\n"})
+    ws.write("r/src/big.txt", lines(20, "b").replace("b2\n", "B2\n").replace("b15\n", "B15\n"))
+    ws.write("r/src/small.txt", "S1\ns2\ns3\n")
+    ws.write("r/top.txt", lines(5, "t").replace("t3\n", "T3\n"))
+    ws.write("r/new.txt", "fresh\nnew\n")
+    app = ltt(ws.path("r"), cols=120)
+    row(app, "new.txt", "Green")  # git has answered
+    assert walk(app, NEXT, 5) == [("big.txt", 2, 1), ("big.txt", 15, 1), ("small.txt", 1, 1), ("top.txt", 3, 1),
+                                  ("new.txt", 1, 1)]
+    s = app.snap()
+    assert s.status == "Change 1/1 in new.txt" + HINT and s.tree_selected.name == "new.txt"  # a new file is one change
+    s = app.press(NEXT)
+    assert s.status == "No changes below." and where(s) == ("new.txt", 1, 1)
+    assert walk(app, PREV, 4) == [("top.txt", 3, 1), ("small.txt", 1, 1), ("big.txt", 15, 1), ("big.txt", 2, 1)]
+    s = app.press(PREV)
+    assert s.status == "No changes above." and where(s) == ("big.txt", 2, 1)
+    assert s.tab_names == ["big.txt", "small.txt", "top.txt", "new.txt"] and not s.tree_row("docs").expanded
+
+
+def test_ctrl_e_in_the_tree_opens_the_changed_file_after_the_selected_entry(ltt, ws):
+    ws.repo("r", {"docs/guide.txt": "guide\n", "a.txt": "a1\na2\n", "b.txt": "b\n", "c.txt": "c\n"})
+    ws.write("r/a.txt", "a1\nA2\n")
+    ws.write("r/c.txt", "C\n")
+    app = ltt(ws.path("r"), cols=120)
+    row(app, "c.txt", "Yellow")
+    select(app, "a.txt")
+    s = app.press(NEXT)  # not a.txt itself: the one after it, past the unchanged b.txt
+    assert where(s) == ("c.txt", 1, 1) and s.mode == "EDITOR"
+    s = app.press("esc", NEXT)  # the selection followed: nothing changed after c.txt
+    assert s.status == "No changes below." and s.mode == "TREE"
+    select(app, "docs")
+    assert where(app.press(NEXT)) == ("a.txt", 2, 1)
+    s = app.press("esc", "home", NEXT)  # from the root: its first changed file
+    assert where(s) == ("a.txt", 2, 1)
+    s = app.press("esc", "end", PREV)  # back from the last entry
+    assert where(s) == ("c.txt", 1, 1)
+
+
+def test_ctrl_e_passes_unchanged_and_ignored_files_by(ltt, ws):
+    ws.repo("r", {"keep/k.txt": "k\n", "a.txt": "a\n", "z.txt": "zz\n"}, ignore="*.log\n")
+    ws.write("r/z.txt", "ZZ\n")
+    ws.write("r/debug.log", "log\n")  # ignored: never a change
+    app = ltt(ws.path("r"), cols=120)
+    row(app, "z.txt", "Yellow")
+    assert where(app.press(NEXT)) == ("z.txt", 1, 1)
+    s = app.press(NEXT)
+    assert s.status == "No changes below." and s.tab_names == ["z.txt"] and not s.tree_row("keep").expanded
+
+
+def test_ctrl_e_with_nothing_changed_says_so(ltt, ws):
+    ws.repo("r", {"a.txt": "a\nb\n"})
+    app = ltt(ws.path("r/a.txt"))
+    s = app.press(NEXT)
+    assert s.status == "No changes below." and where(s) == ("a.txt", 1, 1)
+    s = app.press(PREV)
+    assert s.status == "No changes above." and where(s) == ("a.txt", 1, 1)
+
+
+def test_ctrl_e_stops_at_unsaved_edits_too(ltt, ws):
+    ws.repo("r", {"a.txt": lines(5)})
+    app = ltt(ws.path("r/a.txt"), cols=120)
+    app.press("down", "down")
+    app.type("X")
+    app.press("ctrl+home")
+    s = app.press(NEXT)
+    assert where(s) == ("a.txt", 3, 1) and s.status == "Change 1/1 in a.txt" + HINT
+
+
+def test_ctrl_e_stops_at_a_changed_file_that_does_not_open_and_goes_on_past_it(ltt, ws):
+    ws.repo("r", {"logo.bin": b"\x00\x01png", "a.txt": "a\n"})
+    ws.write("r/logo.bin", b"\x00\x02png!!")
+    ws.write("r/a.txt", "A\n")
+    app = ltt(ws.path("r"), cols=120)
+    row(app, "a.txt", "Yellow")
+    s = app.press(NEXT)
+    assert s.status == "Error: The file looks binary; editing is disabled."
+    assert s.mode == "TREE" and s.tree_selected.name == "logo.bin" and s.tabs == []
+    assert where(app.press(NEXT)) == ("a.txt", 1, 1)
+
+
+def test_ctrl_e_and_ctrl_shift_e_with_the_kitty_keyboard(ltt, ws):
+    ws.repo("r", {"a.txt": lines(6)})
+    ws.write("r/a.txt", lines(6).replace("l2\n", "L2\n").replace("l5\n", "L5\n"))
+    app = ltt(ws.path("r/a.txt"), keyboard="kitty")
+    wait_marks(app, {2: MODIFIED, 5: MODIFIED})
+    assert walk(app, NEXT, 2) == [("a.txt", 2, 1), ("a.txt", 5, 1)]
+    assert walk(app, PREV, 1) == [("a.txt", 2, 1)]
+
+
+def test_plain_ctrl_e_walks_what_changed_since_the_file_was_opened(ltt, ws):
+    ws.write("p/a.txt", "one\ntwo\nthree\nfour\n")
+    app = ltt(ws.path("p/a.txt"), cols=120)
+    ws.write("p/a.txt", "one\nTWO\nthree\nFOUR\n")
+    app.wait_editor(["one", "TWO", "three", "FOUR"])
+    wait_marks(app, {2: MODIFIED, 4: MODIFIED})
+    app.press("ctrl+home")
+    assert walk(app, NEXT, 2) == [("a.txt", 2, 1), ("a.txt", 4, 1)]
+
+
+def test_plain_ctrl_e_opens_a_file_changed_before_it_was_opened_where_no_line_is_marked(ltt, ws):
+    ws.write("p/a.txt", "a\n")
+    ws.write("p/b.txt", "b\n")
+    app = ltt(ws.path("p"), cols=120)
+    ws.write("p/b.txt", "B\n")
+    row(app, "b.txt", "Yellow")
+    s = app.press(NEXT)
+    assert where(s) == ("b.txt", 1, 1) and s.status == "b.txt changed, but none of its lines is marked."
+    assert marks(s) == {}
