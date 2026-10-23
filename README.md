@@ -76,7 +76,13 @@ configure.
 > [The change](https://github.com/PShuvaev/ltt/compare/main...example-ctrl-d) ·
 > [its tests](https://github.com/PShuvaev/ltt/compare/tests...example-ctrl-d-tests)
 
-Run your fork from its clone: `dotnet run --project path/to/ltt -c Release`.
+There is no installer and there are no release binaries, on purpose: ltt is
+meant to stay malleable — source in a clone of your own, reshaped for the way
+you work, or even for a single task. For the same reason the code is kept as
+small as it can be: all of it should fit in the context of even a small model.
+The quick start above only fetches the source and runs it; to make ltt yours,
+clone or fork it, ask your agent for what you need, and run it from there:
+`dotnet run --project path/to/ltt -c Release`.
 
 ## Why a terminal
 
