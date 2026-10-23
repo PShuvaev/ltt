@@ -42,10 +42,10 @@ any folder of text works the same way. Open several folders side by side,
 search them all at once, copy and move files between them; in a git
 repository ignored files are dimmed and left out of search.
 
-👀 **Watch the agent** — new files turn green, changed ones yellow, changed lines get marked;
-your unsaved edits are never overwritten without a question.
+👀 **Watch the agent** — new files turn green, changed ones yellow, changed lines get marked,
+<kbd>Ctrl+E</kbd> walks through them all; your unsaved edits are never overwritten without a question.
 
-![The agent creates, rewrites and renames files; the tree, the tabs and the change marks follow; a conflicting save asks first](https://raw.githubusercontent.com/PShuvaev/ltt/media/watch.gif)
+![The agent creates, rewrites and renames files; the tree, the tabs and the change marks follow; Ctrl+E walks through every change; a conflicting save asks first](https://raw.githubusercontent.com/PShuvaev/ltt/media/watch.gif)
 
 ✏️ **Find and fix** — jump to `file:line`, search every file as you type, fix the line, copy the code back to the agent.
 
