@@ -109,6 +109,28 @@ public sealed class TextEditor
         return line < _marks.Length ? _marks[line] : (byte)0;
     }
 
+    /// <summary>The lines where changes start, top to bottom: a run of marked lines is one change.</summary>
+    public List<int> ChangeStarts()
+    {
+        var starts = new List<int>();
+        for (int i = 0; i < _lines.Count; i++)
+            if (ChangeMark(i) != 0 && (i == 0 || ChangeMark(i - 1) == 0)) starts.Add(i);
+        return starts;
+    }
+
+    /// <summary>
+    /// The cursor to the start of the change at `line` (see ChangeStarts). The view stays while the
+    /// whole change is in it; otherwise it shows the change from its start, a few lines below the top.
+    /// </summary>
+    public void GoToChange(int line)
+    {
+        int end = line;
+        while (end + 1 < _lines.Count && ChangeMark(end + 1) != 0) end++;
+        bool inView = line >= ScrollY && end < ScrollY + ViewHeight;
+        GoToLine(line, 0);
+        if (!inView) ScrollY = Math.Clamp(line - Math.Min(3, ViewHeight / 4), 0, MaxScrollY);
+    }
+
     public bool CanUndo => _undo.Count > 0;
     public bool CanRedo => _redo.Count > 0;
 

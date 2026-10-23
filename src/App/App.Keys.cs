@@ -205,6 +205,8 @@ internal sealed partial class App
             case ConsoleKey.N: OpenPathInput(shift ? PathPurpose.CreateFolder : PathPurpose.CreateFile); return true;
             case ConsoleKey.L: OpenPathInput(PathPurpose.GoTo); return true;
             case ConsoleKey.G: JumpHit(shift ? -1 : +1); return true;
+            // Ctrl+E — the next change, through the open file and on into the next changed one; Ctrl+Shift+E — back.
+            case ConsoleKey.E: JumpChange(shift ? -1 : +1); return true;
             case ConsoleKey.Z when !shift:
                 if (_editor.CanUndo) { _editor.Undo(); _focus = Focus.Editor; _status = "Undone. Ctrl+Y redoes it."; }
                 else _status = "Nothing to undo.";

@@ -143,6 +143,7 @@ waits for vim, and without it the text is simply plain.
 | <kbd>Ctrl+L</kbd> | go to a line, or to `file:line` as compilers and agents print it |
 | <kbd>Ctrl+R</kbd> | rename the selected file/folder or the open file |
 | <kbd>Ctrl+G</kbd> / <kbd>Ctrl+Shift+G</kbd> | next / previous search hit |
+| <kbd>Ctrl+E</kbd> / <kbd>Ctrl+Shift+E</kbd> | next / previous change: through the open file, then on into the next changed one; in the tree, the next changed file |
 | <kbd>Ctrl+S</kbd> · <kbd>Ctrl+Z</kbd> · <kbd>Ctrl+Y</kbd> / <kbd>Ctrl+Shift+Z</kbd> | save · undo · redo |
 | <kbd>Ctrl+O</kbd> · <kbd>Ctrl+N</kbd> · <kbd>Ctrl+Shift+N</kbd> | add root · new file · new folder |
 | <kbd>Ctrl+W</kbd> · <kbd>Alt+1..9</kbd> · <kbd>Ctrl+PgUp</kbd> / <kbd>Ctrl+PgDn</kbd> | close tab · jump to tab · cycle tabs |

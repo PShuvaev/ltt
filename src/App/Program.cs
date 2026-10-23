@@ -1057,4 +1057,43 @@ internal sealed partial class App
         if (OpenHit(hit) && _mode == UiMode.Normal)
             _status = $"Hit {_hitIndex + 1}/{_hits.Count}: {hit.RelativePath}:{HitLine(hit) + 1} · Ctrl+G/Ctrl+Shift+G — next/prev";
     }
+
+    // ============================ Changes ============================
+
+    /// <summary>
+    /// Ctrl+E / Ctrl+Shift+E: the next/previous change — down (up) the open file, a run of marked
+    /// lines at a time, then on into the next (previous) changed file in the tree's order, at its
+    /// first (last) change. From the tree: the changed file after (before) the selected entry.
+    /// </summary>
+    private void JumpChange(int delta)
+    {
+        bool inEditor = _focus == Focus.Editor && _editor.HasFile;
+        if (inEditor)
+        {
+            var starts = _editor.ChangeStarts();
+            int i = delta > 0 ? starts.FindIndex(l => l > _editor.Cy) : starts.FindLastIndex(l => l < _editor.Cy);
+            if (i >= 0) { GoToChange(starts, i); return; }
+        }
+        string? from = inEditor ? _editor.FilePath : _tree.Selected?.FullPath;
+        if (_tree.NextFile(from, back: delta < 0, n => _changes.Of(n) != Changes.Kind.None) is not { } file)
+        {
+            _status = delta > 0 ? "No changes below." : "No changes above.";
+            return;
+        }
+        _tree.SelectPath(file.FullPath);
+        // A file that does not open (binary, unreadable) stays selected in the tree, the status says why:
+        // the next press goes on from it.
+        if (!TryOpen(file.FullPath, 0, activateOnly: true)) { _focus = Focus.Tree; return; }
+        var changes = _editor.ChangeStarts();
+        if (changes.Count > 0) GoToChange(changes, delta > 0 ? 0 : changes.Count - 1);
+        else _status = $"{_editor.DisplayName} changed, but none of its lines is marked.";
+    }
+
+    private void GoToChange(List<int> starts, int i)
+    {
+        _editor.GoToChange(starts[i]);
+        _focus = Focus.Editor;
+        _mode = UiMode.Normal;
+        _status = $"Change {i + 1}/{starts.Count} in {_editor.DisplayName} · Ctrl+E/Ctrl+Shift+E — next/prev";
+    }
 }

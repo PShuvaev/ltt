@@ -456,8 +456,11 @@ public sealed class FileTree
         return renamed != null;
     }
 
-    /// <summary>The node of a path among the folders read so far (nothing is read or expanded); null — not there.</summary>
-    public TreeNode? Find(string fullPath)
+    /// <summary>
+    /// The node of a path among the folders read so far — with `read`, the folders on the way are read
+    /// first (none is expanded); null — not there.
+    /// </summary>
+    public TreeNode? Find(string fullPath, bool read = false)
     {
         string full = Paths.Normalize(fullPath);
         foreach (var root in Roots.Where(r => Paths.IsSameOrInside(full, r.FullPath)).OrderByDescending(r => r.FullPath.Length))
@@ -465,6 +468,7 @@ public sealed class FileTree
             var node = root;
             while (!Paths.Same(node.FullPath, full))
             {
+                if (read) LoadChildren(node);
                 var next = node.ChildrenLoaded
                     ? node.Children.FirstOrDefault(c => Paths.IsSameOrInside(full, c.FullPath))
                     : null;
@@ -474,6 +478,42 @@ public sealed class FileTree
             if (Paths.Same(node.FullPath, full)) return node;
         }
         return null;
+    }
+
+    /// <summary>
+    /// The file after the entry at `from` (back — before it) in the panel's order, as if every folder
+    /// were expanded, among those `changed` takes. Only the roots and the folders `changed` takes are
+    /// read and gone into. A null `from`, or one outside the panel, starts before the first root
+    /// (back — after the last one). null — no such file.
+    /// </summary>
+    public TreeNode? NextFile(string? from, bool back, Func<TreeNode, bool> changed)
+    {
+        int step = back ? -1 : 1;
+        // The entry if it is a file; in a folder, its first file (back — the last) that `changed` takes,
+        // reading the folders on the way. A symlinked folder is not gone into: it may lead back up.
+        // `from` itself, met again under another root (one root inside another), is passed by.
+        TreeNode? Take(TreeNode entry)
+        {
+            if (!entry.IsDir) return Paths.Same(entry.FullPath, from) ? null : entry;
+            if (entry.IsLink) return null;
+            LoadChildren(entry);
+            var kids = entry.Children;
+            for (int k = back ? kids.Count - 1 : 0; k >= 0 && k < kids.Count; k += step)
+                if (changed(kids[k]) && Take(kids[k]) is { } file) return file;
+            return null;
+        }
+        var node = from == null ? null : Find(from, read: true);
+        if (node is { IsDir: true } && !back && (node.IsRoot || changed(node)) && Take(node) is { } first) return first;
+        // The entries after it on its level, then after each folder above it, then the next roots
+        // (a root holds whatever it holds: it is never marked itself).
+        while (true)
+        {
+            var level = node?.Parent?.Children ?? Roots;
+            for (int k = node == null ? (back ? level.Count - 1 : 0) : level.IndexOf(node) + step; k >= 0 && k < level.Count; k += step)
+                if ((level[k].IsRoot || changed(level[k])) && Take(level[k]) is { } file) return file;
+            if (node?.Parent is not { } parent) return null;
+            node = parent;
+        }
     }
 
     /// <summary>Select a node by full path in any root, expanding its parents.</summary>
