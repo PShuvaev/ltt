@@ -653,6 +653,21 @@ public sealed class TextEditor
         EndEdit();
     }
 
+    /// <summary>Ctrl+K: delete the cursor line whole — with a selection, every line it touches.</summary>
+    public void DeleteLine()
+    {
+        if (_lines.Count == 1 && _lines[0].Length == 0) { SelAnchor = null; return; } // nothing to delete
+        var (sl, _, el, ec) = SelectionRange();
+        int last = el > sl && ec == 0 ? el - 1 : el; // a selection that ends at a line start leaves that line
+        BeginEdit("other");
+        if (sl == 0 && last == _lines.Count - 1) Splice(0, _lines.Count, "");
+        else Splice(sl, last - sl + 1);
+        Cy = Math.Min(sl, _lines.Count - 1);
+        Cx = 0;
+        SelAnchor = null;
+        EndEdit();
+    }
+
     // ---------- Cursor movement ----------
 
     private (string? Line, int Index, int Col) _column; // the last answer: a long line is scanned once per change

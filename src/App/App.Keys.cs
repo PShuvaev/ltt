@@ -333,6 +333,7 @@ internal sealed partial class App
                     _status = "Cut to the clipboard.";
                     return;
                 case ConsoleKey.V: PasteFromClipboard(); return;
+                case ConsoleKey.K: _editor.DeleteLine(); return;
             }
         }
         // Option/Ctrl+Backspace — delete the word before the cursor.

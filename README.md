@@ -171,6 +171,7 @@ waits for vim, and without it the text is simply plain.
 | <kbd>Shift+arrows</kbd> | extend selection (mouse drag and double-click work too) |
 | <kbd>Option+←→</kbd> / <kbd>Ctrl+←→</kbd> · <kbd>Option+↑↓</kbd> | jump by words · by paragraphs |
 | <kbd>Option+Backspace</kbd> / <kbd>Ctrl+Backspace</kbd> | delete the word before the cursor |
+| <kbd>Ctrl+K</kbd> | delete the current line (with a selection: every line it touches) |
 | <kbd>Ctrl+Home</kbd> / <kbd>Ctrl+End</kbd> · <kbd>PgUp</kbd> / <kbd>PgDn</kbd> | document start/end · page |
 | <kbd>Ctrl+A</kbd> · <kbd>Ctrl+C</kbd> / <kbd>Ctrl+X</kbd> / <kbd>Ctrl+V</kbd> | select all · copy / cut / paste via the system clipboard |
 
