@@ -640,6 +640,41 @@ internal static class UnitTests
         words.Undo();
         Check(words.LineText(0) == "foo bar  ", "word delete: a run of deletions is a single undo step");
 
+        var delLine = Open(Put(dir, "delline.txt", "one\ntwo\nthree\n"));
+        delLine.SetCursor(1, 2);
+        delLine.DeleteLine();
+        Check(delLine.LineCount == 3 && delLine.LineText(1) == "three" && delLine.Cy == 1 && delLine.Cx == 0 && !delLine.HasSelection,
+            "line delete: Ctrl+K removes the cursor line whole, from wherever on it the cursor is");
+        delLine.Undo();
+        Check(delLine.LineCount == 4 && delLine.LineText(1) == "two" && delLine.Cy == 1 && delLine.Cx == 2,
+            "line delete: one undo brings the line and the cursor back");
+        var delSel = Open(Put(dir, "delsel.txt", "one\ntwo\nthree\nfour\n"));
+        delSel.SetCursor(1, 1);
+        delSel.SetAnchorHere();
+        delSel.SetCursor(2, 1);
+        delSel.DeleteLine();
+        Check(delSel.LineCount == 3 && delSel.LineText(1) == "four" && delSel.Cy == 1 && delSel.Cx == 0,
+            "line delete: a selection takes every line it touches whole");
+        var delAtStart = Open(Put(dir, "delstart.txt", "one\ntwo\nthree\n"));
+        delAtStart.SetCursor(0, 0);
+        delAtStart.SetAnchorHere();
+        delAtStart.SetCursor(2, 0);
+        delAtStart.DeleteLine();
+        Check(delAtStart.LineCount == 2 && delAtStart.LineText(0) == "three",
+            "line delete: a selection ending at a line start leaves that line");
+        var delLast = Open(Put(dir, "dellast.txt", "one\ntwo"));
+        delLast.SetCursor(1, 3);
+        delLast.DeleteLine();
+        Check(delLast.LineCount == 1 && delLast.LineText(0) == "one" && delLast.Cy == 0 && delLast.Cx == 0,
+            "line delete: on the last line the cursor takes the new last line");
+        var delOnly = Open(Put(dir, "delonly.txt", "solo\n"));
+        delOnly.DeleteLine();
+        Check(delOnly.LineCount == 1 && delOnly.LineText(0) == "" && delOnly.Dirty,
+            "line delete: the only line leaves one empty line");
+        delOnly.DeleteLine();
+        delOnly.Undo();
+        Check(delOnly.LineText(0) == "solo", "line delete: Ctrl+K on an empty file adds no undo step");
+
         var sel = Open(Put(dir, "sel.txt", "hello brave new world\nsecond line here\n\nlast para\n"));
         sel.SetCursor(0, 8);
         sel.SelectWord();

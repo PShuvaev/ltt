@@ -164,6 +164,40 @@ def test_delete_at_the_document_end_does_nothing(ltt, ws):
     assert not s.title_dirty
 
 
+def test_ctrl_k_deletes_the_whole_cursor_line(ltt, ws):
+    app = open_text(ltt, ws, "one\ntwo\nthree\n")
+    app.press("down", "end")  # the end of "two": the whole line goes, from wherever the cursor is
+    s = app.press("ctrl+k")
+    assert s.editor_lines == ["one", "three", ""]
+    assert line_col(s) == (2, 1)
+    assert save(app, ws) == "one\nthree\n"
+
+
+def test_ctrl_k_on_the_last_line_moves_the_cursor_up(ltt, ws):
+    app = open_text(ltt, ws, "one\ntwo")  # no final newline: "two" is the last line
+    app.press("down")
+    s = app.press("ctrl+k")
+    assert s.editor_lines == ["one"]
+    assert line_col(s) == (1, 1)
+    assert save(app, ws) == "one"
+
+
+def test_ctrl_k_deletes_every_line_the_selection_touches(ltt, ws):
+    app = open_text(ltt, ws, "one\ntwo\nthree\nfour\n")
+    app.press("down", "right", "shift+down")  # from inside "two" to inside "three"
+    s = app.press("ctrl+k")
+    assert s.editor_lines == ["one", "four", ""]
+    assert line_col(s) == (2, 1)
+    assert save(app, ws) == "one\nfour\n"
+
+
+def test_ctrl_k_on_the_only_line_leaves_one_empty_line(ltt, ws):
+    app = open_text(ltt, ws, "solo\n")
+    s = app.press("ctrl+k")
+    assert s.editor_lines == [""] and line_col(s) == (1, 1)
+    assert save(app, ws) == ""
+
+
 @pytest.mark.parametrize("cluster", list(CLUSTERS.values()), ids=list(CLUSTERS))
 def test_backspace_deletes_a_whole_character(ltt, ws, cluster):
     # D5: one Backspace after an emoji left half a surrogate pair (saved as U+FFFD)
