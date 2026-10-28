@@ -817,8 +817,18 @@ internal sealed partial class App
         ActivateTab(_tabs.ActiveIndex);
     }
 
+    /// <summary>Pin a tab or unpin it: a pinned tab stands on the left, and Ctrl+W leaves it open.</summary>
+    private void TogglePin(TextEditor tab)
+    {
+        _tabs.TogglePin(tab);
+        _status = _tabs.IsPinned(tab)
+            ? $"Pinned tab \"{tab.DisplayName}\" ⚑ — Ctrl+W leaves it open; Ctrl+P unpins."
+            : $"Unpinned tab \"{tab.DisplayName}\".";
+    }
+
     private void CloseTab(TextEditor tab)
     {
+        if (_tabs.IsPinned(tab)) { _status = $"Tab \"{tab.DisplayName}\" is pinned ⚑ — Ctrl+P unpins it first."; return; }
         if (!tab.Dirty) { CloseNow(tab); return; }
         Ask($"Tab \"{tab.DisplayName}\" has changes!  S saves · D closes without saving · Esc cancels",
             ('s', () => SaveTab(tab, then: () => CloseNow(tab))),

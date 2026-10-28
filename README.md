@@ -153,6 +153,7 @@ waits for vim, and without it the text is simply plain.
 | <kbd>Ctrl+S</kbd> · <kbd>Ctrl+Z</kbd> · <kbd>Ctrl+Y</kbd> / <kbd>Ctrl+Shift+Z</kbd> | save · undo · redo |
 | <kbd>Ctrl+O</kbd> · <kbd>Ctrl+N</kbd> · <kbd>Ctrl+Shift+N</kbd> | add root · new file · new folder |
 | <kbd>Ctrl+W</kbd> · <kbd>Alt+1..9</kbd> · <kbd>Ctrl+PgUp</kbd> / <kbd>Ctrl+PgDn</kbd> | close tab · jump to tab · cycle tabs |
+| <kbd>Ctrl+P</kbd> | pin / unpin the tab (or right-click it): pinned tabs stay on the left, and <kbd>Ctrl+W</kbd> won't close them |
 | <kbd>Ctrl+Q</kbd> | quit |
 
 ### Tree (left panel)

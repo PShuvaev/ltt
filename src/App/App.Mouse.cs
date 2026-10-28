@@ -55,9 +55,9 @@ internal sealed partial class App
             return;
         }
 
-        // Tab bar: click activates, × or the middle button closes. The cells
-        // remember their tab, so a tab closed earlier in the same burst of
-        // input is simply no longer there.
+        // Tab bar: click activates, × or the middle button closes, the right button
+        // pins and unpins. The cells remember their tab, so a tab closed earlier in
+        // the same burst of input is simply no longer there.
         if (m.Pressed && m.Y == 1 && m.X >= _editorX)
         {
             foreach (var cell in _tabCells)
@@ -65,7 +65,8 @@ internal sealed partial class App
                 if (m.X < cell.X0 || m.X > cell.X1) continue;
                 int index = _tabs.Tabs.IndexOf(cell.Tab);
                 if (index < 0) return;
-                if (m.IsMiddleClick || (m.IsLeftClick && m.X == cell.CloseX)) CloseTab(cell.Tab);
+                if (m.IsRightClick) TogglePin(cell.Tab);
+                else if (m.IsMiddleClick || (m.IsLeftClick && m.X == cell.CloseX)) CloseTab(cell.Tab);
                 else if (m.IsLeftClick)
                 {
                     ActivateTab(index);

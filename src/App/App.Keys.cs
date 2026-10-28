@@ -220,6 +220,10 @@ internal sealed partial class App
                 if (_tabs.Active is { } at) CloseTab(at);
                 else _status = "No open tabs.";
                 return true;
+            case ConsoleKey.P:
+                if (_tabs.Active is { } tab) TogglePin(tab);
+                else _status = "No open tabs.";
+                return true;
             case ConsoleKey.PageDown: SwitchTab(+1); return true;
             case ConsoleKey.PageUp: SwitchTab(-1); return true;
         }

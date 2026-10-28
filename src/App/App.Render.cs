@@ -328,16 +328,17 @@ internal sealed partial class App
     }
 
     /// <summary>
-    /// The tab label: ● — unsaved edits, ⚠ — changed on disk under unsaved
-    /// edits, ✗ — gone from disk, × — close. Tabs whose files share a name
-    /// also show the parent folder.
+    /// The tab label: ⚑ — pinned (no close cross), ● — unsaved edits, ⚠ — changed
+    /// on disk under unsaved edits, ✗ — gone from disk, × — close. Tabs whose
+    /// files share a name also show the parent folder.
     /// </summary>
-    private static string TabLabel(TextEditor ed, bool ambiguous)
+    private static string TabLabel(TextEditor ed, bool ambiguous, bool pinned)
     {
         string name = ed.DisplayName;
         if (ambiguous && ed.FilePath != null)
             name += " · " + Path.GetFileName(Path.GetDirectoryName(ed.FilePath) ?? "");
-        return " " + name + (ed.Dirty ? " ●" : "") + (ed.MissingOnDisk ? " ✗" : ed.ChangedOnDisk ? " ⚠" : "") + " × ";
+        return " " + (pinned ? "⚑ " : "") + name + (ed.Dirty ? " ●" : "")
+               + (ed.MissingOnDisk ? " ✗" : ed.ChangedOnDisk ? " ⚠" : "") + (pinned ? " " : " × ");
     }
 
     /// <summary>
@@ -357,7 +358,7 @@ internal sealed partial class App
         }
 
         var nameCounts = _tabs.Tabs.GroupBy(t => t.DisplayName).ToDictionary(g => g.Key, g => g.Count());
-        var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.DisplayName] > 1)).ToList();
+        var labels = _tabs.Tabs.Select(t => TabLabel(t, nameCounts[t.DisplayName] > 1, _tabs.IsPinned(t))).ToList();
         var widths = labels.Select(l => Cells.WidthOf(l)).ToList();
 
         int start = _tabs.ActiveIndex;
@@ -374,14 +375,14 @@ internal sealed partial class App
             int remaining = editorX + editorW - x;
             if (remaining <= 0) break;
             int cellW = Math.Min(widths[i], remaining);
-            bool active = i == _tabs.ActiveIndex;
+            bool active = i == _tabs.ActiveIndex, pinned = _tabs.IsPinned(_tabs.Tabs[i]);
             var bg = active
                 ? (edFocused ? ConsoleColor.DarkCyan : ConsoleColor.DarkGray)
                 : ConsoleColor.Black;
-            var fg = active ? ConsoleColor.White : ConsoleColor.Gray;
+            var fg = active ? ConsoleColor.White : pinned ? ConsoleColor.Cyan : ConsoleColor.Gray;
             WriteAt(x, 1, labels[i], fg, bg, cellW);
-            int closeRel = widths[i] - 2; // every label ends with " × "
-            _tabCells.Add((_tabs.Tabs[i], x, x + cellW - 1, closeRel < cellW ? x + closeRel : -1));
+            int closeRel = widths[i] - 2; // an unpinned label ends with " × "
+            _tabCells.Add((_tabs.Tabs[i], x, x + cellW - 1, !pinned && closeRel < cellW ? x + closeRel : -1));
             x += cellW;
         }
         if (start > 0) WriteAt(editorX, 1, "‹", ConsoleColor.Yellow, ConsoleColor.Black, 1);
@@ -513,7 +514,7 @@ internal sealed partial class App
             ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
                 ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
-                : " Esc to tree · Ctrl+E next change · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab";
+                : " Esc to tree · Ctrl+E next change · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+P pin tab";
         if (_paste is { } job) help = PasteProgress(job);
         else if (_picked is { } p && _focus == Focus.Tree && _mode == UiMode.Normal)
             help = $" Ctrl+V {(p.Cut ? "moves" : "copies")} {p.Label} here · Esc forgets it ·" + help;
