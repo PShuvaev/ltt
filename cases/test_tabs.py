@@ -1,13 +1,15 @@
-"""Tabs: switching (Alt+1..9, Ctrl+PgUp/PgDn, clicks, wheel), closing (Ctrl+W, ×), the bar, the title."""
+"""Tabs: switching (Alt+1..9, Ctrl+PgUp/PgDn, clicks, wheel), closing (Ctrl+W, ×), pinning (Ctrl+P, right
+click), the bar, the title."""
 import os
 import time
 
 import pytest
 
 from harness import keys as K
-from prompts_helpers import goto, select_in_tree
+from prompts_helpers import goto, rename, select_in_tree
 
 CLOSE_QUESTION = 'Tab "a.txt" has changes!  S saves · D closes without saving · Esc cancels'
+A_IS_PINNED = 'Tab "a.txt" is pinned ⚑ — Ctrl+P unpins it first.'
 
 
 def three_tabs(ltt, ws, **kw):
@@ -117,7 +119,7 @@ def test_ctrl_pgdn_from_the_tree_moves_to_the_editor(ltt, ws):
     assert s.mode == "EDITOR" and s.active_tab.name == "b.txt"
 
 
-@pytest.mark.parametrize("key", ["ctrl+w", "ctrl+pgdn", "ctrl+pgup"])
+@pytest.mark.parametrize("key", ["ctrl+w", "ctrl+p", "ctrl+pgdn", "ctrl+pgup"])
 def test_tab_keys_without_tabs(ltt, ws, key):
     ws.write("proj/a.txt", "a")
     app = ltt(ws.path("proj"))
@@ -401,6 +403,101 @@ def test_ctrl_w_and_a_click_on_the_closed_tab_in_one_burst(ltt, ws):
     s = app.settle()
     assert app.alive and s.tab_names == ["b.txt", "c.txt"] and s.active_tab.name == "b.txt"
     assert s.status == 'Closed tab "a.txt". Tabs left: 2.'
+
+
+# ---- pinning ----
+
+def test_ctrl_p_pins_the_tab_to_the_left(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("alt+3")
+    s = app.press("ctrl+p")
+    assert s.status == 'Pinned tab "c.txt" ⚑ — Ctrl+W leaves it open; Ctrl+P unpins.'
+    assert s.tab_names == ["c.txt", "a.txt", "b.txt"] and [t.pinned for t in s.tabs] == [True, False, False]
+    assert s.active_tab.name == "c.txt" and s.title.endswith("[tab 1/3]")
+
+
+def test_a_pinned_tab_shows_a_flag_and_no_cross(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("alt+2", "ctrl+p")
+    s = app.press("alt+2")  # a.txt: the pinned b.txt shows its own colour
+    b, a = s.tabs[0], s.tabs[1]
+    assert s.text(1, b.x0, b.x1 + 1) == " ⚑ b.txt " and b.close_x == -1
+    assert (s.fg(b.x0 + 1, 1), s.bg(b.x0 + 1, 1)) == ("Cyan", "Black")
+    assert s.text(1, a.x0, a.x1 + 1) == " a.txt × " and a.active
+
+
+def test_ctrl_w_leaves_a_pinned_tab_open(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("ctrl+p")
+    s = app.press("ctrl+w")
+    assert s.status == A_IS_PINNED and s.tab_names == ["a.txt", "b.txt", "c.txt"] and s.active_tab.name == "a.txt"
+    s = app.press("ctrl+p")
+    assert s.status == 'Unpinned tab "a.txt".' and not s.tabs[0].pinned
+    assert app.press("ctrl+w").tab_names == ["b.txt", "c.txt"]
+
+
+def test_ctrl_w_on_a_dirty_pinned_tab_asks_nothing(ltt, ws):
+    app = dirty_a(ltt, ws)
+    app.press("ctrl+p")
+    s = app.press("ctrl+w")
+    assert s.mode == "EDITOR" and s.status == A_IS_PINNED
+    assert s.tabs[0].dirty and s.tabs[0].pinned and ws.read("proj/a.txt") == "a"
+
+
+def test_ctrl_p_in_the_tree_pins_the_active_tab(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("alt+2", "esc")
+    s = app.press("ctrl+p")
+    assert s.mode == "TREE" and s.tab_names == ["b.txt", "a.txt", "c.txt"] and s.tabs[0].pinned
+
+
+def test_pinned_tabs_keep_their_order_and_new_tabs_open_after_them(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("alt+3", "ctrl+p")  # c.txt goes first
+    s = app.press("alt+3", "ctrl+p")  # b.txt joins it
+    assert s.tab_names == ["c.txt", "b.txt", "a.txt"] and [t.pinned for t in s.tabs] == [True, True, False]
+    ws.write("proj/d.txt", "d")
+    s = goto(app, "d.txt")
+    assert s.tab_names == ["c.txt", "b.txt", "a.txt", "d.txt"] and s.title.endswith("[tab 4/4]")
+    s = app.press("alt+1", "ctrl+p")  # an unpinned tab leads the others
+    assert s.tab_names == ["b.txt", "c.txt", "a.txt", "d.txt"] and [t.pinned for t in s.tabs] == [True, False, False, False]
+    assert s.active_tab.name == "c.txt" and s.title.endswith("[tab 2/4]")
+
+
+def test_right_click_pins_and_unpins_a_tab(ltt, ws):
+    app = three_tabs(ltt, ws)
+    b = app.snap().tabs[1]
+    s = app.click(b.x0 + 2, 1, button=K.RIGHT)
+    assert s.tab_names == ["b.txt", "a.txt", "c.txt"] and s.tabs[0].pinned
+    assert s.active_tab.name == "a.txt" and s.status == 'Pinned tab "b.txt" ⚑ — Ctrl+W leaves it open; Ctrl+P unpins.'
+    s = app.click(s.tabs[0].x0 + 2, 1, button=K.RIGHT)
+    assert s.tab_names == ["b.txt", "a.txt", "c.txt"] and not any(t.pinned for t in s.tabs)
+    assert s.status == 'Unpinned tab "b.txt".'
+
+
+def test_middle_click_leaves_a_pinned_tab_open(ltt, ws):
+    app = three_tabs(ltt, ws)
+    s = app.press("ctrl+p")
+    s = app.click(s.tabs[0].x0 + 3, 1, button=K.MIDDLE)
+    assert s.status == A_IS_PINNED and s.tab_names == ["a.txt", "b.txt", "c.txt"]
+
+
+def test_a_renamed_file_keeps_its_tab_pinned(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("alt+2", "ctrl+p")
+    s = rename(app, "z.txt")
+    assert s.tab_names == ["z.txt", "a.txt", "c.txt"] and s.tabs[0].pinned
+
+
+def test_deleting_the_file_closes_its_pinned_tab(ltt, ws):
+    app = three_tabs(ltt, ws)
+    app.press("ctrl+p", "esc")
+    select_in_tree(app, "a.txt")
+    app.press("ctrl+delete")
+    s = app.press("d")
+    assert s.tab_names == ["b.txt", "c.txt"] and not any(t.pinned for t in s.tabs) and not ws.exists("proj/a.txt")
+    s = app.press("alt+2", "ctrl+p")
+    assert s.tab_names == ["c.txt", "b.txt"] and [t.pinned for t in s.tabs] == [True, False]
 
 
 # ---- a tab hidden while the layout changed ----

@@ -383,9 +383,9 @@ def test_a_new_ctrl_f_starts_from_an_empty_query(ltt, ws):
 
 
 def test_the_help_line_offers_ctrl_g_while_the_panel_is_shown(ltt, ws):
-    app, s = search_file(ltt, ws, needles(2), 2, cols=260)
+    app, s = search_file(ltt, ws, needles(2), 2, cols=280)
     s = app.press("enter")
-    assert s.help.endswith("Ctrl+W close tab · Ctrl+G — next hit")
+    assert s.help.endswith("Ctrl+P pin tab · Ctrl+G — next hit")
     s = app.press("esc")  # to the tree, the panel stays
     assert s.help.endswith(" · Ctrl+G — next hit")
     s = app.press("esc")  # hides it

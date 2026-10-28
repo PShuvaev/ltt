@@ -54,7 +54,8 @@ class Tab:
     active: bool
     x0: int
     x1: int
-    close_x: int         # the × cell
+    close_x: int         # the × cell; -1 on a pinned tab, which has none
+    pinned: bool = False  # ⚑
 
 
 @dataclass
@@ -300,29 +301,42 @@ class Snap:
         x = x0
         n = len(row)
         while x < n:
-            # a label is " name [●] [⚠|✗] × "
+            # a label is " name [●] [⚠|✗] × ", or " ⚑ name [●] [⚠|✗] " on a pinned tab
             if row[x].ch in ("‹", "›") and row[x].fg == "Yellow":
                 x += 1
                 continue
             start = x
-            while x < n and row[x].ch != "×":
+            pinned = "⚑" in (row[x].ch, row[x + 1].ch if x + 1 < n else "")  # its space may be under ‹
+            if pinned:
+                # no ×: the label ends where its colours change or the next pinned label begins
                 x += 1
-            if x >= n:
-                break
-            close_x = x
-            x += 1
-            if x < n and row[x].ch == " ":
+                while x < n and (row[x].fg, row[x].bg) == (row[start].fg, row[start].bg) \
+                        and not (row[x].ch == " " and x + 1 < n and row[x + 1].ch == "⚑"):
+                    x += 1
+                if x >= n or row[x].ch == "›":
+                    break  # cut off by the edge
+                end, close_x = x, -1
+            else:
+                while x < n and row[x].ch != "×":
+                    x += 1
+                if x >= n:
+                    break
+                end = close_x = x
                 x += 1
-            label = "".join(c.ch for c in row[start:close_x]).strip()
+                if x < n and row[x].ch == " ":
+                    x += 1
+            label = "".join(c.ch for c in row[start:end]).strip()
             if not label:
                 continue
             parts = label.split(" ")
+            if pinned:
+                parts.pop(0)  # the ⚑
             marks = set()
             while parts and parts[-1] in ("●", "⚠", "✗"):
                 marks.add(parts.pop())
             tabs.append(Tab(name=" ".join(parts), dirty="●" in marks, changed="⚠" in marks,
                             missing="✗" in marks, active=row[start].bg in ("DarkCyan", "DarkGray"),
-                            x0=start, x1=x - 1, close_x=close_x))
+                            x0=start, x1=x - 1, close_x=close_x, pinned=pinned))
         return tabs
 
     @property

@@ -1728,6 +1728,19 @@ internal static class UnitTests
         Check(tabs.Active == t2 && tabs.IndexOfPath(Path.Combine(tmp, "t1.txt")) == 0, "tabs: closing the active last tab activates its left neighbour");
         tabs.ActivateRelative(1);
         Check(tabs.Active == t1, "tabs: cyclic switching");
+        var t4 = tabs.Add(Ed("t4.txt"));
+        tabs.TogglePin(t2);
+        tabs.TogglePin(t4);
+        Check(tabs.Tabs.SequenceEqual(new[] { t2, t4, t1 }) && tabs.Active == t4 && tabs.IsPinned(t2) && !tabs.IsPinned(t1),
+            "tabs: pinned tabs move to the left in the order they were pinned; the active tab stays active");
+        tabs.TogglePin(t2);
+        Check(tabs.Tabs.SequenceEqual(new[] { t4, t2, t1 }) && !tabs.IsPinned(t2), "tabs: an unpinned tab leads the others");
+        tabs.Close(t4);
+        var t5 = tabs.Add(Ed("t5.txt"));
+        Check(tabs.Tabs.SequenceEqual(new[] { t2, t1, t5 }) && !tabs.IsPinned(t4) && !tabs.IsPinned(t5),
+            "tabs: a closed tab takes its pin along; a new tab opens unpinned at the end");
+        tabs.TogglePin(t4);
+        Check(tabs.Tabs.SequenceEqual(new[] { t2, t1, t5 }) && !tabs.IsPinned(t4), "tabs: a closed tab cannot be pinned");
 
         Check(Clipboard.HelperCandidates().Count > 0 && Clipboard.PasteCandidates().Count > 0,
             "clipboard: the current OS has clipboard utilities to try");

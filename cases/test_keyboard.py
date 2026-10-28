@@ -578,7 +578,7 @@ def test_cmd_letter_works_as_ctrl(ltt, ws, key, status):
 
 def test_cmd_unbound_letter_types_nothing(ltt, ws):
     app = edit(ltt, ws, "abc\n", keyboard="kitty")
-    app.press("cmd+p", "cmd+shift+p", K.kitty(112, K.SUPER, text="p"))
+    app.press("cmd+t", "cmd+shift+t", K.kitty(116, K.SUPER, text="t"))
     s = app.snap()
     assert s.editor_lines[0] == "abc" and not s.title_dirty
 
