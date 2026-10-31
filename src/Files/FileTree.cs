@@ -248,6 +248,8 @@ public sealed class FileTree
         }
     }
 
+    internal bool HasUnfinishedSizing => _unfinishedSizing.Count > 0;
+
     /// <summary>Next folder count for the background (null when none).</summary>
     internal (TreeNode Parent, FolderSizer Sizer)? TakeUnfinishedSizing()
     {
@@ -642,6 +644,33 @@ public sealed class FileTree
         if (idx >= 0) SelectIndex(idx);
         return true;
     }
+}
+
+/// <summary>
+/// Paces folder recounts by the recent rhythm of external changes. The first
+/// recount is prompt; a busy tree backs off, but events never postpone the run
+/// already due. A quiet spell makes the next recount prompt again.
+/// </summary>
+internal sealed class SizingPacer
+{
+    private const int MinDelayMs = 1000, MaxDelayMs = 60_000, QuietMs = 60_000;
+    private long? _lastChange;
+    private int _delayMs = MinDelayMs;
+    private long _notBefore;
+
+    internal bool Due(long now) => now >= _notBefore;
+
+    internal void Changed(long now)
+    {
+        bool frequent = _lastChange is { } last && now - last <= QuietMs;
+        _delayMs = frequent ? Math.Min(MaxDelayMs, _delayMs * 2) : MinDelayMs;
+        _lastChange = now;
+        if (!frequent || _notBefore == 0) _notBefore = now + _delayMs;
+    }
+
+    internal void Started() => _notBefore = 0;
+
+    internal void Finished(long now, bool more) => _notBefore = more ? now + _delayMs : 0;
 }
 
 /// <summary>

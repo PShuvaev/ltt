@@ -278,6 +278,7 @@ internal sealed partial class App
     // Background folder-size counting (see FileTree.TakeUnfinishedSizing).
     private (Task Task, TreeNode Parent, FolderSizer Sizer)? _pendingSizing;
     private CancellationTokenSource? _sizingCts;
+    private readonly SizingPacer _sizingPacer = new();
 
     // Open tabs are compared with the disk this often.
     private long _diskCheckAt;
@@ -556,6 +557,7 @@ internal sealed partial class App
     private bool ApplyExternalChanges()
     {
         if (_watcher == null || !_watcher.TryConsumeDue(out var batch)) return false;
+        _sizingPacer.Changed(Environment.TickCount64);
         _diskCheckAt = 0; // compare open tabs with the disk right away
         _hitsStale = true; // results can no longer be refined: lines may have changed
         bool redraw = FollowRenames(batch.Renames);
@@ -717,11 +719,12 @@ internal sealed partial class App
     /// <summary>What a file's lines are marked against: its committed text, or nothing for a new file.</summary>
     private string[]? Baseline(string path) => _changes.Committed(path, isNew: _tree.Find(path)?.IsNew == true);
 
-    /// <summary>Start counting folder sizes in the background when a load left them approximate.</summary>
+    /// <summary>Start counting folder sizes when a load left them approximate and the pacer allows.</summary>
     private void StartSizingIfIdle()
     {
-        if (_pendingSizing != null) return;
+        if (_pendingSizing != null || !_sizingPacer.Due(Environment.TickCount64)) return;
         if (_tree.TakeUnfinishedSizing() is not { } job) return;
+        _sizingPacer.Started();
         _sizingCts?.Dispose();
         _sizingCts = new CancellationTokenSource();
         var ct = _sizingCts.Token;
@@ -734,6 +737,7 @@ internal sealed partial class App
     {
         if (_pendingSizing is not { } p || !p.Task.IsCompleted) return false;
         _pendingSizing = null;
+        _sizingPacer.Finished(Environment.TickCount64, _tree.HasUnfinishedSizing);
         bool ok = p.Task.Status == TaskStatus.RanToCompletion;
         if (ok) _tree.CompleteSizing(p.Parent, p.Sizer);
         p.Sizer.Dispose();
