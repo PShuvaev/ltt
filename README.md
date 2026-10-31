@@ -108,9 +108,9 @@ terminal part.
   terminal, and only the visible part of a line is highlighted. Smoke-tested
   on a 25 MB / 1M-line file: opening, jumping to the end, typing and undo
   stay smooth; the undo history keeps only the lines you touched.
-- 🔎 **Search keeps up with typing** — fuzzy content search runs live from
-  2 characters and streams files instead of loading them whole
-  (~35 ms across this repo).
+- 🔎 **Search keeps up with typing** — fuzzy and exact content search runs live
+  (from 2 characters fuzzy, from 1 exact) and streams files instead of loading
+  them whole (~35 ms across this repo).
 - 🤖 **Made for agent workflows** — when your agent (or git, or a build)
   creates, renames or deletes files, the tree updates by itself. An open
   tab follows its file: a clean tab
@@ -183,6 +183,7 @@ waits for vim, and without it the text is simply plain.
 |---|---|
 | <kbd>Tab</kbd> · <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>→</kbd> | cycle path completions · accept ghost suggestion; in replace, Tab switches find/replacement fields |
 | <kbd>Ctrl+U</kbd> | clear the whole input line |
+| <kbd>Alt+E</kbd> | toggle fuzzy / exact matching in search; replacement is always exact |
 | <kbd>Alt+A</kbd> | replace all matches in the current scope, with a confirmation |
 | <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Enter</kbd> | move in live results · open the hit; in file replace, Enter replaces one and moves to the next |
 | <kbd>S</kbd> / <kbd>D</kbd> / <kbd>R</kbd> / <kbd>Esc</kbd> | in confirmations: save (overwrite) / don't save (delete) / take the disk version / cancel |

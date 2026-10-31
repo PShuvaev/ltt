@@ -202,14 +202,15 @@ internal sealed partial class App
             ? ""
             : Path.GetFileName(_searchTargetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
         if (target.Length == 0) target = _searchTargetPath ?? "";
+        string toggle = _exactSearch ? "Alt+E fuzzy" : "Alt+E exact";
         return _searchScope switch
         {
             SearchScope.CurrentFile => (" Search file: ", $"file {target}",
-                " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results · Alt+R replace · Alt+D folder"),
+                $" Searching this file live · {toggle} · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results · Alt+R replace · Alt+D folder"),
             SearchScope.SelectedFolder => (" Search folder: ", $"folder {target}",
-                " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
+                $" Searching this folder live · {toggle} · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
             _ => (" Search all folders: ", "all folders",
-                " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
+                $" Searching all folders live · {toggle} · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
         };
     }
 
@@ -397,7 +398,7 @@ internal sealed partial class App
         string count = $"{_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count}{(_hitsTruncated ? "+" : "")}"
                        + (_hitsSkipped > 0 ? $" ({_hitsSkipped} files over 8 MB skipped)" : "");
         string header = !_replaceMode
-            ? $" Search results ({ScopeTexts().Header}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides"
+            ? $" {(_exactSearch ? "Exact search" : "Search")} results ({ScopeTexts().Header}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides"
             : $" Replace in {ScopeTexts().Header} for \"{_searchQuery}\": {count} · Alt+A all · Esc hides";
         WriteAt(0, _resultsTop, header, focused ? ConsoleColor.White : ConsoleColor.Magenta,
             focused ? ConsoleColor.DarkMagenta : ConsoleColor.Black, w);
@@ -493,7 +494,7 @@ internal sealed partial class App
                 ? "   · searching…"
                 : Searchable(_searchQuery.ToString())
                     ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"
-                    : _replaceMode ? "   · exact text" : "   · search starts at 2 characters";
+                    : ExactSearch ? "   · exact text" : "   · search starts at 2 characters";
             var scope = ScopeTexts();
             DrawPrompt(w, scope.Prompt, _searchQuery.ToString(), "", suffix, active: !_replaceField);
             string searchHelp = scope.Help;
@@ -514,7 +515,9 @@ internal sealed partial class App
             return;
         }
 
-        string modeLabel = _mode == UiMode.SearchResults ? _replaceMode ? "REPLACE" : "SEARCH" : _focus == Focus.Tree ? "TREE" : "EDITOR";
+        string modeLabel = _mode == UiMode.SearchResults
+            ? _replaceMode ? "REPLACE" : _exactSearch ? "EXACT" : "SEARCH"
+            : _focus == Focus.Tree ? "TREE" : "EDITOR";
         string selInfo = _editor.HasSelection ? $" · selected: {_editor.SelectionCharCount()}" : "";
         string pos = _editor.HasFile ? $" Ln {_editor.Cy + 1}/{_editor.LineCount}, Col {_editor.CursorColumn + 1}{selInfo} " : "";
         int mainW = Math.Max(0, w - pos.Length);
@@ -524,7 +527,7 @@ internal sealed partial class App
         string help = _mode == UiMode.SearchResults
             ? _replaceMode
                 ? " ↑↓ pick · Enter opens/replaces in file · Alt+A replaces all · Alt+D chooses folder · Alt+R closes replace · Esc hides"
-                : " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
+                : $" ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Alt+E {(_exactSearch ? "fuzzy" : "exact")} · Esc hides the panel"
             : _focus == Focus.Tree
                 ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · Ctrl+O add root · Ctrl+L go to"
                 : " Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+P pin tab";

@@ -6,7 +6,7 @@ internal sealed partial class App
     private readonly StringBuilder _replaceQuery = new();
     private bool _replaceMode, _replaceField, _pendingReplaceAll;
 
-    private string FindQuery() => _replaceMode ? _searchQuery.ToString() : _searchQuery.ToString().Trim();
+    private string FindQuery() => ExactSearch ? _searchQuery.ToString() : _searchQuery.ToString().Trim();
 
     private void ToggleReplace()
     {
@@ -24,6 +24,7 @@ internal sealed partial class App
         _replaceMode = !_replaceMode;
         _replaceField = _replaceMode && !fresh;
         _mode = UiMode.SearchInput;
+        ClearSearch();
         RunLiveSearch();
     }
 

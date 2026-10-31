@@ -241,6 +241,8 @@ internal sealed partial class App
     internal static volatile bool Continued;
 
     private readonly StringBuilder _searchQuery = new();
+    private bool _exactSearch;
+    private bool ExactSearch => _replaceMode || _exactSearch;
     private readonly StringBuilder _pathInput = new();
     private List<string> _pathCandidates = new();      // path completion candidates (full input lines)
     private string _pathCommon = "";                   // what every match shares, the first 50 or not
@@ -992,16 +994,17 @@ internal sealed partial class App
     }
 
     /// <summary>
-    /// Live search while typing: fuzzy from two characters, exact from one in
-    /// replace mode. A fuzzy query that only grew refines previous complete
-    /// results; anything else is a new search.
+    /// Live search while typing: fuzzy from two characters, exact from one.
+    /// A fuzzy query that only grew refines previous complete results;
+    /// anything else is a new search.
     /// </summary>
     private void RunLiveSearch()
     {
         string query = FindQuery();
         if (!Searchable(query)) { ClearSearch(); return; }
 
-        bool canRefine = !_replaceMode && !_hitsTruncated && !_hitsStale && _hitsQuery.Length >= 2
+        bool exact = ExactSearch;
+        bool canRefine = !exact && !_hitsTruncated && !_hitsStale && _hitsQuery.Length >= 2
             && query.StartsWith(_hitsQuery, StringComparison.OrdinalIgnoreCase);
         var scope = _searchScope;
         string? target = _searchTargetPath == null ? null : Path.GetFullPath(_searchTargetPath);
@@ -1013,7 +1016,7 @@ internal sealed partial class App
             // Refining ≤500 known hits and scanning one open file are instant: stay synchronous.
             ShowHits(scope != SearchScope.CurrentFile ? new SearchResult(FuzzySearch.Refine(_hits, query), false, _hitsSkipped)
                 : canRefine ? new SearchResult(FuzzySearch.RefineInOrder(_hits, query), false)
-                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query, literal: _replaceMode), query,
+                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query, literal: exact), query,
                 canRefine ? _hitTabs : TabMarks());
             if (!canRefine) _hitsStale = false;
             return;
@@ -1028,9 +1031,9 @@ internal sealed partial class App
         var buffers = DirtyBuffers();
         var task = Task.Run(() => scope switch
         {
-            SearchScope.CurrentFile => FuzzySearch.SearchFile(target!, Path.GetFileName(target!), query, ct: ct, literal: _replaceMode),
-            SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers, literal: _replaceMode),
-            _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers, literal: _replaceMode),
+            SearchScope.CurrentFile => FuzzySearch.SearchFile(target!, Path.GetFileName(target!), query, ct: ct, literal: exact),
+            SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers, literal: exact),
+            _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers, literal: exact),
         });
         _pendingSearch = (task, cts, query, TabMarks());
     }

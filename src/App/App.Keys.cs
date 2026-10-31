@@ -41,8 +41,15 @@ internal sealed partial class App
         return cleaned[..end];
     }
 
-    /// <summary>Fuzzy search starts at two characters; exact replacement also accepts one and keeps spaces.</summary>
-    private bool Searchable(string query) => _replaceMode ? query.Length > 0 : Cells.CharCount(query.AsSpan().Trim()) >= 2;
+    /// <summary>Fuzzy search starts at two characters; exact search accepts one and keeps spaces.</summary>
+    private bool Searchable(string query) => ExactSearch ? query.Length > 0 : Cells.CharCount(query.AsSpan().Trim()) >= 2;
+
+    private void ToggleExactSearch()
+    {
+        _exactSearch = !_exactSearch;
+        ClearSearch(); // exact hits cannot be refined back into the broader fuzzy result set
+        RunLiveSearch();
+    }
 
     private void ApplySearchScope(SearchScope scope, string? targetPath)
     {
@@ -415,6 +422,7 @@ internal sealed partial class App
         if (_mode != UiMode.SearchInput) return;
         bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control);
         if (alt && key.Key == ConsoleKey.R) { ToggleReplace(); return; }
+        if (alt && key.Key == ConsoleKey.E && !_replaceMode) { ToggleExactSearch(); return; }
         if (alt && key.Key == ConsoleKey.D) { ChooseSearchFolder(); return; }
         if (_replaceMode && alt && key.Key == ConsoleKey.A) { StartReplaceAll(); return; }
         if (_replaceMode && Ctrl(key) && key.Key is ConsoleKey.Z or ConsoleKey.Y)
@@ -459,6 +467,12 @@ internal sealed partial class App
     {
         bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control);
         if (alt && key.Key == ConsoleKey.R) { ToggleReplace(); return true; }
+        if (alt && key.Key == ConsoleKey.E && !_replaceMode)
+        {
+            ToggleExactSearch();
+            _mode = UiMode.SearchInput;
+            return true;
+        }
         if (alt && key.Key == ConsoleKey.D) { ChooseSearchFolder(); return true; }
         if (_replaceMode && alt && key.Key == ConsoleKey.A) { StartReplaceAll(); return true; }
         if (IsCtrlF(key))
