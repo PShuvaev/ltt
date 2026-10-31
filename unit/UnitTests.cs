@@ -1136,6 +1136,36 @@ internal static class UnitTests
               && App.FormatSize(1_610_612_736, true) == "1.5G" && App.FormatSize(1536, false) == "≥1.5K",
             "size display: two significant digits with a lower-bound marker");
 
+        var pacer = new SizingPacer();
+        Check(pacer.Due(0), "sizing pace: the initial count is not delayed");
+        pacer.Changed(1000);
+        Check(!pacer.Due(1999) && pacer.Due(2000), "sizing pace: a recount follows a quiet change after one second");
+        pacer.Changed(1500);
+        Check(pacer.Due(2000), "sizing pace: more changes do not postpone the recount already due");
+        pacer.Started();
+        pacer.Changed(2100);
+        pacer.Finished(2200, more: true);
+        pacer.Changed(2300);
+        Check(!pacer.Due(6199) && pacer.Due(6200), "sizing pace: frequent changes back off the next recount");
+        pacer.Changed(80000);
+        Check(!pacer.Due(80999) && pacer.Due(81000), "sizing pace: a quiet spell restores the short delay");
+        pacer.Started();
+        pacer.Finished(81100, more: false);
+        Check(pacer.Due(81100), "sizing pace: no queued recount means no leftover delay");
+
+        var busy = new SizingPacer();
+        for (long t = 0; t <= 10_000; t += 1000) busy.Changed(t);
+        busy.Started();
+        busy.Finished(11_000, more: true);
+        Check(!busy.Due(70_999) && busy.Due(71_000), "sizing pace: continuous changes cap the delay at 60 seconds");
+
+        var periodic = new SizingPacer();
+        periodic.Changed(0);
+        periodic.Changed(15000);
+        periodic.Started();
+        periodic.Finished(16000, more: true);
+        Check(!periodic.Due(17999) && periodic.Due(18000), "sizing pace: changes fifteen seconds apart still back off");
+
         using (var sizer = new FolderSizer(new[] { (Kid("hugeDir"), Kid("hugeDir").WriteUtc) }))
         {
             sizer.Step(1);
