@@ -15,6 +15,19 @@ def confirm(app):
     return app.wait(lambda s: s.mode == "CONFIRM", what="replacement confirmation")
 
 
+def test_leaving_replace_restores_fuzzy_results(ltt, ws):
+    ws.write("proj/a.txt", "manager\nManager\nm-a-n-a-g-e-r\n")
+    app = ltt(ws.path("proj/a.txt"))
+    app.press("ctrl+f")
+    search(app, "mngr", 3)
+    app.press("alt+r")
+    s = wait_found(app, "mngr", 0)
+    assert s.results_top is None
+    app.press("alt+r")
+    s = wait_found(app, "mngr", 3)
+    assert len(s.results) == 3 and not s.title_dirty
+
+
 def test_single_replacement_advances_and_undo_stays_in_the_prompt(ltt, ws):
     ws.write("proj/a.txt", "foo one foo\nFoo foo\n")
     app = ltt(ws.path("proj/a.txt"))

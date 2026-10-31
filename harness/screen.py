@@ -78,7 +78,7 @@ class Hit:
     selected: bool
 
 
-_STATUS_RE = re.compile(r"^ \[(TREE|EDITOR|SEARCH)\] (.*?)\s*$")
+_STATUS_RE = re.compile(r"^ \[(TREE|EDITOR|SEARCH|EXACT)\] (.*?)\s*$")
 _POS_RE = re.compile(r" Ln (\d+)/(\d+), Col (\d+)(?: · selected: (\d+))? $")
 
 
@@ -165,7 +165,7 @@ class Snap:
     def results_top(self):
         """Row of the search results header, or None when the panel is hidden."""
         for y in range(2, self.status_y):
-            if self.lines[y].startswith((" Search results (", " Replace in ")):
+            if self.lines[y].startswith((" Search results (", " Exact search results (", " Replace in ")):
                 return y
         return None
 
@@ -202,7 +202,7 @@ class Snap:
 
     @property
     def mode(self):
-        """TREE / EDITOR / SEARCH, or PROMPT (a prompt or a search input), or CONFIRM (a question)."""
+        """TREE / EDITOR / SEARCH / EXACT, or PROMPT (a prompt or a search input), or CONFIRM (a question)."""
         m = _STATUS_RE.match(self.status_line)
         if m:
             return m.group(1)

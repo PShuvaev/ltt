@@ -33,7 +33,7 @@ def test_ctrl_f_on_a_root_searches_its_folder(ltt, ws):
     app = ltt(ws.path("proj"), cols=180)
     s = app.press("ctrl+f")
     assert s.prompt == "Search folder:    · search starts at 2 characters"
-    assert s.help == ("Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens"
+    assert s.help == ("Searching this folder live · Alt+E exact · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens"
                       " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (folder proj) for "needle": 1/2 ·')
@@ -58,7 +58,7 @@ def test_ctrl_f_on_a_file_in_the_tree_searches_that_file_without_opening_it(ltt,
     select(app, "b.txt")
     s = app.press("ctrl+f")
     assert s.prompt == "Search file:    · search starts at 2 characters"
-    assert s.help == ("Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps"
+    assert s.help == ("Searching this file live · Alt+E exact · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps"
                       " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (file b.txt) for "needle": 1/2 ·')
@@ -84,7 +84,7 @@ def test_second_ctrl_f_widens_to_all_folders(ltt, ws):
     app.press("ctrl+f")
     s = app.press("ctrl+f")
     assert s.prompt == "Search all folders:    · search starts at 2 characters"
-    assert s.help == ("Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens"
+    assert s.help == ("Searching all folders live · Alt+E exact · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens"
                       " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (all folders) for "needle": 1/2 ·')
@@ -256,6 +256,45 @@ def test_search_ignores_case(ltt, ws):
     app = ltt(ws.path("proj/a.txt"))
     app.press("ctrl+f")
     s = search(app, "taskMANAGER", 1)
+    assert locations(s) == ["a.txt:1"]
+
+
+def test_alt_e_switches_matching_and_rescans_in_both_directions(ltt, ws):
+    ws.write("proj/a.txt", "manager\nManager\nm-a-n-a-g-e-r\n")
+    app = ltt(ws.path("proj/a.txt"))
+    app.press("ctrl+f")
+    search(app, "mngr", 3)
+    app.press("alt+e")
+    s = wait_found(app, "mngr", 0)
+    assert s.results_top is None and "Alt+E fuzzy" in s.help
+    app.press("alt+e")
+    s = wait_found(app, "mngr", 3)  # exact hits alone could not produce these fuzzy matches
+    assert len(locations(s)) == 3
+    app.press("ctrl+u")
+    search(app, "manager", 3)
+    app.press("alt+e")
+    s = wait_found(app, "manager", 1)
+    assert locations(s) == ["a.txt:1"]
+    assert s.results_header.startswith('Exact search results (file a.txt) for "manager": 1/1 ·')
+    s = app.press("esc")
+    assert s.mode == "EXACT" and "Alt+E fuzzy" in s.help
+    app.press("alt+e")
+    s = wait_found(app, "manager", 3)
+    assert "Alt+E exact" in s.help
+
+
+def test_exact_search_accepts_one_character_and_preserves_spaces(ltt, ws):
+    ws.write("proj/a.txt", "a  b\na b\nab\nA  B\n")
+    app = ltt(ws.path("proj"))
+    app.press("ctrl+f")
+    s = app.type("a")
+    assert search_input(s).suffix == "search starts at 2 characters"
+    app.press("alt+e")
+    s = wait_found(app, "a", 3)
+    assert locations(s) == ["a.txt:1", "a.txt:2", "a.txt:3"]
+    app.press("ctrl+u")
+    assert search_input(app.snap()).suffix == "exact text"
+    s = search(app, "a  b", 1)
     assert locations(s) == ["a.txt:1"]
 
 

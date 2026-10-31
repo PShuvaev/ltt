@@ -12,7 +12,7 @@ TREE_HELP = ("↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new f
 EDITOR_HELP = ("Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · "
                "Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · "
                "Ctrl+W close tab · Ctrl+P pin tab")
-RESULTS_HELP = "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
+RESULTS_HELP = "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Alt+E exact · Esc hides the panel"
 WIDE = 280  # columns that fit the longest help line
 
 
@@ -319,9 +319,9 @@ def test_selection_size_shows_in_the_status_line(ltt, ws):
 
 
 @pytest.mark.parametrize("from_tree, scope_help", [
-    (False, "Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · "
+    (False, "Searching this file live · Alt+E exact · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · "
             "Esc to results · Alt+R replace · Alt+D folder"),
-    (True, "Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · "
+    (True, "Searching this folder live · Alt+E exact · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · "
            "Esc to results · Alt+R replace · Alt+D folder"),
 ], ids=["from the editor", "from the tree"])
 def test_search_input_help_names_the_scope(ltt, ws, from_tree, scope_help):
@@ -332,7 +332,7 @@ def test_search_input_help_names_the_scope(ltt, ws, from_tree, scope_help):
     s = app.press("ctrl+f")
     assert s.mode == "PROMPT" and s.help == scope_help
     s = app.press("ctrl+f")
-    assert s.help == ("Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · "
+    assert s.help == ("Searching all folders live · Alt+E exact · Ctrl+F again narrows to the selection · ↑↓ pick · "
                       "Enter opens · Esc to results · Alt+R replace · Alt+D folder")
 
 

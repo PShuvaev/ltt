@@ -123,7 +123,7 @@ def test_esc_moves_from_the_input_to_the_results(ltt, ws):
     s = app.press("esc")
     assert s.mode == "SEARCH"
     assert s.status == "Found: 2. Enter opens above, Esc hides the panel."
-    assert s.help == "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
+    assert s.help == "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Alt+E exact · Esc hides the panel"
     assert locations(s) == ["a.txt:1", "a.txt:2"]
 
 
