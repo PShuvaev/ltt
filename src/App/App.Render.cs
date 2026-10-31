@@ -150,7 +150,7 @@ internal sealed partial class App
         }
 
         _contentTop = 2;
-        _statusY = h - 2;
+        _statusY = h - 2 - (_mode == UiMode.SearchInput && _replaceMode ? 1 : 0);
         int helpY = h - 1;
 
         // The bottom results panel takes ~30% of the height from the main panels, which keep 3 rows.
@@ -205,11 +205,11 @@ internal sealed partial class App
         return _searchScope switch
         {
             SearchScope.CurrentFile => (" Search file: ", $"file {target}",
-                " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results"),
+                " Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · Esc to results · Alt+R replace · Alt+D folder"),
             SearchScope.SelectedFolder => (" Search folder: ", $"folder {target}",
-                " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results"),
+                " Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
             _ => (" Search all folders: ", "all folders",
-                " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results"),
+                " Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens · Esc to results · Alt+R replace · Alt+D folder"),
         };
     }
 
@@ -396,9 +396,10 @@ internal sealed partial class App
         bool focused = _mode is UiMode.SearchResults or UiMode.SearchInput;
         string count = $"{_hitIndex + (_hits.Count > 0 ? 1 : 0)}/{_hits.Count}{(_hitsTruncated ? "+" : "")}"
                        + (_hitsSkipped > 0 ? $" ({_hitsSkipped} files over 8 MB skipped)" : "");
-        WriteAt(0, _resultsTop,
-            $" Search results ({ScopeTexts().Header}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides",
-            focused ? ConsoleColor.White : ConsoleColor.Magenta,
+        string header = !_replaceMode
+            ? $" Search results ({ScopeTexts().Header}) for \"{_searchQuery}\": {count} · Enter opens · Ctrl+G next · Esc hides"
+            : $" Replace in {ScopeTexts().Header} for \"{_searchQuery}\": {count} · Alt+A all · Esc hides";
+        WriteAt(0, _resultsTop, header, focused ? ConsoleColor.White : ConsoleColor.Magenta,
             focused ? ConsoleColor.DarkMagenta : ConsoleColor.Black, w);
 
         int rows = _resultsRowCount;
@@ -438,15 +439,16 @@ internal sealed partial class App
     }
 
     /// <summary>The input line of a prompt, the cursor right after the typed text. The text scrolls to keep its end in view.</summary>
-    private void DrawPrompt(int w, string label, string input, string ghost, string suffix)
+    private void DrawPrompt(int w, string label, string input, string ghost, string suffix, int row = -1, bool active = true)
     {
+        int y = row >= 0 ? row : _statusY;
         int room = Math.Max(1, w - Cells.WidthOf(label) - 1 - Cells.WidthOf(suffix)); // one cell for the cursor
         int x = 0;
-        PutRun(ref x, _statusY, label + FitTail(input, room), ConsoleColor.White, ConsoleColor.DarkBlue, w);
-        _screen.Cursor = (Math.Min(w - 1, x), _statusY);
-        PutRun(ref x, _statusY, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w, joinBefore: true); // the ghost goes on from the typed text
-        PutRun(ref x, _statusY, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
-        if (x < w) WriteAt(x, _statusY, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - x);
+        PutRun(ref x, y, label + FitTail(input, room), ConsoleColor.White, ConsoleColor.DarkBlue, w);
+        if (active) _screen.Cursor = (Math.Min(w - 1, x), y);
+        PutRun(ref x, y, ghost, ConsoleColor.DarkGray, ConsoleColor.DarkBlue, w, joinBefore: true); // the ghost goes on from the typed text
+        PutRun(ref x, y, suffix, ConsoleColor.White, ConsoleColor.DarkBlue, w);
+        if (x < w) WriteAt(x, y, "", ConsoleColor.White, ConsoleColor.DarkBlue, w - x);
     }
 
     private void DrawStatusAndHelp(int w, int helpY)
@@ -480,6 +482,7 @@ internal sealed partial class App
                 PathPurpose.CreateFile => " Enter creates the file and opens it · Tab/↑↓ completion · a trailing / creates a folder · Esc cancels",
                 PathPurpose.CreateFolder => " Enter creates the folder · Tab/↑↓ completion · Esc cancels",
                 PathPurpose.GoTo => " Enter jumps: 120 — a line, file.cs:120 — a file at a line · Esc cancels",
+                PathPurpose.SearchFolder => " Enter searches this folder · Tab/↑↓ completion · Esc returns to search",
                 _ => " Enter adds the folder to the left panel · Tab/↑↓ completion · Esc cancels · a file path (file:line too) opens the file",
             }, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
@@ -490,10 +493,18 @@ internal sealed partial class App
                 ? "   · searching…"
                 : Searchable(_searchQuery.ToString())
                     ? $"   · found: {_hits.Count}{(_hitsTruncated ? "+" : "")}"
-                    : "   · search starts at 2 characters";
+                    : _replaceMode ? "   · exact text" : "   · search starts at 2 characters";
             var scope = ScopeTexts();
-            DrawPrompt(w, scope.Prompt, _searchQuery.ToString(), "", suffix);
-            WriteAt(0, helpY, scope.Help, ConsoleColor.DarkGray, ConsoleColor.Black, w);
+            DrawPrompt(w, scope.Prompt, _searchQuery.ToString(), "", suffix, active: !_replaceField);
+            string searchHelp = scope.Help;
+            if (_replaceMode)
+            {
+                DrawPrompt(w, " Replace with: ", _replaceQuery.ToString(), "", "", row: _statusY + 1, active: _replaceField);
+                searchHelp = _searchScope == SearchScope.CurrentFile
+                    ? " Tab switches fields · Enter replaces one · Alt+A replaces all · Alt+D chooses folder · Alt+R closes replace · Esc goes back"
+                    : " Tab switches fields · Enter opens · Alt+A replaces all in files · Alt+D chooses folder · Alt+R closes replace · Esc goes back";
+            }
+            WriteAt(0, helpY, searchHelp, ConsoleColor.DarkGray, ConsoleColor.Black, w);
             return;
         }
         if (_mode == UiMode.Confirm)
@@ -503,7 +514,7 @@ internal sealed partial class App
             return;
         }
 
-        string modeLabel = _mode == UiMode.SearchResults ? "SEARCH" : _focus == Focus.Tree ? "TREE" : "EDITOR";
+        string modeLabel = _mode == UiMode.SearchResults ? _replaceMode ? "REPLACE" : "SEARCH" : _focus == Focus.Tree ? "TREE" : "EDITOR";
         string selInfo = _editor.HasSelection ? $" · selected: {_editor.SelectionCharCount()}" : "";
         string pos = _editor.HasFile ? $" Ln {_editor.Cy + 1}/{_editor.LineCount}, Col {_editor.CursorColumn + 1}{selInfo} " : "";
         int mainW = Math.Max(0, w - pos.Length);
@@ -511,10 +522,12 @@ internal sealed partial class App
         if (pos.Length > 0) WriteAt(mainW, _statusY, pos, ConsoleColor.Black, ConsoleColor.Gray, pos.Length);
 
         string help = _mode == UiMode.SearchResults
-            ? " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
+            ? _replaceMode
+                ? " ↑↓ pick · Enter opens/replaces in file · Alt+A replaces all · Alt+D chooses folder · Alt+R closes replace · Esc hides"
+                : " ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
             : _focus == Focus.Tree
-                ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Ctrl+O add root · Ctrl+L go to"
-                : " Esc to tree · Ctrl+E next change · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+P pin tab";
+                ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · Ctrl+O add root · Ctrl+L go to"
+                : " Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+P pin tab";
         if (_paste is { } job) help = PasteProgress(job);
         else if (_picked is { } p && _focus == Focus.Tree && _mode == UiMode.Normal)
             help = $" Ctrl+V {(p.Cut ? "moves" : "copies")} {p.Label} here · Esc forgets it ·" + help;

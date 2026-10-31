@@ -639,6 +639,53 @@ public sealed class TextEditor
         return (int)Math.Min(Cells.CharCount(clean.ToString()), int.MaxValue);
     }
 
+    /// <summary>Replace one exact match if it is still at this place; false when the buffer has moved on.</summary>
+    public bool ReplaceAt(int line, int column, string query, string replacement)
+    {
+        if (query.Length == 0 || line < 0 || line >= _lines.Count || column < 0
+            || column + query.Length > _lines[line].Length
+            || !string.Equals(_lines[line].Substring(column, query.Length), query, StringComparison.Ordinal)) return false;
+        if (!string.Equals(query, replacement, StringComparison.Ordinal))
+        {
+            BeginEdit("other");
+            SetLine(line, string.Concat(_lines[line].AsSpan(0, column), replacement, _lines[line].AsSpan(column + query.Length)));
+            Cy = line;
+            Cx = column + replacement.Length;
+            SelAnchor = null;
+            EndEdit();
+        }
+        Cy = line;
+        Cx = column + replacement.Length;
+        SelAnchor = null;
+        CursorMoved();
+        return true;
+    }
+
+    /// <summary>Replace every exact match in the buffer as one undo step; the number of changed occurrences.</summary>
+    public int ReplaceAll(string query, string replacement)
+    {
+        if (query.Length == 0 || string.Equals(query, replacement, StringComparison.Ordinal)) return 0;
+        int count = 0, cy = Cy, cx = Cx;
+        BeginEdit("other");
+        for (int i = _lines.Count - 1; i >= 0; i--)
+        {
+            string old = _lines[i];
+            string now = LiteralSearch.ReplaceLine(old, query, replacement, out int n);
+            if (n == 0 || now == old) continue;
+            if (count == 0)
+            {
+                cy = i;
+                int last = old.LastIndexOf(query, StringComparison.Ordinal);
+                cx = now.Length - (old.Length - last - query.Length);
+            }
+            SetLine(i, now);
+            count += n;
+        }
+        if (count > 0) { Cy = cy; Cx = cx; SelAnchor = null; }
+        EndEdit();
+        return count;
+    }
+
     public void Delete()
     {
         if (HasSelection) { DeleteSelection(); return; }

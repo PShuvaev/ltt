@@ -1,4 +1,4 @@
-/// <summary>Path prompts (Ctrl+O / Ctrl+N / Ctrl+R / Ctrl+L): input state, live completion, root add/remove, go to.</summary>
+/// <summary>Path prompts (Ctrl+O / Ctrl+N / Ctrl+R / Ctrl+L / Alt+D): input state, live completion, root add/remove, go to.</summary>
 internal sealed partial class App
 {
     private string CurrentPathPrompt() => _pathPurpose switch
@@ -7,6 +7,7 @@ internal sealed partial class App
         PathPurpose.CreateFolder => " New folder: ",
         PathPurpose.Rename => " Rename: ",
         PathPurpose.GoTo => " Go to: ",
+        PathPurpose.SearchFolder => " Search folder: ",
         _ => " Add folder: ",
     };
 

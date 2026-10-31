@@ -16,12 +16,13 @@ public sealed record SearchResult(List<SearchHit> Hits, bool Truncated, int Skip
 }
 
 /// <summary>
-/// Fuzzy search over the contents of text files, recursively. Every word of
-/// the query must match somewhere in the line, its characters in order but not
-/// necessarily adjacent: "mngr" finds "manager". An exact substring scores
-/// highest; otherwise compact matches and word starts rank first. In a git
-/// repository the files are the ones git lists (tracked and untracked, minus
-/// .gitignore; nested repositories by their own git); elsewhere folders are walked.
+/// Content search over text files, recursively: fuzzy navigation by default,
+/// exact matches for replacement on request. Every fuzzy query word must match
+/// somewhere in the line, its characters in order but not necessarily adjacent:
+/// "mngr" finds "manager". An exact substring scores highest; otherwise compact
+/// matches and word starts rank first. In a git repository the files are the ones
+/// git lists (tracked and untracked, minus .gitignore; nested repositories by
+/// their own git); elsewhere folders are walked.
 /// </summary>
 public static class FuzzySearch
 {
@@ -285,10 +286,10 @@ public static class FuzzySearch
     /// so Ctrl+F sees unsaved edits). Stops at a binary-looking line or maxResults.
     /// </summary>
     public static SearchResult SearchLines(string filePath, string relativePath, IEnumerable<string> lines,
-        string query, int maxResults = 500, CancellationToken ct = default)
+        string query, int maxResults = 500, CancellationToken ct = default, bool literal = false)
     {
-        if (string.IsNullOrWhiteSpace(query)) return SearchResult.Empty;
-        var hits = Matches(filePath, relativePath, lines, query, ct).Take(maxResults + 1).ToList(); // no line read past that
+        if (literal ? query.Length == 0 : string.IsNullOrWhiteSpace(query)) return SearchResult.Empty;
+        var hits = Matches(filePath, relativePath, lines, query, ct, literal).Take(maxResults + 1).ToList(); // no line read past that
         bool truncated = hits.Count > maxResults;
         if (truncated) hits.RemoveAt(maxResults);
         return new SearchResult(hits, truncated);
@@ -296,7 +297,7 @@ public static class FuzzySearch
 
     /// <summary>Stream-search a single file from disk in document order (whatever its size).</summary>
     public static SearchResult SearchFile(string filePath, string relativePath, string query, int maxResults = 500,
-        CancellationToken ct = default)
+        CancellationToken ct = default, bool literal = false)
     {
         string full = Path.GetFullPath(filePath);
         try
@@ -305,11 +306,11 @@ public static class FuzzySearch
             if (new FileInfo(full).Length == 0) return SearchResult.Empty;
             try
             {
-                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: false), query, maxResults, ct);
+                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: false), query, maxResults, ct, literal);
             }
             catch (System.Text.DecoderFallbackException)
             {
-                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: true), query, maxResults, ct);
+                return SearchLines(full, relativePath, TextFile.ReadLines(full, latin1: true), query, maxResults, ct, literal);
             }
         }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { return SearchResult.Empty; }
@@ -323,9 +324,9 @@ public static class FuzzySearch
     /// (path → lines). A cancelled search returns what it found so far.
     /// </summary>
     public static SearchResult SearchMany(IEnumerable<string> roots, string query, int maxResults = 500,
-        CancellationToken ct = default, IReadOnlyDictionary<string, string[]>? buffers = null)
+        CancellationToken ct = default, IReadOnlyDictionary<string, string[]>? buffers = null, bool literal = false)
     {
-        if (string.IsNullOrWhiteSpace(query)) return SearchResult.Empty;
+        if (literal ? query.Length == 0 : string.IsNullOrWhiteSpace(query)) return SearchResult.Empty;
         var all = roots.Select(Paths.Normalize).Distinct(Paths.Comparer).OrderBy(r => r.Length).ToList();
         var outer = all.Where(r => !all.Any(o => Paths.IsInside(r, o))).ToList();
         var top = new TopHits(maxResults);
@@ -346,8 +347,8 @@ public static class FuzzySearch
                     if (!seen.Add(file)) continue;
                     string rel = prefix + Path.GetRelativePath(home, file);
                     if (buffers != null && buffers.TryGetValue(file, out var lines))
-                        foreach (var h in Matches(file, rel, lines, query, ct)) top.Offer(h);
-                    else switch (ScanFile(file, rel, query, top, ct))
+                        foreach (var h in Matches(file, rel, lines, query, ct, literal)) top.Offer(h);
+                    else switch (ScanFile(file, rel, query, top, ct, literal))
                     {
                         case Scan.TooLarge: skipped++; break;
                         case Scan.Folder: folders.Push(file); break; // a repository inside: listed by its own git
@@ -359,8 +360,8 @@ public static class FuzzySearch
 
     /// <summary>Search a whole directory recursively.</summary>
     public static SearchResult Search(string root, string query, int maxResults = 500, CancellationToken ct = default,
-        IReadOnlyDictionary<string, string[]>? buffers = null) =>
-        SearchMany(new[] { root }, query, maxResults, ct, buffers);
+        IReadOnlyDictionary<string, string[]>? buffers = null, bool literal = false) =>
+        SearchMany(new[] { root }, query, maxResults, ct, buffers, literal);
 
     private enum Scan { Done, TooLarge, Folder }
 
@@ -370,7 +371,7 @@ public static class FuzzySearch
     /// FIFOs and devices) are skipped, as are files over the size limit
     /// (TooLarge). Folder — a folder that is not a symlink, to be listed itself.
     /// </summary>
-    private static Scan ScanFile(string file, string rel, string query, TopHits top, CancellationToken ct)
+    private static Scan ScanFile(string file, string rel, string query, TopHits top, CancellationToken ct, bool literal)
     {
         try
         {
@@ -384,13 +385,13 @@ public static class FuzzySearch
             int offered = 0;
             try
             {
-                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: false), query, ct)) { offered++; top.Offer(h); }
+                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: false), query, ct, literal)) { offered++; top.Offer(h); }
             }
             catch (System.Text.DecoderFallbackException)
             {
                 // Not UTF-8: as the editor does, read every byte as one Latin-1 character.
                 top.Forget(file, offered);
-                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: true), query, ct)) top.Offer(h);
+                foreach (var h in Matches(file, rel, TextFile.ReadLines(file, latin1: true), query, ct, literal)) top.Offer(h);
             }
         }
         catch (IOException) { /* unreadable or vanished — skip it */ }
@@ -400,15 +401,21 @@ public static class FuzzySearch
 
     /// <summary>The lines that match, in document order, up to a binary-looking line (or a cancellation).</summary>
     private static IEnumerable<SearchHit> Matches(string file, string rel, IEnumerable<string> lines, string query,
-        CancellationToken ct)
+        CancellationToken ct, bool literal)
     {
         int lineNo = 0;
         foreach (var line in lines)
         {
             if ((++lineNo & 0x3FF) == 0 && ct.IsCancellationRequested) yield break;
             if (line.Contains('\0')) yield break; // binary file — stop looking further
-            int score = ScoreQuery(query, line, out int st, out int len);
-            if (score >= 0) yield return new SearchHit(file, rel, lineNo, line, score, st, len);
+            if (literal)
+                foreach (var (st, len) in LiteralSearch.InLine(line, query))
+                    yield return new SearchHit(file, rel, lineNo, line, 1000 - Math.Min(st, 100), st, len);
+            else
+            {
+                int score = ScoreQuery(query, line, out int st, out int len);
+                if (score >= 0) yield return new SearchHit(file, rel, lineNo, line, score, st, len);
+            }
         }
     }
 }

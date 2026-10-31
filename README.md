@@ -146,6 +146,7 @@ waits for vim, and without it the text is simply plain.
 | Key | Does |
 |---|---|
 | <kbd>Ctrl+F</kbd> · <kbd>Ctrl+F+F</kbd> | search selected/open file or folder · search all folders (press <kbd>Ctrl+F</kbd> twice) |
+| <kbd>Alt+R</kbd> · <kbd>Alt+D</kbd> | exact replace in the current scope · choose a folder to search/replace |
 | <kbd>Ctrl+L</kbd> | go to a line, or to `file:line` as compilers and agents print it |
 | <kbd>Ctrl+R</kbd> | rename the selected file/folder or the open file |
 | <kbd>Ctrl+G</kbd> / <kbd>Ctrl+Shift+G</kbd> | next / previous search hit |
@@ -180,9 +181,10 @@ waits for vim, and without it the text is simply plain.
 
 | Key | Does |
 |---|---|
-| <kbd>Tab</kbd> · <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>→</kbd> | cycle path completions · accept ghost suggestion |
+| <kbd>Tab</kbd> · <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>→</kbd> | cycle path completions · accept ghost suggestion; in replace, Tab switches find/replacement fields |
 | <kbd>Ctrl+U</kbd> | clear the whole input line |
-| <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Enter</kbd> | move in live results · open the hit |
+| <kbd>Alt+A</kbd> | replace all matches in the current scope, with a confirmation |
+| <kbd>↑</kbd> / <kbd>↓</kbd> · <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Enter</kbd> | move in live results · open the hit; in file replace, Enter replaces one and moves to the next |
 | <kbd>S</kbd> / <kbd>D</kbd> / <kbd>R</kbd> / <kbd>Esc</kbd> | in confirmations: save (overwrite) / don't save (delete) / take the disk version / cancel |
 
 ## Good to know
@@ -198,6 +200,11 @@ waits for vim, and without it the text is simply plain.
   <kbd>Ctrl+C</kbd> never quits (that's <kbd>Ctrl+Q</kbd>).
 - Pasting in the tree never overwrites: a taken name gets a number
   (`notes 2.txt`). <kbd>Ctrl+C</kbd> on a tree entry also copies its path.
+- Replacement is exact and case-sensitive, with every occurrence in a line covered.
+  In the open file it is one undo step and stays unsaved until <kbd>Ctrl+S</kbd>.
+  In a folder or all roots, confirmation writes unopened files and clean tabs;
+  dirty tabs change only in memory and are reported unsaved. Files changed since
+  the scan are skipped rather than overwritten.
 - Files are saved exactly as they were read — encoding (UTF-8, UTF-16,
   UTF-32, Latin-1), BOM, line endings, the final newline and tabs stay as
   they were — in one atomic rename that keeps the file's permissions and owner.

@@ -4,7 +4,7 @@ using System.Text;
 internal enum Focus { Tree, Editor }
 internal enum SearchScope { CurrentFile, SelectedFolder, AllFolders }
 internal enum UiMode { Normal, SearchInput, SearchResults, Confirm, PathInput }
-internal enum PathPurpose { AddRoot, CreateFile, CreateFolder, Rename, GoTo }
+internal enum PathPurpose { AddRoot, CreateFile, CreateFolder, Rename, GoTo, SearchFolder }
 
 internal static class Program
 {
@@ -937,16 +937,20 @@ internal sealed partial class App
     {
         if (_pendingSearch is { } p) { p.Cts.Cancel(); p.Cts.Dispose(); }
         _pendingSearch = null;
+        _pendingReplaceAll = false;
     }
 
     /// <summary>Apply a finished background scan (the pending one is always the newest).</summary>
     private bool PollSearch()
     {
         if (_pendingSearch is not { } p || !p.Task.IsCompleted) return false;
+        bool replaceAll = _pendingReplaceAll;
         _pendingSearch = null;
+        _pendingReplaceAll = false;
         p.Cts.Dispose();
         if (p.Task.Status != TaskStatus.RanToCompletion) return false;
-        ShowHits(p.Task.Result, p.Query, p.Tabs);
+        if (replaceAll) ReviewReplaceAll(p.Task.Result);
+        else ShowHits(p.Task.Result, p.Query, p.Tabs);
         return true;
     }
 
@@ -988,16 +992,16 @@ internal sealed partial class App
     }
 
     /// <summary>
-    /// Live search while typing, from two characters on: a query that only
-    /// grew refines the previous results when they were complete; anything
-    /// else is a new search.
+    /// Live search while typing: fuzzy from two characters, exact from one in
+    /// replace mode. A fuzzy query that only grew refines previous complete
+    /// results; anything else is a new search.
     /// </summary>
     private void RunLiveSearch()
     {
-        string query = _searchQuery.ToString().Trim();
+        string query = FindQuery();
         if (!Searchable(query)) { ClearSearch(); return; }
 
-        bool canRefine = !_hitsTruncated && !_hitsStale && _hitsQuery.Length >= 2
+        bool canRefine = !_replaceMode && !_hitsTruncated && !_hitsStale && _hitsQuery.Length >= 2
             && query.StartsWith(_hitsQuery, StringComparison.OrdinalIgnoreCase);
         var scope = _searchScope;
         string? target = _searchTargetPath == null ? null : Path.GetFullPath(_searchTargetPath);
@@ -1009,7 +1013,7 @@ internal sealed partial class App
             // Refining ≤500 known hits and scanning one open file are instant: stay synchronous.
             ShowHits(scope != SearchScope.CurrentFile ? new SearchResult(FuzzySearch.Refine(_hits, query), false, _hitsSkipped)
                 : canRefine ? new SearchResult(FuzzySearch.RefineInOrder(_hits, query), false)
-                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query), query,
+                : FuzzySearch.SearchLines(target!, Path.GetFileName(target!), buffer!, query, literal: _replaceMode), query,
                 canRefine ? _hitTabs : TabMarks());
             if (!canRefine) _hitsStale = false;
             return;
@@ -1024,9 +1028,9 @@ internal sealed partial class App
         var buffers = DirtyBuffers();
         var task = Task.Run(() => scope switch
         {
-            SearchScope.CurrentFile => FuzzySearch.SearchFile(target!, Path.GetFileName(target!), query, ct: ct),
-            SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers),
-            _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers),
+            SearchScope.CurrentFile => FuzzySearch.SearchFile(target!, Path.GetFileName(target!), query, ct: ct, literal: _replaceMode),
+            SearchScope.SelectedFolder => FuzzySearch.Search(target!, query, ct: ct, buffers: buffers, literal: _replaceMode),
+            _ => FuzzySearch.SearchMany(roots, query, ct: ct, buffers: buffers, literal: _replaceMode),
         });
         _pendingSearch = (task, cts, query, TabMarks());
     }

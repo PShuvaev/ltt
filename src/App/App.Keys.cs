@@ -41,8 +41,8 @@ internal sealed partial class App
         return cleaned[..end];
     }
 
-    /// <summary>A search starts at two characters (an emoji is one), spaces around the query aside.</summary>
-    private static bool Searchable(string query) => Cells.CharCount(query.AsSpan().Trim()) >= 2;
+    /// <summary>Fuzzy search starts at two characters; exact replacement also accepts one and keeps spaces.</summary>
+    private bool Searchable(string query) => _replaceMode ? query.Length > 0 : Cells.CharCount(query.AsSpan().Trim()) >= 2;
 
     private void ApplySearchScope(SearchScope scope, string? targetPath)
     {
@@ -59,6 +59,7 @@ internal sealed partial class App
             _status = "Open or select a file/folder first. Ctrl+F+F searches all folders.";
             return;
         }
+        _replaceMode = _replaceField = false;
         ApplySearchScope(target.Scope, target.Path);
         _searchQuery.Clear();
         if (_focus == Focus.Editor && _editor.HasSelection) _searchQuery.Append(NormalizeSearchSeed(_editor.SelectedText()));
@@ -119,8 +120,12 @@ internal sealed partial class App
         switch (_mode)
         {
             case UiMode.SearchInput:
-                _searchQuery.Append(oneLine.Replace('\t', ' '));
-                RunLiveSearch();
+                if (_replaceMode && _replaceField) _replaceQuery.Append(oneLine.Replace('\t', ' '));
+                else
+                {
+                    _searchQuery.Append(oneLine.Replace('\t', ' '));
+                    RunLiveSearch();
+                }
                 return;
             case UiMode.PathInput:
                 _pathInput.Append(oneLine.Replace("\0", ""));
@@ -190,6 +195,8 @@ internal sealed partial class App
             if (i < _tabs.Tabs.Count) { ActivateTab(i); _mode = UiMode.Normal; }
             return true;
         }
+        if (key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control)
+            && key.Key == ConsoleKey.R) { ToggleReplace(); return true; }
         if (!Ctrl(key)) return false;
         bool shift = key.Modifiers.HasFlag(ConsoleModifiers.Shift);
         switch (key.Key)
@@ -235,7 +242,8 @@ internal sealed partial class App
         switch (key.Key)
         {
             case ConsoleKey.Escape:
-                Cancel("Cancelled.");
+                if (_pathPurpose == PathPurpose.SearchFolder) _mode = UiMode.SearchInput;
+                else Cancel("Cancelled.");
                 return;
             case ConsoleKey.Enter:
                 switch (_pathPurpose)
@@ -245,6 +253,7 @@ internal sealed partial class App
                     case PathPurpose.CreateFolder: CreateFromInput(makeFolderRequested: true); break;
                     case PathPurpose.Rename: RenameFromInput(); break;
                     case PathPurpose.GoTo: GoToFromInput(); break;
+                    case PathPurpose.SearchFolder: SearchFolderFromInput(); break;
                 }
                 return;
             case ConsoleKey.Tab:
@@ -403,12 +412,28 @@ internal sealed partial class App
     private void HandleSearchInput(ConsoleKeyInfo key)
     {
         PollSearch(); // a scan that has just finished counts for this key (Esc, Enter)
+        if (_mode != UiMode.SearchInput) return;
+        bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control);
+        if (alt && key.Key == ConsoleKey.R) { ToggleReplace(); return; }
+        if (alt && key.Key == ConsoleKey.D) { ChooseSearchFolder(); return; }
+        if (_replaceMode && alt && key.Key == ConsoleKey.A) { StartReplaceAll(); return; }
+        if (_replaceMode && Ctrl(key) && key.Key is ConsoleKey.Z or ConsoleKey.Y)
+        {
+            bool redo = key.Key == ConsoleKey.Y || key.Modifiers.HasFlag(ConsoleModifiers.Shift);
+            if (redo && _editor.CanRedo) _editor.Redo();
+            else if (!redo && _editor.CanUndo) _editor.Undo();
+            RunLiveSearch();
+            return;
+        }
+        if (_replaceMode && _searchScope == SearchScope.CurrentFile && IsCtrlKey(key, ConsoleKey.S)) { Save(); return; }
         if (IsCtrlF(key)) { ToggleSearchScope(); return; }
+        if (_replaceMode && key.Key == ConsoleKey.Tab) { _replaceField = !_replaceField; return; }
         if (MoveHit(key.Key, homeEnd: false)) return;
 
         switch (key.Key)
         {
-            case ConsoleKey.Escape: // to the results below; a second Esc hides the panel
+            case ConsoleKey.Escape: // replacement field first, then results; a later Esc hides the panel
+                if (_replaceMode && _replaceField) { _replaceField = false; return; }
                 if (_hits.Count > 0)
                 {
                     _mode = UiMode.SearchResults;
@@ -416,17 +441,26 @@ internal sealed partial class App
                 }
                 else Cancel("Search cancelled.");
                 return;
-            case ConsoleKey.Enter: // open the current hit (the search already ran while typing)
+            case ConsoleKey.Enter:
+                if (_replaceMode && !_replaceField) { _replaceField = true; return; }
                 if (Searchable(_searchQuery.ToString()) && _hits.Count > 0)
-                    OpenHit(_hits[_hitIndex]);
+                {
+                    if (_replaceMode && _searchScope == SearchScope.CurrentFile) ReplaceCurrentHit();
+                    else OpenHit(_hits[_hitIndex]);
+                }
                 return;
         }
-        if (EditLine(_searchQuery, key)) RunLiveSearch();
+        var input = _replaceMode && _replaceField ? _replaceQuery : _searchQuery;
+        if (EditLine(input, key) && !(_replaceMode && _replaceField)) RunLiveSearch();
     }
 
     /// <summary>Keys of the focused results panel; false — not one of them (it then works as usual).</summary>
     private bool HandleSearchResults(ConsoleKeyInfo key)
     {
+        bool alt = key.Modifiers.HasFlag(ConsoleModifiers.Alt) && !key.Modifiers.HasFlag(ConsoleModifiers.Control);
+        if (alt && key.Key == ConsoleKey.R) { ToggleReplace(); return true; }
+        if (alt && key.Key == ConsoleKey.D) { ChooseSearchFolder(); return true; }
+        if (_replaceMode && alt && key.Key == ConsoleKey.A) { StartReplaceAll(); return true; }
         if (IsCtrlF(key))
         {
             ToggleSearchScope();
@@ -443,7 +477,11 @@ internal sealed partial class App
                 _status = "Search panel hidden (Ctrl+G brings it back).";
                 return true;
             case ConsoleKey.Enter:
-                if (_hits.Count > 0) OpenHit(_hits[_hitIndex]);
+                if (_hits.Count > 0)
+                {
+                    if (_replaceMode && _searchScope == SearchScope.CurrentFile) ReplaceCurrentHit();
+                    else OpenHit(_hits[_hitIndex]);
+                }
                 return true;
         }
         return false;
