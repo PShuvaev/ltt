@@ -30,11 +30,11 @@ def git_gate(ws):
 def test_ctrl_f_on_a_root_searches_its_folder(ltt, ws):
     ws.write("proj/a.txt", "needle one\n")
     ws.write("proj/sub/b.txt", "needle two\n")
-    app = ltt(ws.path("proj"), cols=120)
+    app = ltt(ws.path("proj"), cols=180)
     s = app.press("ctrl+f")
     assert s.prompt == "Search folder:    · search starts at 2 characters"
     assert s.help == ("Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens"
-                      " · Esc to results")
+                      " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (folder proj) for "needle": 1/2 ·')
     assert sorted(locations(s)) == ["a.txt:1", "sub/b.txt:1"]
@@ -54,12 +54,12 @@ def test_ctrl_f_on_a_subfolder_searches_only_inside_it(ltt, ws):
 def test_ctrl_f_on_a_file_in_the_tree_searches_that_file_without_opening_it(ltt, ws):
     ws.write("proj/a.txt", "needle in a\n")
     ws.write("proj/b.txt", "needle in b\nand another needle\n")
-    app = ltt(ws.path("proj"), cols=120)
+    app = ltt(ws.path("proj"), cols=180)
     select(app, "b.txt")
     s = app.press("ctrl+f")
     assert s.prompt == "Search file:    · search starts at 2 characters"
     assert s.help == ("Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps"
-                      " · Esc to results")
+                      " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (file b.txt) for "needle": 1/2 ·')
     assert locations(s) == ["b.txt:1", "b.txt:2"]
@@ -80,12 +80,12 @@ def test_ctrl_f_in_the_editor_searches_the_open_file(ltt, ws):
 def test_second_ctrl_f_widens_to_all_folders(ltt, ws):
     ws.write("proj/a.txt", "needle one\n")
     ws.write("proj/sub/b.txt", "needle two\n")
-    app = ltt(ws.path("proj/a.txt"), cols=120)
+    app = ltt(ws.path("proj/a.txt"), cols=180)
     app.press("ctrl+f")
     s = app.press("ctrl+f")
     assert s.prompt == "Search all folders:    · search starts at 2 characters"
     assert s.help == ("Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · Enter opens"
-                      " · Esc to results")
+                      " · Esc to results · Alt+R replace · Alt+D folder")
     s = search(app, "needle", 2)
     assert s.results_header.startswith('Search results (all folders) for "needle": 1/2 ·')
     assert sorted(locations(s)) == ["a.txt:1", "sub/b.txt:1"]

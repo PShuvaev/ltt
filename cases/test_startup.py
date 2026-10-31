@@ -7,9 +7,9 @@ import pytest
 from startup_helpers import ENTER, fresh_termios, run_plain
 
 TREE_HELP = ("↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · "
-             "Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · "
+             "Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · "
              "Ctrl+O add root · Ctrl+L go to")
-EDITOR_HELP = ("Esc to tree · Ctrl+E next change · Ctrl+F find in file · Ctrl+F+F find everywhere · Ctrl+L go to line · "
+EDITOR_HELP = ("Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · "
                "Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · "
                "Ctrl+W close tab · Ctrl+P pin tab")
 RESULTS_HELP = "↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Esc hides the panel"
@@ -320,9 +320,9 @@ def test_selection_size_shows_in_the_status_line(ltt, ws):
 
 @pytest.mark.parametrize("from_tree, scope_help", [
     (False, "Searching this file live · Ctrl+F again widens to all folders · ↑↓ pick · Enter jumps · "
-            "Esc to results"),
+            "Esc to results · Alt+R replace · Alt+D folder"),
     (True, "Searching this folder live · Ctrl+F again widens to all folders · ↑↓ pick · Enter opens · "
-           "Esc to results"),
+           "Esc to results · Alt+R replace · Alt+D folder"),
 ], ids=["from the editor", "from the tree"])
 def test_search_input_help_names_the_scope(ltt, ws, from_tree, scope_help):
     ws.write("proj/a.txt", "alpha\n")
@@ -333,7 +333,7 @@ def test_search_input_help_names_the_scope(ltt, ws, from_tree, scope_help):
     assert s.mode == "PROMPT" and s.help == scope_help
     s = app.press("ctrl+f")
     assert s.help == ("Searching all folders live · Ctrl+F again narrows to the selection · ↑↓ pick · "
-                      "Enter opens · Esc to results")
+                      "Enter opens · Esc to results · Alt+R replace · Alt+D folder")
 
 
 def test_results_mode_status_and_help(ltt, ws):

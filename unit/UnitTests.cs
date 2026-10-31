@@ -29,7 +29,7 @@ internal static class UnitTests
             ("cells", TestCells), ("screen", TestScreen), ("round-trip", TestRoundTrip),
             ("save", TestSaveSafety), ("editing", TestEditing), ("undo", TestUndo),
             ("edit vectors", TestEditVectors), ("edit walk", TestEditWalk),
-            ("disk", TestDiskChanges), ("scrolling", TestScrolling), ("search", TestSearch), ("refine", TestSearchRefine),
+            ("disk", TestDiskChanges), ("scrolling", TestScrolling), ("search", TestSearch), ("replace", TestReplace), ("refine", TestSearchRefine),
             ("git search", TestGitSearch), ("tree", TestTree), ("git tree", TestGitTree), ("sizes", TestSizes),
             ("copy/move", TestCopyMove), ("changes", TestChanges), ("diff", TestDiff), ("watcher", TestWatcher),
             ("misc", TestMisc),
@@ -954,6 +954,67 @@ internal static class UnitTests
             var t = Task.Run(() => FuzzySearch.Search(loop, "needle"));
             Check(t.Wait(5000) && t.Result.Hits.Count == 1, "search: symlinked folders are not followed — no loops, no duplicates");
         }
+    }
+
+    private static void TestReplace()
+    {
+        string tmp = TempDir("replace");
+        Check(LiteralSearch.InLine("aa A aa", "aa").Select(m => m.Start).SequenceEqual(new[] { 0, 5 }),
+            "replace: exact matches are case-sensitive and do not overlap");
+        Check(FuzzySearch.SearchLines("a", "a", new[] { "a a A a" }, "a", literal: true).Hits.Count == 3,
+            "replace: one character finds every occurrence in a line, not one per line");
+        Check(FuzzySearch.SearchLines("a", "a", new[] { "a  a" }, " ", literal: true).Hits.Count == 2,
+            "replace: spaces are meaningful literal queries");
+
+        var ed = Open(Put(tmp, "undo.txt", "foo Foo foo\nfoofoo\n"));
+        string before = Text(ed);
+        int count = ed.ReplaceAll("foo", "bar");
+        Check(count == 4 && Text(ed) == "bar Foo bar\nbarbar\n", "replace: all exact occurrences change, other case stays");
+        ed.Undo();
+        Check(Text(ed) == before && !ed.Dirty, "replace: the whole operation is one undo step and can return to clean");
+        ed.Redo();
+        Check(Text(ed) == "bar Foo bar\nbarbar\n" && ed.Dirty, "replace: redo restores the whole operation");
+        Check(!ed.ReplaceAt(0, 0, "missing", "x"), "replace: a stale location is refused");
+
+        var deletion = Open(Put(tmp, "delete.txt", "aaa\n"));
+        Check(deletion.ReplaceAll("aa", "") == 1 && deletion.LineText(0) == "a",
+            "replace: empty replacement deletes without overlapping matches");
+        var same = Open(Put(tmp, "same.txt", "foo\n"));
+        Check(same.ReplaceAll("foo", "foo") == 0 && !same.Dirty && !same.CanUndo,
+            "replace: identical text makes no undo step and does not dirty the file");
+        var many = Open(Put(tmp, "many.txt", string.Join(" ", Enumerable.Repeat("x", 601))));
+        Check(many.ReplaceAll("x", "y") == 601, "replace: more than the panel's 500 matches can change at once");
+
+        string proj = TempDir("replace-project");
+        string a = Put(proj, "a.txt", "disk foo\n");
+        string b = Put(proj, "b.txt", "foo foo\n");
+        string c = Put(proj, "c.txt", "foo\r\n");
+        var dirty = Open(a);
+        dirty.InsertText("unsaved foo\n");
+        var clean = Open(c);
+        var buffers = new Dictionary<string, string[]>(Paths.Comparer) { [a] = dirty.Lines.ToArray() };
+        var found = FuzzySearch.Search(proj, "foo", int.MaxValue - 1, buffers: buffers, literal: true);
+        var report = ProjectReplace.Apply(found.Hits, "foo", "bar", new[] { dirty, clean });
+        Check(report.FilesWritten == 2 && report.MatchesWritten == 3
+              && report.FilesUnsaved == 1 && report.MatchesUnsaved == 2 && report.Skipped.Count == 0,
+            "project replace: disk files and clean tabs are written, a dirty tab is reported unsaved");
+        Check(File.ReadAllText(a) == "disk foo\n" && Text(dirty) == "unsaved bar\ndisk bar\n",
+            "project replace: unrelated unsaved edits stay in memory and are never silently saved");
+        Check(File.ReadAllText(b) == "bar bar\n" && Text(clean) == "bar\n" && !clean.Dirty && clean.CanUndo,
+            "project replace: an unopened file is written and a clean tab keeps undo");
+
+        string bom = PutBytes(proj, "bom.txt", new byte[] { 0xEF, 0xBB, 0xBF }.Concat(Encoding.UTF8.GetBytes("foo\r\nfoo")).ToArray());
+        var bomHit = FuzzySearch.SearchFile(bom, "bom.txt", "foo", literal: true);
+        ProjectReplace.Apply(bomHit.Hits, "foo", "bar", Array.Empty<TextEditor>());
+        Check(File.ReadAllBytes(bom).SequenceEqual(new byte[] { 0xEF, 0xBB, 0xBF }.Concat(Encoding.UTF8.GetBytes("bar\r\nbar"))),
+            "project replace: BOM, CRLF and the missing final newline survive");
+
+        string conflict = Put(proj, "conflict.txt", "foo\n");
+        var oldHit = FuzzySearch.SearchFile(conflict, "conflict.txt", "foo", literal: true);
+        File.WriteAllText(conflict, "agent foo\n");
+        var refused = ProjectReplace.Apply(oldHit.Hits, "foo", "bar", Array.Empty<TextEditor>());
+        Check(refused.Skipped.Count == 1 && File.ReadAllText(conflict) == "agent foo\n",
+            "project replace: a file changed since its search is skipped, not overwritten");
     }
 
     private static void TestSearchRefine()

@@ -151,7 +151,7 @@ class Snap:
 
     @property
     def status_y(self):
-        return self.rows - 2
+        return self.rows - 3 if self.lines[self.rows - 2].startswith(" Replace with: ") else self.rows - 2
 
     @property
     def help_y(self):
@@ -165,7 +165,7 @@ class Snap:
     def results_top(self):
         """Row of the search results header, or None when the panel is hidden."""
         for y in range(2, self.status_y):
-            if self.lines[y].startswith(" Search results ("):
+            if self.lines[y].startswith((" Search results (", " Replace in ")):
                 return y
         return None
 
