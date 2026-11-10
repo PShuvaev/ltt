@@ -529,7 +529,7 @@ internal sealed partial class App
                 ? " ↑↓ pick · Enter opens/replaces in file · Alt+A replaces all · Alt+D chooses folder · Alt+R closes replace · Esc hides"
                 : $" ↑↓ PgUp/PgDn or wheel to pick · Enter/double-click opens above · Alt+E {(_exactSearch ? "fuzzy" : "exact")} · Esc hides the panel"
             : _focus == Focus.Tree
-                ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · Ctrl+O add root · Ctrl+L go to"
+                ? " ↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · Ctrl+C/X/V copy/move · Ctrl+Del/⌫ delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · Ctrl+O add root · Ctrl+L go to"
                 : " Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · Ctrl+W close tab · Ctrl+P pin tab";
         if (_paste is { } job) help = PasteProgress(job);
         else if (_picked is { } p && _focus == Focus.Tree && _mode == UiMode.Normal)

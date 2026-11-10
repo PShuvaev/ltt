@@ -164,7 +164,7 @@ waits for vim, and without it the text is simply plain.
 | <kbd>Enter</kbd> / <kbd>→</kbd> · <kbd>←</kbd> | open file (on a folder: expand) · collapse |
 | <kbd>Tab</kbd> | to the editor (<kbd>Esc</kbd> returns) |
 | <kbd>Ctrl+C</kbd> / <kbd>Ctrl+X</kbd> · <kbd>Ctrl+V</kbd> | copy / cut a file or folder · paste it into the selected folder, in any root |
-| <kbd>Ctrl+R</kbd> · <kbd>Ctrl+Delete</kbd> · <kbd>Delete</kbd> | rename · delete from disk · remove root from panel |
+| <kbd>Ctrl+R</kbd> · <kbd>Ctrl+Delete</kbd> / <kbd>Ctrl+Backspace</kbd> · <kbd>Delete</kbd> | rename · delete from disk (on a Mac <kbd>⌫</kbd> is the Delete key) · remove root from panel |
 
 ### Editor (right panel)
 

@@ -312,6 +312,9 @@ internal sealed partial class App
                 if (_editor.HasFile) { _focus = Focus.Editor; _status = "Editing. Esc returns to the tree."; }
                 else _status = "Open a file with Enter first.";
                 break;
+            case ConsoleKey.Backspace when Ctrl(key): // a Mac keyboard's Delete key is ⌫: its Ctrl+Delete
+                RequestDeleteSelected();
+                break;
             case ConsoleKey.Delete:
                 if (Ctrl(key)) RequestDeleteSelected(); // Ctrl+Delete — delete from disk (with confirmation)
                 else if (key.Modifiers == 0 && _tree.Selected is { IsRoot: true } rootNode) RemoveRootUi(rootNode);
