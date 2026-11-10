@@ -40,6 +40,25 @@ def test_ctrl_delete_on_a_folder_says_all_its_contents_go(ltt, ws):
     assert s.question == 'Delete folder with all its contents "dir" from disk forever?  D deletes · Esc cancels'
 
 
+def test_ctrl_backspace_asks_before_deleting(ltt, ws):
+    # On a Mac keyboard the ⌫ key is the one signed "delete": Ctrl+⌫ is what its
+    # owner presses for Ctrl+Delete. In the kitty protocol it arrives as CSI 127;5u.
+    app = ltt(proj(ws), cols=WIDE)
+    select(app, "dir")
+    s = app.press(b"\x1b[127;5u")
+    assert s.mode == "CONFIRM" and s.question == \
+        'Delete folder with all its contents "dir" from disk forever?  D deletes · Esc cancels'
+    s = app.press("d")
+    assert s.status == "Deleted from disk: " + ws.path("proj/dir") and not ws.exists("proj/dir")
+
+
+def test_plain_backspace_in_the_tree_deletes_nothing(ltt, ws):
+    app = ltt(proj(ws), cols=WIDE)
+    select(app, "x.txt")
+    s = app.press("backspace", draws=False)
+    assert s.mode == "TREE" and ws.exists("proj/x.txt")
+
+
 @pytest.mark.parametrize("key", ["d", "D", "y"])
 def test_d_deletes_the_file(ltt, ws, key):
     app = ltt(proj(ws), cols=WIDE)

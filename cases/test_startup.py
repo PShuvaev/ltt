@@ -7,7 +7,7 @@ import pytest
 from startup_helpers import ENTER, fresh_termios, run_plain
 
 TREE_HELP = ("↑↓ select · Enter opens · Ctrl+E next change · Ctrl+N new file · Ctrl+Shift+N folder · Ctrl+R rename · "
-             "Ctrl+C/X/V copy/move · Ctrl+Del delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · "
+             "Ctrl+C/X/V copy/move · Ctrl+Del/⌫ delete · Ctrl+F search here · Ctrl+F+F all folders · Alt+R replace · "
              "Ctrl+O add root · Ctrl+L go to")
 EDITOR_HELP = ("Esc to tree · Ctrl+E next change · Ctrl+F find · Alt+R replace · Ctrl+F+F all folders · Ctrl+L go to line · "
                "Ctrl+R rename · Shift+arrows select · Ctrl+A all · Ctrl+K delete line · Ctrl+C/X/V clipboard · Ctrl+S save · "
