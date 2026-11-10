@@ -208,6 +208,10 @@ public sealed class FileTree
     /// </summary>
     private void StartSizing(TreeNode parent, bool sync)
     {
+        // A count that replaces a queued one keeps its place: re-queued at the
+        // back, an ancestor's count could starve behind newer deep ones for
+        // as long as the tree stays busy.
+        int slot = _unfinishedSizing.FindIndex(job => job.Parent == parent);
         DropSizing(job => job.Parent == parent);
         List<(TreeNode, DateTime)>? need = null;
         foreach (var child in parent.Children)
@@ -220,11 +224,13 @@ public sealed class FileTree
             }
             else (need ??= new()).Add((child, child.WriteUtc));
         }
+        RaiseSizes(parent);
         if (need == null) return;
         var sizer = new FolderSizer(need);
         bool settled = sync && sizer.Step(SyncSizeEntryBudget, Environment.TickCount64 + SyncSizeMsBudget);
         if (sync) ApplySizer(sizer);
         if (settled) sizer.Dispose();
+        else if (slot >= 0) _unfinishedSizing.Insert(Math.Min(slot, _unfinishedSizing.Count), (parent, sizer));
         else _unfinishedSizing.Add((parent, sizer));
     }
 
@@ -235,17 +241,54 @@ public sealed class FileTree
         _unfinishedSizing.RemoveAll(job => match(job));
     }
 
-    private void ApplySizer(FolderSizer sizer)
+    /// <summary>Apply counted sizes; true when a counted folder itself had to be
+    /// raised over what is listed in it (a child's newer size disagrees with the
+    /// walk that just finished, so the folder wants counting again).</summary>
+    private bool ApplySizer(FolderSizer sizer)
     {
+        List<TreeNode>? applied = null;
         foreach (var (node, size, mtime, complete, generation) in sizer.Snapshot())
         {
             if (node.SizeGeneration != generation) continue; // counted again since
             node.Size = size;
             node.SizeExact = complete;
+            (applied ??= new()).Add(node);
             if (!complete) continue;
             if (_sizeCache.Count > 8192) _sizeCache.Clear();
             _sizeCache[node.FullPath] = (size, mtime);
         }
+        bool raised = false;
+        if (applied != null)
+        {
+            foreach (var node in applied) raised |= RaiseNode(node);
+            // Siblings share the folders above them: raise those once, not per child.
+            foreach (var parent in applied.Select(n => n.Parent).OfType<TreeNode>().Distinct())
+                RaiseSizes(parent);
+        }
+        return raised;
+    }
+
+    /// <summary>
+    /// A folder never shows less than what is already listed in it: a counted
+    /// child raises every folder above it while that folder's own recount is
+    /// still queued (or was capped), so no subfolder outgrows its parent on
+    /// screen. A raised size is an estimate until its own count lands.
+    /// </summary>
+    private void RaiseSizes(TreeNode node)
+    {
+        for (var n = node; !n.IsRoot; n = n.Parent!) RaiseNode(n);
+    }
+
+    /// <summary>Raise one folder to at least the sum of what is listed in it; true when raised.</summary>
+    private bool RaiseNode(TreeNode node)
+    {
+        if (node.IsRoot || !node.ChildrenLoaded) return false;
+        long floor = node.Children.Sum(c => c.Size);
+        if (floor <= node.Size) return false;
+        node.Size = floor;
+        node.SizeExact = false;
+        _sizeCache.Remove(node.FullPath);
+        return true;
     }
 
     internal bool HasUnfinishedSizing => _unfinishedSizing.Count > 0;
@@ -263,7 +306,7 @@ public sealed class FileTree
     internal void CompleteSizing(TreeNode parent, FolderSizer sizer)
     {
         var selected = Selected;
-        ApplySizer(sizer);
+        if (ApplySizer(sizer)) StartSizing(parent, sync: false); // raised over its walk: count this level again
         SortChildren(parent);
         RebuildVisible();
         if (selected != null) SelectNode(selected);
