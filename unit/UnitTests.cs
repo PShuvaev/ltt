@@ -1273,6 +1273,50 @@ internal static class UnitTests
         early.Sizer.Dispose();
         Check(Kid("tinyDir").Size == 9026, "sizing: a count that began earlier never overwrites a newer one");
 
+        // While recounts are in flight the shown sizes never contradict each
+        // other: a counted child raises its still-queued parent, and in a busy
+        // tree (a new batch after each count the pacer lets through) the
+        // parent's count still gets its turn instead of starving at the back.
+        string live = TempDir("size-live");
+        PutBytes(live, "a/b/blob", new byte[100]);
+        PutBytes(live, "a/other", new byte[10]);
+        var lt = new FileTree(live);
+        lt.SelectPath(Path.Combine(live, "a", "b", "blob"));
+        var la = lt.Find(Path.Combine(live, "a"))!;
+        var lb = lt.Find(Path.Combine(live, "a", "b"))!;
+        Settle(lt);
+        TreeNode? RunOneLive()
+        {
+            if (lt.TakeUnfinishedSizing() is not { } job) return null;
+            job.Sizer.Step(int.MaxValue);
+            lt.CompleteSizing(job.Parent, job.Sizer);
+            job.Sizer.Dispose();
+            return job.Parent;
+        }
+        bool consistent = true, rootCounted = false;
+        for (int i = 1; i <= 6; i++)
+        {
+            PutBytes(live, "a/b/blob", new byte[4900 + i * 100]);
+            lt.RefreshDirs(new[] { Path.Combine(live, "a", "b") });
+            consistent &= lb.Size <= la.Size;
+            if (RunOneLive() == lt.Roots[0]) rootCounted = true;
+            consistent &= lb.Size <= la.Size;
+        }
+        Settle(lt);
+        Check(consistent && rootCounted && lb is { Size: 5500, SizeExact: true } && la is { Size: 5510, SizeExact: true },
+            "sizing: a subfolder never outgrows its parent while recounts are in flight, busy tree included");
+        for (int i = 1; i <= 6; i++)
+        {
+            PutBytes(live, "a/b/blob", new byte[5500 - i * 800]);
+            lt.RefreshDirs(new[] { Path.Combine(live, "a", "b") });
+            consistent &= lb.Size <= la.Size;
+            RunOneLive();
+            consistent &= lb.Size <= la.Size;
+        }
+        Settle(lt);
+        Check(consistent && lb is { Size: 700, SizeExact: true } && la is { Size: 710, SizeExact: true },
+            "sizing: a busy tree that shrinks stays consistent and settles exact");
+
         // A folder too big for the synchronous budget is counted in the background;
         // re-reading its parent replaces the queued count instead of piling up another.
         string bulk = TempDir("size-bulk");
